@@ -31,117 +31,84 @@ use crate::{
     venues,
 };
 
-/// The config every strategy's TOML has: the standard tables, in Nautilus'
-/// names and types, and the strategy's own part `P` (see `Part`).
+/// The config in every strategy's TOML.
 ///
-/// - `[base]`: Nautilus' `StrategyConfig` as is, `P::default_base` without
-///   one, claiming the external orders of the instruments `[trade]` trades
-///   too (see `claiming`).
-/// - `[data]`: what the strategy reads (see `DataConfig`), its series
-///   those its part answers it reads (`Part::reads`), each once, and no
+/// It has the standard tables and the strategy's own part `P` at the top level. Every table and `P`
+/// deny unknown keys. `load` first refuses a config of the wrong shape or types, as serde reads it.
+/// It then refuses every violation of the rules at once (see `validate`).
+///
+/// - `[base]`: Nautilus' `StrategyConfig`. Without one, `P::default_base` applies. It also claims
+///   the external orders of the traded instruments (see `claiming`).
+/// - `[data]`, `[indicators]`, `[trade]`: see `DataConfig`, `IndicatorsConfig`, `TradeConfig`.
+/// - `[model]`: required for a strategy trading on a model (`Part::TAKES_MODEL`), taken by no
 ///   other.
-/// - `[indicators]`: the indicators its code reads, by name (see
-///   `IndicatorsConfig`), those it declares (`Part::INDICATORS`); none
-///   without one.
-/// - `[trade]`: what it trades and, of a strategy sizing its trades by
-///   risk (`Part::SIZES_BY_RISK`), how much each risks, its `risk` (see
-///   `TradeConfig`), required of such a strategy, and the pairs its equity
-///   converts through, its `conversions`, if any: keys `[trade]` takes of
-///   no other.
-/// - `[model]`: the model of a strategy trading on one
-///   (`Part::TAKES_MODEL`), whose target trades `[trade]`'s instrument (see
-///   `ModelSection`, `model`); required of such a strategy, and a key no
-///   table takes of any other.
-/// - the strategy's own fields, `P` itself, at the top level beside them:
-///   a TOML describes one strategy.
-///
-/// Every table denies unknown keys, and so does `P` at the top level.
-/// `load` refuses a config of the wrong shape or types as serde reads it,
-/// with Nautilus types' own deserializers, then every violation of the
-/// rules at once (see `validate`).
 #[derive(Debug, Clone)]
 pub struct StandardConfig<P: Part> {
     pub base: StrategyConfig,
     pub data: DataConfig,
     pub indicators: IndicatorsConfig,
     pub trade: TradeConfig,
-    /// The model, if the strategy trades on one: then always.
     pub model: Option<ModelSection>,
     pub own: P,
 }
 
-/// A strategy's part of its config: its own fields, at the top level of
-/// its TOML (`deny_unknown_fields`, so a key no table takes is refused),
-/// how many instruments it trades, the indicators it reads, whether it
-/// trades on a model, whether it sizes its trades by risk, its default
-/// `[base]`, the series it reads and its own rules. The standard tables
-/// are not its to drop or rename.
+/// A strategy's part of its config: its own fields at the top level of its TOML, and its rules.
 pub trait Part: DeserializeOwned + Debug + Clone {
-    /// How many instruments it trades: `[trade] instruments` lists as many.
+    /// The number of instruments the strategy trades, as `[trade] instruments` lists them.
     const INSTRUMENTS: usize;
-    /// The indicators its code reads, each by name and arguments
-    /// (`Declared`), a model part's features among them: `[indicators]`
-    /// configures these and no other.
+    /// The indicators the strategy's code reads, features included. `[indicators]` configures no
+    /// others.
     const INDICATORS: &'static [&'static dyn Declaration] = &[];
-    /// Whether it trades on a model (`model::ModelStrategy`): if so its
-    /// TOML has a `[model]`, it trades one instrument (`INSTRUMENTS` 1),
-    /// and it builds its features (`model::ModelPart`). None unless it
-    /// says.
+    /// Whether the strategy trades on a model (`model::ModelStrategy`).
+    ///
+    /// If so, its TOML has a `[model]`, it trades one instrument and it builds its features
+    /// (`model::ModelPart`).
     const TAKES_MODEL: bool = false;
-    /// Whether it sizes its trades by risk, at a stake of `[trade] risk`
-    /// (`StandardConfig::stake`): if so its `[trade]` has a `risk` and
-    /// may list `conversions`, and otherwise takes neither, the strategy
-    /// sizing its orders itself rather than sending `orders::Trade`s at a
-    /// stake. A part trading on a model sizes by risk, its model priced at
-    /// the reference stake. Every part does unless it says.
+    /// Whether the strategy sizes by risk at `[trade] risk` (`StandardConfig::stake`).
+    ///
+    /// If so, its `[trade]` takes `risk` and `conversions`. Otherwise it takes neither. A model
+    /// part sizes by risk, with its model priced at the reference stake.
     const SIZES_BY_RISK: bool = true;
-    /// Its `[base]` when the TOML has none: its strategy id alone, since
-    /// Nautilus tags its orders with the id's tag when `order_id_tag` is
+    /// Returns the `[base]` to use when the TOML has none.
+    ///
+    /// It sets the strategy id alone. Nautilus tags orders with the id's tag when `order_id_tag` is
     /// unset (`StrategyCore::new_checked`).
     fn default_base() -> StrategyConfig;
-    /// The series the strategy reads of `config`, those its code
-    /// subscribes to and registers indicators for: `[data] series` lists
-    /// these, each once, and no other (see `StandardConfig::validate`). The
-    /// load asks only of a config whose `[trade]` lists `INSTRUMENTS`
-    /// instruments, whose `[data]` lists each series once and whose
-    /// `[indicators]` builds every indicator of `INDICATORS`.
+    /// Returns the series the strategy reads for `config`, which `[data] series` lists.
+    ///
+    /// Asked only for a config with `INSTRUMENTS` instruments, no repeated series and every
+    /// indicator built.
     ///
     /// # Errors
     ///
-    /// Returns an error if the strategy cannot read `config`: its own
-    /// errors, each under its field, as one `ConfigError::Multiple` if
-    /// there are several.
+    /// Returns an error if the strategy cannot read `config`. With several errors, it is a
+    /// `ConfigError::Multiple` of the strategy's own errors, each under its field.
     fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>>;
-    /// Pushes onto `errors` every violation of its own rules in `config`,
-    /// each under its field: none unless it says.
+    /// Pushes every violation of the strategy's own rules in `config` onto `errors`, each under its
+    /// field.
     fn validate(_config: &StandardConfig<Self>, _errors: &mut ConfigErrorCollector) {}
 }
 
 impl<P: Part> StandardConfig<P> {
-    /// The config `toml` holds, validated.
+    /// Loads and validates the config in `toml`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the TOML is not of the config's shape or types,
-    /// serde's, or if `validate` fails, its `ConfigError`.
+    /// Returns an error if:
+    /// - The TOML does not match the config's shape or types, as serde reads it.
+    /// - `validate` fails with a `ConfigError`.
     pub fn load(toml: &str) -> anyhow::Result<Self> {
         let config: Self = toml::from_str(toml)?;
         config.validate()?;
         Ok(config)
     }
 
+    /// Validates the config.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the config violates a rule, with every violation
-    /// of the rules of `[data]` (see `DataConfig`), of `[indicators]`
-    /// (those the strategy declares, each table parsed and built by its
-    /// declaration; see `IndicatorsConfig`), of `[trade]` (as many
-    /// instruments as the strategy trades, none a futures root, a `risk` a
-    /// proper fraction; see `TradeConfig`), of a strategy trading on a
-    /// model (see `validate_model`), of the series read (see
-    /// `validate_series`) and of the strategy's own (`Part::validate`):
-    /// Nautilus' `ConfigError` of each, with its field, as one
-    /// `ConfigError::Multiple` if there are several.
+    /// Returns an error if the config violates a rule. With several violations, it is a
+    /// `ConfigError::Multiple` of every violation, each with its field.
     pub fn validate(&self) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         self.data.validate(&mut errors);
@@ -153,17 +120,10 @@ impl<P: Part> StandardConfig<P> {
         errors.into_result()
     }
 
-    /// Pushes onto `errors` the strategy's own errors reading the config
-    /// (`Part::reads`), or else each series `[data]` lists that it does not
-    /// read, under `data.series[i]`, then each it reads that `[data]` does
-    /// not list, under `data.series`, each naming the series. Nothing of a
-    /// `[data]` listing a series again, which is its violation.
+    /// Pushes onto `errors` the part's errors in reading the config.
+    ///
+    /// Otherwise pushes each series listed but not read, and each series read but not listed.
     fn validate_series(&self, errors: &mut ConfigErrorCollector) {
-        // What a strategy reads may depend on what it trades and on its
-        // indicators (a model strategy's features), and is asked of each
-        // series listed once: another count of instruments is `[trade]`'s
-        // violation, a series listed again `[data]`'s, an indicator that
-        // does not build `[indicators]`'.
         if self.trade.instruments.len() != P::INSTRUMENTS
             || self.data.repeats().next().is_some()
             || !self.indicators.builds(P::INDICATORS)
@@ -195,11 +155,6 @@ impl<P: Part> StandardConfig<P> {
         }
     }
 
-    /// Pushes onto `errors`, if the config has a model, the violations of
-    /// a strategy trading on it: the base without a strategy id, which
-    /// keys the model's store, and the model invalid for the data read and
-    /// the one instrument traded (see `ModelConfig::validate`), each under
-    /// its field of `[model]`.
     fn validate_model(&self, errors: &mut ConfigErrorCollector) {
         let Some(model) = &self.model else {
             return;
@@ -208,7 +163,7 @@ impl<P: Part> StandardConfig<P> {
             self.base.strategy_id.is_some(),
             ConfigError::missing_field("base.strategy_id"),
         );
-        // Another count of instruments is `[trade]`'s violation.
+
         if let [traded] = self.trade.instruments.as_slice() {
             errors.collect(
                 model
@@ -219,12 +174,11 @@ impl<P: Part> StandardConfig<P> {
         }
     }
 
-    /// The strategy's id, `[base] strategy_id`.
+    /// The strategy's id.
     ///
     /// # Panics
     ///
-    /// Panics if the base has none, which the rules of a strategy trading
-    /// on a model, whose id keys its models, refuse.
+    /// Panics if the base has none. A model strategy's rules refuse that.
     #[must_use]
     pub fn strategy_id(&self) -> StrategyId {
         self.base
@@ -232,14 +186,17 @@ impl<P: Part> StandardConfig<P> {
             .expect("a validated config has a strategy id")
     }
 
-    /// The model, its target trading the instrument of `[trade]` at its
-    /// risk, the reference stake, through its conversions.
+    /// Returns the model.
+    ///
+    /// Its target trades `[trade]`'s instrument at its risk, the reference stake, through its
+    /// conversions.
     ///
     /// # Panics
     ///
-    /// Panics if the config has no model, or `[trade]` does not list
-    /// exactly one instrument, which a validated config of a strategy
-    /// trading on a model has and lists, or has no risk (see `stake`).
+    /// Panics if:
+    /// - The config has no model.
+    /// - `[trade]` does not list exactly one instrument.
+    /// - The config has no risk (see `stake`).
     #[must_use]
     pub fn model(&self) -> ModelConfig {
         let (Some(model), [traded]) = (&self.model, self.trade.instruments.as_slice()) else {
@@ -250,27 +207,24 @@ impl<P: Part> StandardConfig<P> {
             .trading(traded, self.risk(), self.trade.conversions.clone())
     }
 
-    /// The config's stake: `[trade] risk`, multiple 1. A strategy stakes
-    /// a trade otherwise as a multiple of it (`Stake::times`).
+    /// Returns the config's stake, `[trade] risk` at multiple 1.
     ///
     /// # Panics
     ///
-    /// Panics if the config has no risk, which only a config of a strategy
-    /// not sizing its trades by risk (`Part::SIZES_BY_RISK`) lacks.
+    /// Panics if the config has no risk (see `Part::SIZES_BY_RISK`).
     #[must_use]
     pub fn stake(&self) -> Stake {
         Stake::new(self.risk())
     }
 
-    /// The rates the strategy's trades convert equity at into their P&L
-    /// currency: Nautilus' cached rates of the pairs of `[trade]
-    /// conversions` (`Conversions::rates`).
+    /// Returns the rates equity converts at into the P&L currency.
+    ///
+    /// These are Nautilus' cached rates for `[trade] conversions` (`Conversions::rates`).
     #[must_use]
     pub fn rates(&self) -> Rates {
         self.trade.conversions.rates()
     }
 
-    /// `[trade] risk`.
     ///
     /// # Panics
     ///
@@ -282,14 +236,11 @@ impl<P: Part> StandardConfig<P> {
         )
     }
 
-    /// What the strategy needs from data: the bars and the ticks of its
-    /// series, then the quotes of each instrument traded that no series
-    /// prices (`TradeConfig::quotes_unpriced_by`), then the series of each
-    /// pair of `[trade] conversions` its rates are read from, as its venue's
-    /// history serves them (`Conversions::series`), those not read yet: a
-    /// cTrader pair's quotes after the ticks, an IB pair's 1-minute BID and
-    /// ASK bars after the bar types. Its custom series, in order. And the
-    /// warmup.
+    /// Returns what the strategy needs from data:
+    /// - Its series.
+    /// - The quotes of traded instruments that no series prices.
+    /// - The series its conversion rates are read from.
+    /// - The warmup.
     #[must_use]
     pub fn data_requirements(&self) -> DataRequirements {
         let mut ticks: Vec<TickSeries> = self
@@ -326,31 +277,23 @@ impl<P: Part> StandardConfig<P> {
     }
 }
 
-/// `[data]`: what the strategy reads, its warmup and its session.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataConfig {
-    /// The series read, bars, ticks and custom series (see `Series`):
-    /// those the strategy's part answers it reads (`Part::reads`), each
-    /// once, and no other, custom data among them, an LSE reference series
-    /// or the catalog's own (`DataRequirements::custom`), each of a type
-    /// Nautilus holds a schema of, served by its type's row's history
-    /// source or else the catalog's (`venues::serves_custom`), under a
-    /// catalog folder no other of its type takes, a root's series taking
-    /// those of the contracts standing for it.
+    /// The series read, as the part answers (`Part::reads`).
+    ///
+    /// A custom series has a type Nautilus holds a schema for. The history source in the row for
+    /// that type serves it, or else the catalog does (`venues::serves_custom`). It sits under a
+    /// catalog folder that no other series of its type takes.
     pub series: Vec<Series>,
-    /// How far back the warmup history a live node requests at start
-    /// starts; a backtest requests none, its strategy warming on the
-    /// replay.
+    /// How far back a live node's warmup starts. A backtest requests none.
     pub warmup: SignedDuration,
-    /// The hours traded: only bars wholly inside count. Without one, as on
-    /// a market open around the clock, every bar counts.
+    /// The hours traded. Only bars wholly inside count. Without a session, every bar counts.
     #[serde(default)]
     pub session: Option<Session>,
 }
 
 impl DataConfig {
-    /// The bar types of the bars series, in order.
     pub fn bar_types(&self) -> impl Iterator<Item = BarType> + '_ {
         self.series.iter().filter_map(|series| match series {
             Series::Bars(bar_type) => Some(*bar_type),
@@ -358,7 +301,6 @@ impl DataConfig {
         })
     }
 
-    /// The custom series, each with its index, in order.
     fn custom(&self) -> impl Iterator<Item = (usize, &CustomSeries)> + '_ {
         self.series
             .iter()
@@ -369,13 +311,12 @@ impl DataConfig {
             })
     }
 
-    /// Whether a series prices `instrument_id` as Nautilus prices a market
-    /// order and the top of a simulated L1 book: its bars, its quotes or
-    /// its trades. Its depth and book deltas do not, nor does a custom
-    /// series, under its id or not, which brings no instrument: the risk
-    /// engine prices a market order from the cache's bid or ask, last
-    /// trade or external bar (`Cache::price` reads quotes and trades
-    /// alone), and an L1 book ignores deltas.
+    /// Returns whether a series prices `instrument_id`.
+    ///
+    /// Nautilus prices a market order and the top of a simulated L1 book from its bars, quotes or
+    /// trades. The risk engine prices from the cache's bid or ask, last trade or external bar
+    /// (`Cache::price` reads quotes and trades alone). An L1 book ignores deltas. So depth, deltas
+    /// and custom series do not price it.
     #[must_use]
     pub fn prices(&self, instrument_id: InstrumentId) -> bool {
         self.series.iter().any(|series| match series {
@@ -391,7 +332,6 @@ impl DataConfig {
         })
     }
 
-    /// Each listing of a series after its first, by its index.
     fn repeats(&self) -> impl Iterator<Item = (usize, &Series)> + '_ {
         self.series
             .iter()
@@ -399,33 +339,17 @@ impl DataConfig {
             .filter(|&(i, series)| self.series[..i].contains(series))
     }
 
-    /// Pushes the violations of `[data]`: no series; a series listed
-    /// again, under each listing after its first, naming it; a custom
-    /// series of a type and a catalog folder (`CustomSeries::
-    /// catalog_folder`) listed already, under `data.series[i]` naming it,
-    /// whatever its metadata, the two series stored under one folder, or
-    /// sharing a folder with one listed already through a root
-    /// (`CustomSeries::contract_folder_shared_with`: a root's and its
-    /// contract's of other metadata), so too; a custom series of a type
-    /// Nautilus holds no schema of
-    /// (`get_arrow_schema`; helix registers each type it compiles as it
-    /// starts, `venues::register_custom_data`), or one its type's history
-    /// source does not serve (`venues::serves_custom`), under
-    /// `data.series[i]`, saying why: one of a type with no row, or with no
-    /// history source, is the catalog's; a bars series not aggregated on time
-    /// (the session needs the bar's span), built from ticks but priced
-    /// MARK (Nautilus builds bars from quotes or
-    /// trades alone), on a venue other than the first bars', built from
-    /// bars beside a session (live, such bars arrive after their close, so
-    /// a session would drop its last bar there but not in a backtest),
-    /// built from internal source bars (a live warmup requests a
-    /// composite's source bars, and nothing stores internal ones), or on a
-    /// futures root of the roll calendar (`rolls::Transition`) but not
-    /// built from its trades (internal, LAST, not composite: Nautilus
-    /// builds a root's continuous bars from its contracts' trades, and
-    /// their rolls are priced from them, so other bars would never come),
-    /// these two under `data.series[i]`, naming the bar type; a
-    /// non-positive warmup; a session not opening before it closes.
+    /// Pushes the violations of `[data]`.
+    ///
+    /// They include bars that are:
+    /// - Not aggregated on time: the session needs the bar's span.
+    /// - Priced MARK from ticks: Nautilus builds bars from quotes or trades alone.
+    /// - Built from bars beside a session: live, such bars arrive after their close, so a session
+    ///   would drop its last bar there but not in a backtest.
+    /// - Built from internal source bars: a live warmup requests a composite's source bars, and
+    ///   nothing stores internal ones.
+    /// - On a futures root but not built from its trades: Nautilus builds a root's continuous bars
+    ///   from its contracts' trades, and prices their rolls from them.
     fn validate(&self, errors: &mut ConfigErrorCollector) {
         errors.check(
             !self.series.is_empty(),
@@ -437,8 +361,9 @@ impl DataConfig {
                 Some(series.to_string()),
             ));
         }
+
         for (i, custom) in self.custom() {
-            // Listed again whole: one violation, its repeat's.
+            // Listed again whole, this series is one violation, the repeat's
             if self.series[..i].contains(&self.series[i]) {
                 continue;
             }
@@ -540,9 +465,8 @@ impl DataConfig {
                     ),
                 );
             }
-            // A root rolls at any time, after the epoch too. A series'
-            // bars are internal (see `Series`): LAST and not composite
-            // is the rest of the rule.
+            // A root rolls at any time, after the epoch too, and a series' bars are internal (see
+            // `Series`), so LAST and not composite is the rest of the rule.
             let on_root = Transition::after(instrument_id, Timestamp::UNIX_EPOCH).is_some();
             errors.check(
                 !on_root || (!bar_type.is_composite() && spec.price_type == PriceType::Last),
@@ -570,27 +494,22 @@ impl DataConfig {
     }
 }
 
-/// A series the strategy reads, `{ data, instrument_id, ... }` or `{
-/// data, identifier, ... }` in `[data] series`, `data` a Nautilus data
-/// type by the name Nautilus parses (`NautilusDataType::from_str`).
+/// A series the strategy reads, in `[data] series`.
 ///
-/// - `bars`, with `bar_spec` in Nautilus' `BarSpecification` fields, are
-///   bars Nautilus builds of the instrument: from the ticks their price
-///   type names (its trades if LAST, its quotes if BID, ASK or MID), or,
-///   with `from`, from its source bars, the composite part of Nautilus'
-///   bar type (`BarType::new_composite`). `from = { step = 1, aggregation
-///   = "MINUTE", aggregation_source = "EXTERNAL" }` of a `1-HOUR` `LAST`
-///   bar spec makes `<instrument>-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`,
-///   as OKX's 1-minute candles are.
-/// - `Custom:<type name>` with an `identifier`, and `metadata` if its
-///   type's source asks for any, is a custom series, the custom data of
-///   that Nautilus data type (see `CustomSeries`), bringing no
-///   instrument; under a root's id, it rolls as the root's other series
-///   do (`CustomSeries::root`).
-/// - Any other, of an instrument, is ticks the strategy reads as they are
-///   (see `TickSeries`). Custom data is keyed by its identifier alone, an
-///   instrument's by its id: `Custom:<type name>` with an `instrument_id`
-///   is refused, pointing at the identifier.
+/// It is `{ data, instrument_id, ... }` or `{ data, identifier, ... }`. `data` is a Nautilus data
+/// type, by the name `NautilusDataType::from_str` parses.
+///
+/// - `bars`, with `bar_spec` in Nautilus' `BarSpecification` fields, are bars Nautilus builds from
+///   the ticks their price type names (trades if LAST, quotes if BID, ASK or MID). With `from`, it
+///   builds them from source bars instead, the composite part of Nautilus' bar type
+///   (`BarType::new_composite`). `from = { step = 1, aggregation = "MINUTE", aggregation_source =
+///   "EXTERNAL" }` of a `1-HOUR` `LAST` bar spec makes
+///   `<instrument>-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`, as OKX's 1-minute candles are.
+/// - `Custom:<type name>` with an `identifier`, and `metadata` if its type's source asks for any,
+///   is a custom series (see `CustomSeries`). It brings no instrument. Under a root's id it rolls
+///   as the root's other series do (`CustomSeries::root`). It is keyed by its identifier alone: an
+///   `instrument_id` is refused, pointing at the identifier.
+/// - Any other series, of an instrument, is ticks (see `TickSeries`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "SeriesFields")]
 pub enum Series {
@@ -599,9 +518,6 @@ pub enum Series {
     Custom(CustomSeries),
 }
 
-/// A series by its bar type, `bars XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`,
-/// as its ticks (see `TickSeries`), or by its data type (see
-/// `CustomSeries`).
 impl Display for Series {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -612,10 +528,44 @@ impl Display for Series {
     }
 }
 
-/// The keys of a series as the TOML has them: those of Nautilus'
-/// `DataType::try_new` beside the others for a custom series, and no
-/// other, Nautilus' own `DataType` deserializer taking a `topic`, which
-/// sets the topic the data is subscribed and published under.
+impl Series {
+    /// The quotes of `instrument_id`.
+    #[must_use]
+    pub const fn quotes(instrument_id: InstrumentId) -> Self {
+        Self::ticks(NautilusDataType::QuoteTick, instrument_id)
+    }
+
+    /// The trades of `instrument_id`.
+    #[must_use]
+    pub const fn trades(instrument_id: InstrumentId) -> Self {
+        Self::ticks(NautilusDataType::TradeTick, instrument_id)
+    }
+
+    /// The book depth snapshots of `instrument_id`.
+    #[must_use]
+    pub const fn depth(instrument_id: InstrumentId) -> Self {
+        Self::ticks(NautilusDataType::OrderBookDepth, instrument_id)
+    }
+
+    /// The book deltas of `instrument_id`.
+    #[must_use]
+    pub const fn deltas(instrument_id: InstrumentId) -> Self {
+        Self::ticks(NautilusDataType::OrderBookDelta, instrument_id)
+    }
+
+    const fn ticks(data: NautilusDataType, instrument_id: InstrumentId) -> Self {
+        Self::Ticks(TickSeries {
+            data,
+            instrument_id,
+        })
+    }
+}
+
+/// The keys of a series as the TOML has them.
+///
+/// They are the keys of Nautilus' `DataType::try_new` and of a custom series. They leave out the
+/// `topic` key of Nautilus' `DataType` deserializer, which sets the topic the data is subscribed
+/// and published under.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SeriesFields {
@@ -635,12 +585,12 @@ struct SeriesFields {
 impl TryFrom<SeriesFields> for Series {
     type Error = String;
 
-    /// A custom series needs an `identifier`, an instrument's id keying an
-    /// instrument's custom data, takes `metadata` and nothing of an
-    /// instrument, and is built as `CustomSeries::new` builds it; any
-    /// other series takes neither and needs an `instrument_id`. Bars need
-    /// a `bar_spec` and take a `from`, which Nautilus checks in
-    /// `BarType::new_composite_checked`; ticks take neither.
+    /// Builds a series from its fields.
+    ///
+    /// - A custom series needs an `identifier` and takes `metadata`. It takes no instrument.
+    /// - Any other series needs an `instrument_id` and takes neither.
+    /// - Bars need a `bar_spec` and take a `from`, which Nautilus checks
+    ///   (`BarType::new_composite_checked`).
     fn try_from(fields: SeriesFields) -> Result<Self, String> {
         let SeriesFields {
             data,
@@ -709,8 +659,6 @@ impl TryFrom<SeriesFields> for Series {
     }
 }
 
-/// The source bars of a composite bar type, a bars series' `from`: the
-/// `composite_*` arguments of Nautilus' `BarType::new_composite`.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CompositeSource {
@@ -719,36 +667,26 @@ pub(super) struct CompositeSource {
     pub aggregation_source: AggregationSource,
 }
 
-/// `[trade]`: what the strategy trades and, if it sizes its trades by risk
-/// (`Part::SIZES_BY_RISK`), how much each trade risks, and the FX pairs the
-/// equity a trade is sized from is converted through.
-/// The execution data of an instrument traded comes from it: its quotes,
-/// when no series of `[data]` prices it (`quotes_unpriced_by`); so do the
-/// pairs' quotes or bars (`Conversions::series`).
+/// The `[trade]` table.
+///
+/// It lists what the strategy trades. If the strategy sizes by risk, it also gives how much a trade
+/// risks and the FX pairs equity converts through.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeConfig {
-    /// The instruments traded, each by its id alone: as many as the
-    /// strategy trades (`Part::INSTRUMENTS`).
+    /// The instruments traded, each by its id alone.
     pub instruments: Vec<TradedInstrument>,
-    /// The fraction of equity a trade risks at the config's stake
-    /// (`StandardConfig::stake`), `"0.5%"`, if the strategy sizes its
-    /// trades by risk (`Part::SIZES_BY_RISK`): then always. Every trade it
-    /// stakes is sized from it, whatever its instrument, a model's targets
-    /// at the reference stake.
+    /// The fraction of equity a trade risks at the config's stake (`StandardConfig::stake`), such
+    /// as `"0.5%"`. Present if the strategy sizes by risk.
     pub risk: Option<Risk>,
-    /// The FX pairs the equity a trade is sized from is converted through
-    /// into its instrument's P&L currency (`StandardConfig::rates`), each
-    /// by its id, all on one venue, the traded instrument's if its
-    /// broker's account has a base currency (`Conversions::validate`);
-    /// none if left out, and none of a strategy not sizing its trades by
-    /// risk (`TradeKeys`).
+    /// The FX pairs equity converts through into the instrument's P&L currency
+    /// (`StandardConfig::rates`). They are given by id, all on one venue (`Conversions::validate`).
+    /// A strategy that does not size by risk has none.
     #[serde(default)]
     pub conversions: Conversions,
 }
 
 impl TradeConfig {
-    /// The instruments traded.
     #[must_use]
     pub fn instrument_ids(&self) -> Vec<InstrumentId> {
         self.instruments
@@ -757,9 +695,6 @@ impl TradeConfig {
             .collect()
     }
 
-    /// The pairs of `conversions` not traded, in the config's order: those
-    /// the strategy reads only to convert through. A pair it trades is
-    /// one of its instruments as well.
     #[must_use]
     pub fn untraded_pairs(&self) -> Vec<InstrumentId> {
         let traded = self.instrument_ids();
@@ -771,13 +706,15 @@ impl TradeConfig {
             .collect()
     }
 
-    /// Pushes the violations of `[trade]`, whatever the strategy: not
-    /// `count` instruments listed; an instrument a futures root of the
-    /// roll calendar (`rolls::Transition`), since an order goes to a
-    /// contract; a `risk` not a proper fraction of equity
-    /// (`Risk::is_proper`), if it has one; pairs on more than one venue,
-    /// or off the venue of an instrument traded whose broker's account has
-    /// a base currency (`Conversions::validate`).
+    /// Pushes the violations of `[trade]`.
+    ///
+    /// They are:
+    /// - Listing a number of instruments other than `count`.
+    /// - An instrument that is a futures root of the roll calendar (`rolls::Transition`), since an
+    ///   order goes to a contract.
+    /// - A `risk` that is not a proper fraction of equity (`Risk::is_proper`).
+    /// - Pairs on more than one venue, or off the venue of a traded instrument whose broker account
+    ///   has a base currency (`Conversions::validate`).
     fn validate(&self, count: usize, errors: &mut ConfigErrorCollector) {
         let listed = self.instruments.len();
         errors.check(
@@ -789,8 +726,8 @@ impl TradeConfig {
         );
         for (i, traded) in self.instruments.iter().enumerate() {
             let instrument_id = traded.instrument_id;
-            // A root rolls at any time: its first roll after the epoch
-            // names a contract of it.
+            // A root rolls at any time, so its first roll after the epoch names one of its
+            // contracts
             if let Some(roll) = Transition::after(instrument_id, Timestamp::UNIX_EPOCH) {
                 errors.push(ConfigError::invalid_value(
                     format!("trade.instruments[{i}].instrument_id"),
@@ -808,16 +745,15 @@ impl TradeConfig {
         self.conversions.validate(&self.instrument_ids(), errors);
     }
 
-    /// The quotes of each instrument traded that no series of `data`
-    /// prices (`DataConfig::prices`), in order: its prices for the
-    /// strategy's orders and their fills, and for a model harness'
-    /// decisions, whatever the strategy; a series pricing it gives them
-    /// otherwise. Without them, an instrument read only through its depth
-    /// or book deltas has its market orders denied for want of a price,
-    /// and one read only through a custom series under its id, which
-    /// brings no instrument, is not even loaded into a backtest. They are
-    /// not series of `[data]`: the strategy's data requirements add them
-    /// (`StandardConfig::data_requirements`).
+    /// Returns the quotes of each traded instrument that no series of `data` prices.
+    ///
+    /// `DataConfig::prices` decides which series price an instrument. Without these quotes:
+    /// - An instrument read only through its depth or book deltas has its market orders denied for
+    ///   want of a price.
+    /// - An instrument read only through a custom series under its id is not loaded into a
+    ///   backtest, because that series brings no instrument.
+    ///
+    /// The quotes are not `[data]` series: `StandardConfig::data_requirements` adds them.
     fn quotes_unpriced_by<'a>(
         &'a self,
         data: &'a DataConfig,
@@ -832,18 +768,16 @@ impl TradeConfig {
     }
 }
 
-/// An instrument traded, by its id alone: no size is its own, a trade
-/// being sized at a stake of `[trade] risk`, or by a strategy not sizing
-/// by risk itself. In the TOML, a `trade_size` is refused as it is read
-/// (`TradedFields`).
+/// An instrument traded, by its id alone.
+///
+/// A trade is sized at a stake of `[trade] risk`, or by the strategy itself. A `trade_size` is
+/// refused as it is read (`TradedFields`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(from = "TradedFields")]
 pub struct TradedInstrument {
     pub instrument_id: InstrumentId,
 }
 
-/// The keys of an instrument traded as the TOML has them: its id, and a
-/// `trade_size`, which no value is (`TradeSize`).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TradedFields {
@@ -861,9 +795,10 @@ impl From<TradedFields> for TradedInstrument {
     }
 }
 
-/// A size of an instrument traded, which no value is: any is refused as it
-/// is read, at its value, pointing to `[trade] risk`, so an old config is
-/// migrated knowingly rather than refused as having any unknown key.
+/// A size of an instrument traded, which no value can be.
+///
+/// Any is refused, pointing to `[trade] risk`. So an old config is migrated knowingly rather than
+/// refused as an unknown key.
 enum TradeSize {}
 
 impl<'de> Deserialize<'de> for TradeSize {
@@ -882,12 +817,10 @@ impl<'de, P: Part> Deserialize<'de> for StandardConfig<P> {
     }
 }
 
-/// Reads the top-level keys of a `StandardConfig<P>`: the standard tables,
-/// `model` among them only of a strategy trading on a model
-/// (`Part::TAKES_MODEL`) and `trade` with the keys its part takes
-/// (`TradeKeys`), then every other key into the strategy's part
-/// `P`, so its fields cannot stand for a standard table and its
-/// `deny_unknown_fields` refuses any key neither takes.
+/// Reads the top-level keys.
+///
+/// The standard tables come first, then every other key goes into `P`. So the fields of `P` cannot
+/// stand for a standard table.
 struct Keys<P>(PhantomData<P>);
 
 impl<'de, P: Part> Visitor<'de> for Keys<P> {
@@ -910,8 +843,7 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
                 "data" => data = Some(map.next_value()?),
                 "indicators" => indicators = Some(map.next_value()?),
                 "trade" => trade = Some(map.next_value_seed(TradeKeys::<P>(PhantomData))?),
-                // Of any other strategy, `model` is a key of its own, which
-                // it refuses.
+                // For any other strategy, `model` is a key of its own, which that strategy refuses
                 "model" if P::TAKES_MODEL => model = Some(map.next_value()?),
                 _ => {
                     let value = map.next_value::<toml::Value>()?;
@@ -919,8 +851,8 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
                 }
             }
         }
-        // The strategy's fields first, so a misspelt table is named as the
-        // unknown key it is rather than as the standard table it misses.
+        // The strategy's fields first, so a misspelt table is named as the unknown key, not as the
+        // table it misses.
         let own = toml::Value::Table(own)
             .try_into()
             .map_err(de::Error::custom)?;
@@ -939,14 +871,13 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
     }
 }
 
-/// `base` claiming the external orders of the instruments `trade` trades
-/// too (`external_order_instrument_ids`), each once, after those it claims
-/// already: a live node registers a strategy's claims as it adds it
-/// (`LiveNode::add_strategy`), so the orders and positions of those
-/// instruments on the account, placed by hand or before a restart, are the
-/// strategy's. No other instrument is claimed: the pairs `trade` converts
-/// through and the instruments the features read are not traded, so their
-/// orders and positions on the account are not the strategy's.
+/// Returns `base`, claiming the external orders of the traded instruments too.
+///
+/// It adds the instruments `trade` trades to `external_order_instrument_ids`. A live node registers
+/// a strategy's claims as it adds the strategy (`LiveNode::add_strategy`). So the orders and
+/// positions on the account for those instruments, placed by hand or before a restart, are the
+/// strategy's. The pairs `trade` converts through and the instruments the features read are not
+/// traded, so none is claimed.
 fn claiming(mut base: StrategyConfig, trade: &TradeConfig) -> StrategyConfig {
     let mut claimed = base
         .external_order_instrument_ids
@@ -961,12 +892,11 @@ fn claiming(mut base: StrategyConfig, trade: &TradeConfig) -> StrategyConfig {
     base
 }
 
-/// Reads `[trade]` with the keys the strategy's part `P` takes: its
-/// `risk`, required, and its `conversions`, only of a part sizing its
-/// trades by risk (`Part::SIZES_BY_RISK`); of any other, each is a key it
-/// does not take, since such a part sizes no trade from equity and so
-/// converts none (`conversions = []` lists no pair, as leaving it out
-/// does).
+/// Reads `[trade]` with the keys the part takes.
+///
+/// A part that sizes by risk (`Part::SIZES_BY_RISK`) takes `risk`, which is required, and
+/// `conversions`. Another part sizes no trade from equity, so each is a key it does not take
+/// (`conversions = []` lists no pair, as leaving it out does).
 struct TradeKeys<P>(PhantomData<P>);
 
 impl<'de, P: Part> DeserializeSeed<'de> for TradeKeys<P> {
@@ -994,8 +924,6 @@ mod tests {
 
     use super::*;
 
-    /// A pairs strategy: two instruments traded, its own field a `spread`
-    /// it requires positive.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Pairs {
@@ -1017,7 +945,6 @@ mod tests {
             }
         }
 
-        /// Every series it lists.
         fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>> {
             Ok(config.data.series.clone())
         }
@@ -1050,19 +977,15 @@ mod tests {
         risk = "0.5%"
     "#;
 
-    /// The config `toml` holds, loaded after registering the custom data
-    /// types helix compiles, as the process does at its start.
     fn load(toml: &str) -> anyhow::Result<StandardConfig<Pairs>> {
         venues::register_custom_data();
         StandardConfig::load(toml)
     }
 
-    /// The fields of the config errors of `toml`, in order.
     fn error_fields(toml: &str) -> Vec<String> {
         fields_of(&load(toml).unwrap_err())
     }
 
-    /// The config errors `err` holds, in order.
     fn errors_of(err: &anyhow::Error) -> Vec<ConfigError> {
         let err = err
             .downcast_ref::<ConfigError>()
@@ -1073,7 +996,6 @@ mod tests {
         }
     }
 
-    /// The fields of the config errors `err` holds, in order.
     fn fields_of(err: &anyhow::Error) -> Vec<String> {
         errors_of(err)
             .iter()
@@ -1090,13 +1012,10 @@ mod tests {
             .collect()
     }
 
-    /// The message of the error refusing `toml`, which is not a config
-    /// error: serde's, on the shape or the types.
     fn shape_error(toml: &str) -> String {
         shape_of(&load(toml).unwrap_err())
     }
 
-    /// The message of `err`, which is not a config error: serde's.
     fn shape_of(err: &anyhow::Error) -> String {
         assert!(err.downcast_ref::<ConfigError>().is_none(), "{err}");
         err.to_string()
@@ -1121,19 +1040,40 @@ mod tests {
             }
         );
         assert_eq!(
-            config.trade.instruments[1],
-            TradedInstrument {
-                instrument_id: InstrumentId::from("ESM24.CME"),
-            }
+            config.trade.instruments,
+            [
+                TradedInstrument {
+                    instrument_id: InstrumentId::from("ESH24.CME"),
+                },
+                TradedInstrument {
+                    instrument_id: InstrumentId::from("ESM24.CME"),
+                },
+            ]
         );
+        assert_eq!(config.trade.risk, Some("0.5%".parse().unwrap()));
         assert_eq!(config.own.spread, 3);
-        assert_eq!(config.data.session.unwrap().open.to_string(), "08:30:00");
+        let session = config.data.session.unwrap();
+        assert_eq!(
+            (session.time_zone.iana_name(), session.open, session.close),
+            (
+                Some("America/Chicago"),
+                jiff::civil::time(8, 30, 0, 0),
+                jiff::civil::time(15, 0, 0, 0)
+            )
+        );
     }
 
     #[rstest]
     fn without_a_base_the_strategys_default_base_is_used() {
         let config = load(TOML).unwrap();
         assert_eq!(config.base.strategy_id, Some(StrategyId::from("PAIRS-001")));
+        assert_eq!(
+            config.base.external_order_instrument_ids,
+            Some(vec![
+                InstrumentId::from("ESH24.CME"),
+                InstrumentId::from("ESM24.CME")
+            ])
+        );
     }
 
     #[rstest]
@@ -1146,10 +1086,9 @@ mod tests {
         assert!(!config.base.use_hyphens_in_client_order_ids);
     }
 
-    /// Nautilus derives the order id tag from the strategy id when the
-    /// base sets none (`docs/concepts/strategies.md`, "Order ID tag"): the
-    /// default base's `PAIRS-001`'s is `001`, so a strategy's default base
-    /// sets its id alone, and the load adds no tag to it.
+    /// Nautilus derives the order id tag from the strategy id when the base sets none
+    /// (`docs/concepts/strategies.md`, "Order ID tag"). `PAIRS-001`'s tag is `001`, so the default
+    /// base sets its id alone and the load adds no tag.
     #[rstest]
     fn without_a_base_no_order_id_tag_is_set() {
         let config = load(TOML).unwrap();
@@ -1157,51 +1096,55 @@ mod tests {
     }
 
     #[rstest]
-    fn without_its_own_fields_the_strategys_part_takes_its_defaults() {
-        let toml = TOML.replace("spread = 3", "");
-        assert_eq!(load(&toml).unwrap().own.spread, 1);
-    }
+    #[case::of_data(TOML, "[data]", "[data]\nsesion = 1", "sesion")]
+    #[case::of_a_series(
+        TOML,
+        "{ data = \"trades\",",
+        "{ data = \"trades\", instrument = 1,",
+        "instrument"
+    )]
+    #[case::of_an_instrument_traded(
+        TOML,
+        "{ instrument_id = \"ESM24.CME\" }",
+        "{ instrument_id = \"ESM24.CME\", size = 1 }",
+        "size"
+    )]
+    #[case::of_trade(TOML, "[trade]", "[trade]\ninstrument_id = 1", "instrument_id")]
+    #[case::of_the_strategy(TOML, "spread = 3", "spread = 3\nspred = 1", "spred")]
+    #[case::of_the_strategy_named_as_series(TOML, "spread = 3", "spread = 3\ntrades = 1", "trades")]
+    #[case::a_table(
+        TOML,
+        "risk = \"0.5%\"",
+        "risk = \"0.5%\"\n\n[indicator]\nperiod = 3",
+        "indicator"
+    )]
+    #[case::of_the_source_bars(
+        COMPOSITE_TOML,
+        "aggregation_source = ",
+        "source = 1, aggregation_source = ",
+        "source"
+    )]
+    fn an_unknown_key_in_any_table_is_refused_naming_it(
+        #[case] base: &str,
+        #[case] from: &str,
+        #[case] to: &str,
+        #[case] unknown: &str,
+    ) {
+        let toml = base.replace(from, to);
+        assert_ne!(toml, base);
 
-    #[rstest]
-    fn an_unknown_key_in_any_table_is_refused_naming_it() {
-        for (from, to, unknown) in [
-            ("[data]", "[data]\nsesion = 1", "sesion"),
-            (
-                "{ data = \"trades\",",
-                "{ data = \"trades\", instrument = 1,",
-                "instrument",
-            ),
-            (
-                "{ instrument_id = \"ESM24.CME\" }",
-                "{ instrument_id = \"ESM24.CME\", size = 1 }",
-                "size",
-            ),
-            ("[trade]", "[trade]\ninstrument_id = 1", "instrument_id"),
-            ("spread = 3", "spread = 3\nspred = 1", "spred"),
-            ("spread = 3", "spread = 3\ntrades = 1", "trades"),
-        ] {
-            let toml = TOML.replace(from, to);
-            assert_ne!(toml, TOML, "{from}");
-            let err = shape_error(&toml);
-            assert!(err.contains(&format!("`{unknown}`")), "{unknown}: {err}");
-        }
-    }
-
-    #[rstest]
-    fn an_unknown_table_is_refused_naming_it() {
-        let err = shape_error(&format!("{TOML}\n[indicator]\nperiod = 3\n"));
-        assert!(err.contains("indicator"), "{err}");
-    }
-
-    #[rstest]
-    fn a_missing_standard_table_is_refused_naming_it() {
-        let toml = TOML.replace("[trade]", "[pairs_trade]");
         let err = shape_error(&toml);
-        assert!(err.contains("pairs_trade"), "{err}");
-        let start = TOML.find("[trade]").unwrap();
-        let toml = &TOML[..start];
-        let err = shape_error(toml);
-        assert!(err.contains("trade"), "{err}");
+
+        assert!(err.contains(&format!("`{unknown}`")), "{err}");
+    }
+
+    #[rstest]
+    #[case::misspelt(TOML.replace("[trade]", "[pairs_trade]"), "`pairs_trade`")]
+    #[case::left_out(TOML[..TOML.find("[trade]").unwrap()].to_string(), "`trade`")]
+    fn a_missing_standard_table_is_refused_naming_it(#[case] toml: String, #[case] named: &str) {
+        let err = shape_error(&toml);
+
+        assert!(err.contains(named), "{err}");
     }
 
     #[rstest]
@@ -1210,9 +1153,6 @@ mod tests {
         assert_eq!(error_fields(&toml), ["trade.instruments"]);
     }
 
-    /// Every trade is sized at a stake of `[trade] risk`, whatever its
-    /// instrument: an instrument listed with a size of its own is refused
-    /// as the config is read, at that size, pointing to the risk.
     #[rstest]
     fn a_trade_size_is_refused_at_its_field_pointing_to_the_risk() {
         let toml = TOML.replace(
@@ -1229,8 +1169,6 @@ mod tests {
         assert!(err.message().contains("risk"), "{err}");
     }
 
-    /// `[trade] risk` is the fraction of equity a trade risks at the
-    /// config's stake, multiple 1.
     #[rstest]
     fn the_configs_stake_is_its_risk_alone() {
         let config = load(TOML).unwrap();
@@ -1245,29 +1183,7 @@ mod tests {
         assert!(err.contains("`risk`"), "{err}");
     }
 
-    /// A risk of none or all of equity, or beyond, is no fraction a trade
-    /// risks.
-    #[rstest]
-    fn a_risk_not_above_none_and_below_all_of_equity_is_refused() {
-        for risk in ["0%", "-0.5%", "100%", "150%"] {
-            let toml = TOML.replace("\"0.5%\"", &format!("\"{risk}\""));
-            assert_eq!(error_fields(&toml), ["trade.risk"], "{risk}");
-        }
-    }
-
-    /// A bare number could be a fraction or a percentage.
-    #[rstest]
-    fn a_risk_not_written_as_a_percentage_is_refused_saying_so() {
-        for risk in ["0.005", "\"0.005\""] {
-            let toml = TOML.replace("\"0.5%\"", risk);
-            let err = shape_error(&toml);
-            assert!(err.contains("percentage of equity"), "{risk}: {err}");
-        }
-    }
-
-    /// GC.GLBX is a root of the roll calendar: an order to it would go to
-    /// no contract. Read by a series or not, it is refused as traded,
-    /// under its field, naming it.
+    /// GC.GLBX is a root of the roll calendar, so an order to it would go to no contract.
     #[rstest]
     fn a_futures_root_traded_is_refused_naming_it() {
         let toml = TOML.replace(
@@ -1279,8 +1195,6 @@ mod tests {
         assert!(err.to_string().contains("GC.GLBX"), "{err}");
     }
 
-    /// A root traded and a risk of none of equity are each reported,
-    /// with the other violations.
     #[rstest]
     fn a_futures_root_traded_is_reported_with_the_other_violations() {
         let toml = TOML
@@ -1320,16 +1234,36 @@ mod tests {
             "{ data = \"trades\", instrument_id = \"ESH24.CME\", bar_spec = { step = 1, aggregation = \"HOUR\", price_type = \"MID\" } }",
         );
         let err = shape_error(&toml);
-        assert!(err.contains("bar_spec"), "{err}");
+        assert!(
+            err.contains("bar_spec") && err.contains("ESH24.CME"),
+            "{err}"
+        );
     }
 
     #[rstest]
-    fn a_series_of_data_not_read_is_refused_naming_it() {
-        for data in ["candles", "instruments"] {
-            let toml = TOML.replace("data = \"trades\"", &format!("data = \"{data}\""));
-            let err = shape_error(&toml);
-            assert!(err.contains(data), "{err}");
-        }
+    #[case::quotes(Series::quotes(InstrumentId::from("ESH24.CME")), "quotes")]
+    #[case::trades(Series::trades(InstrumentId::from("ESH24.CME")), "trades")]
+    #[case::depth(Series::depth(InstrumentId::from("ESH24.CME")), "order_book_depths")]
+    #[case::deltas(Series::deltas(InstrumentId::from("ESH24.CME")), "order_book_deltas")]
+    fn a_tick_series_built_in_code_is_the_one_its_entry_names(
+        #[case] built: Series,
+        #[case] data: &str,
+    ) {
+        let entry = format!("data = \"{data}\"\ninstrument_id = \"ESH24.CME\"");
+
+        assert_eq!(built, toml::from_str::<Series>(&entry).unwrap());
+    }
+
+    /// `candles` is no data type Nautilus parses. `instruments` is one, of no series read as it is.
+    #[rstest]
+    #[case::nautilus_parses_none_of_the_name("candles")]
+    #[case::not_read_as_it_is("instruments")]
+    fn a_series_of_data_not_read_is_refused_naming_it(#[case] data: &str) {
+        let toml = TOML.replace("data = \"trades\"", &format!("data = \"{data}\""));
+
+        let err = shape_error(&toml);
+
+        assert!(err.contains(data), "{err}");
     }
 
     const COMPOSITE_TOML: &str = r#"
@@ -1359,14 +1293,6 @@ mod tests {
     }
 
     #[rstest]
-    fn an_unknown_key_in_the_source_bars_is_refused_naming_it() {
-        let toml =
-            COMPOSITE_TOML.replace("aggregation_source = ", "source = 1, aggregation_source = ");
-        let err = shape_error(&toml);
-        assert!(err.contains("`source`"), "{err}");
-    }
-
-    #[rstest]
     fn a_session_is_refused_beside_bars_from_source_bars() {
         let toml = COMPOSITE_TOML.replace(
             "warmup = \"2h\"",
@@ -1375,9 +1301,6 @@ mod tests {
         assert_eq!(error_fields(&toml), ["data.session", "data.series[0].from"]);
     }
 
-    /// The warmup requests a composite's source bars, which internal ones,
-    /// built and never stored, cannot answer: refused under the series,
-    /// naming it.
     #[rstest]
     fn bars_from_internal_source_bars_are_refused_naming_them() {
         let toml = COMPOSITE_TOML.replace(
@@ -1393,8 +1316,6 @@ mod tests {
         );
     }
 
-    /// A config reading the bars of `instrument_id`, a bars series' other
-    /// keys `bars`, and trading two contracts of the GC root.
     fn gold_futures(instrument_id: &str, bars: &str) -> String {
         format!(
             r#"
@@ -1415,43 +1336,37 @@ mod tests {
     const HOUR_LAST: &str = r#"bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }"#;
     const HOUR_MID: &str = r#"bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }"#;
 
-    /// Nautilus builds the continuous bars of GC.GLBX, a root of the roll
-    /// calendar, from its contracts' trades, and their rolls are priced
-    /// from them: its LAST bars load.
+    /// Nautilus builds the continuous bars of GC.GLBX, a root, from its contracts' trades, and
+    /// prices their rolls from them. So its LAST bars load. A contract of the root is a plain
+    /// instrument, so its bars may be built from quotes.
     #[rstest]
-    fn bars_on_a_root_built_from_its_trades_load() {
-        load(&gold_futures("GC.GLBX", HOUR_LAST)).unwrap();
+    #[case::on_a_root_built_from_its_trades("GC.GLBX", HOUR_LAST)]
+    #[case::on_a_contract_built_from_its_quotes("GCZ26.GLBX", HOUR_MID)]
+    fn bars_on_a_root_built_from_its_trades_or_on_a_contract_load(
+        #[case] instrument_id: &str,
+        #[case] bars: &str,
+    ) {
+        load(&gold_futures(instrument_id, bars)).unwrap();
     }
 
-    /// Bars on a root built from its quotes or from source bars would
-    /// never come: refused under the series, naming it.
     #[rstest]
-    fn bars_on_a_root_not_built_from_its_trades_are_refused_naming_them() {
-        let from_minutes = format!(
+    #[case::from_its_quotes(HOUR_MID.to_string(), "GC.GLBX-1-HOUR-MID-INTERNAL")]
+    #[case::from_source_bars(
+        format!(
             "{HOUR_LAST}, from = {{ step = 1, aggregation = \"MINUTE\", aggregation_source = \"EXTERNAL\" }}"
-        );
-        for (bars, bar_type) in [
-            (HOUR_MID, "GC.GLBX-1-HOUR-MID-INTERNAL"),
-            (
-                from_minutes.as_str(),
-                "GC.GLBX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-            ),
-        ] {
-            let err = load(&gold_futures("GC.GLBX", bars)).unwrap_err();
-            assert_eq!(fields_of(&err), ["data.series[0]"], "{bar_type}");
-            assert!(err.to_string().contains(bar_type), "{err}");
-        }
+        ),
+        "GC.GLBX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"
+    )]
+    fn bars_on_a_root_not_built_from_its_trades_are_refused_naming_them(
+        #[case] bars: String,
+        #[case] bar_type: &str,
+    ) {
+        let err = load(&gold_futures("GC.GLBX", &bars)).unwrap_err();
+
+        assert_eq!(fields_of(&err), ["data.series[0]"]);
+        assert!(err.to_string().contains(bar_type), "{err}");
     }
 
-    /// A contract of the root is a plain instrument: its bars may be
-    /// built from its quotes.
-    #[rstest]
-    fn bars_on_a_contract_of_a_root_need_not_be_built_from_its_trades() {
-        load(&gold_futures("GCZ26.GLBX", HOUR_MID)).unwrap();
-    }
-
-    /// The bars on a root not built from its trades, and those built from
-    /// internal source bars, are reported with the other violations.
     #[rstest]
     fn the_rules_of_bars_on_a_root_and_of_source_bars_are_reported_with_the_others() {
         let toml = gold_futures("GC.GLBX", HOUR_MID)
@@ -1474,22 +1389,35 @@ mod tests {
         );
     }
 
+    /// A session needs a bar's span, and Nautilus builds bars from quotes or trades alone.
     #[rstest]
-    fn bars_not_aggregated_on_time_are_refused() {
-        let toml = TOML.replace(
-            "step = 5, aggregation = \"MINUTE\"",
-            "step = 100, aggregation = \"TICK\"",
-        );
-        assert_eq!(error_fields(&toml), ["data.series[1].bar_spec"]);
+    #[case::not_aggregated_on_time(
+        "step = 5, aggregation = \"MINUTE\"",
+        "step = 100, aggregation = \"TICK\"",
+        "data.series[1].bar_spec",
+        "100-TICK-BID"
+    )]
+    #[case::of_ticks_priced_mark(
+        "price_type = \"MID\"",
+        "price_type = \"MARK\"",
+        "data.series[0].bar_spec",
+        "1-HOUR-MARK"
+    )]
+    fn bars_not_aggregated_on_time_or_priced_mark_are_refused_naming_their_spec(
+        #[case] from: &str,
+        #[case] to: &str,
+        #[case] field: &str,
+        #[case] spec: &str,
+    ) {
+        let toml = TOML.replace(from, to);
+        assert_ne!(toml, TOML);
+
+        let err = load(&toml).unwrap_err();
+
+        assert_eq!(fields_of(&err), [field]);
+        assert!(err.to_string().contains(spec), "{err}");
     }
 
-    #[rstest]
-    fn bars_of_ticks_priced_mark_are_refused() {
-        let toml = TOML.replace("price_type = \"MID\"", "price_type = \"MARK\"");
-        assert_eq!(error_fields(&toml), ["data.series[0].bar_spec"]);
-    }
-
-    /// LAST bars without `from` are built from the instrument's trades.
     #[rstest]
     fn bars_of_ticks_priced_last_load() {
         let toml = TOML.replace("price_type = \"MID\"", "price_type = \"LAST\"");
@@ -1526,8 +1454,6 @@ mod tests {
         assert_eq!(error_fields(&toml), ["data.series"]);
     }
 
-    /// The trades of ESH24 listed three times: each listing after the first
-    /// is refused under its field, naming them, with the other violations.
     #[rstest]
     fn a_series_listed_again_is_refused_under_each_later_listing_with_the_other_violations() {
         let trades = r#"{ data = "trades", instrument_id = "ESH24.CME" },"#;
@@ -1553,8 +1479,6 @@ mod tests {
         }
     }
 
-    /// `TOML` with `entries`, the TOML of custom series, listed after its
-    /// other series.
     fn with_custom(entries: &[&str]) -> String {
         let trades = r#"{ data = "trades", instrument_id = "ESH24.CME" },"#;
         let toml = TOML.replace(
@@ -1565,11 +1489,8 @@ mod tests {
         toml
     }
 
-    /// LSE's daily 10-year US yield, under the identifier `US10Y`.
     const US10Y: &str = r#"{ data = "Custom:LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#;
 
-    /// The data type of the rows of `symbol` in LSE's daily bond yields
-    /// under `identifier`, as Nautilus builds one.
     fn bond_yields(symbol: &str, identifier: &str) -> DataType {
         let metadata = Params::new(
             [
@@ -1581,7 +1502,6 @@ mod tests {
         DataType::new("LseRow", Some(metadata), Some(identifier.to_string()))
     }
 
-    /// The data types of the custom series of `config`'s requirements.
     fn custom_of(config: &StandardConfig<Pairs>) -> Vec<DataType> {
         config
             .data_requirements()
@@ -1591,8 +1511,6 @@ mod tests {
             .collect()
     }
 
-    /// The message of the error refusing `toml`, which is serde's on the
-    /// shape or the types, without the lines of the TOML it quotes.
     fn shape_message(toml: &str) -> String {
         let err = load(toml).unwrap_err();
         err.downcast_ref::<toml::de::Error>()
@@ -1601,8 +1519,6 @@ mod tests {
             .to_string()
     }
 
-    /// The reason of the one config error of `toml`, which is under
-    /// `field` and of an invalid value.
     fn invalid_value(toml: &str, field: &str) -> String {
         let err = load(toml).unwrap_err();
         let [ConfigError::InvalidValue { field: at, reason }] = &errors_of(&err)[..] else {
@@ -1612,17 +1528,6 @@ mod tests {
         reason.clone()
     }
 
-    /// Read by the part, which reads every series listed: the config lists
-    /// it beside its other series, as the Nautilus data type its entry
-    /// gives, under the identifier it names.
-    #[rstest]
-    fn a_custom_series_loads_as_the_data_type_its_entry_gives() {
-        let config = load(&with_custom(&[US10Y])).unwrap();
-
-        assert_eq!(custom_of(&config), [bond_yields("US10Y", "US10Y")]);
-    }
-
-    /// The identifier is the config's to choose: nothing derives it.
     #[rstest]
     fn a_custom_series_is_keyed_by_the_identifier_its_entry_names() {
         let config =
@@ -1635,26 +1540,8 @@ mod tests {
         assert_eq!(custom_of(&config), [bond_yields("US10Y", "TREASURY-10Y")]);
     }
 
-    #[rstest]
-    fn a_config_with_no_custom_series_reads_none() {
-        assert_eq!(custom_of(&load(TOML).unwrap()), []);
-    }
-
-    /// Custom data is a series of `[data] series` alone.
-    #[rstest]
-    fn a_custom_table_of_data_is_refused_as_an_unknown_key() {
-        let toml = TOML.replace(
-            "warmup = \"720h\"",
-            "warmup = \"720h\"\n        custom = []",
-        );
-
-        let err = shape_message(&toml);
-
-        assert!(err.contains("`custom`"), "{err}");
-    }
-
-    /// Metadata is optional, and empty metadata is none: Nautilus' data
-    /// type of either has one topic, which keys its points in the cache.
+    /// Metadata is optional, and empty metadata is none. Nautilus' data type has one topic with
+    /// either, and the topic keys its points in the cache.
     #[rstest]
     fn a_custom_series_with_empty_metadata_is_the_one_with_none() {
         let series = |metadata: &str| {
@@ -1681,8 +1568,6 @@ mod tests {
         assert_eq!(empty.data_type().metadata(), None);
     }
 
-    /// LSE's rows need their metadata, which LSE's answer names, not the
-    /// shape of the entry.
     #[rstest]
     fn lse_s_rows_naming_no_metadata_are_refused_by_lse_s_answer_under_their_entry() {
         let toml = with_custom(&[r#"{ data = "Custom:LseRow", identifier = "US10Y" }"#]);
@@ -1692,7 +1577,6 @@ mod tests {
         assert!(reason.contains("source"), "{reason}");
     }
 
-    /// Without one, every series of its type would share one catalog path.
     #[rstest]
     fn a_custom_series_naming_no_identifier_is_refused_naming_the_key() {
         let toml = with_custom(&[&US10Y.replace(r#"identifier = "US10Y", "#, "")]);
@@ -1702,7 +1586,6 @@ mod tests {
         assert!(err.contains("identifier"), "{err}");
     }
 
-    /// A custom series is keyed by its identifier, not by an instrument.
     #[rstest]
     fn a_custom_series_naming_an_instrument_beside_its_identifier_is_refused_naming_both() {
         let toml = with_custom(&[&US10Y.replace(
@@ -1718,9 +1601,6 @@ mod tests {
         );
     }
 
-    /// Custom data has one spelling: an instrument's is keyed by its id as
-    /// an identifier, as any custom series is, so an entry naming its
-    /// instrument_id instead is refused, pointing at the identifier.
     #[rstest]
     fn a_custom_series_naming_an_instrument_in_place_of_an_identifier_is_refused_pointing_at_it() {
         let toml = with_custom(&[r#"{ data = "Custom:Imbalance", instrument_id = "ESM24.CME" }"#]);
@@ -1733,90 +1613,74 @@ mod tests {
         );
     }
 
-    /// An identifier and metadata are custom data's alone.
     #[rstest]
-    fn a_series_of_ticks_or_bars_naming_an_identifier_or_metadata_is_refused_naming_it() {
-        for (series, key) in [
-            (
-                r#"{ data = "trades", instrument_id = "ESH24.CME", identifier = "ES" }"#,
-                "identifier",
-            ),
-            (
-                r#"{ data = "quotes", instrument_id = "ESH24.CME", metadata = { a = 1 } }"#,
-                "metadata",
-            ),
-            (
-                r#"{ data = "bars", instrument_id = "ESH24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }, identifier = "ES" }"#,
-                "identifier",
-            ),
-        ] {
-            let err = shape_message(&with_custom(&[series]));
+    #[case::trades_naming_an_identifier(
+        r#"{ data = "trades", instrument_id = "ESH24.CME", identifier = "ES" }"#,
+        "identifier"
+    )]
+    #[case::quotes_naming_metadata(
+        r#"{ data = "quotes", instrument_id = "ESH24.CME", metadata = { a = 1 } }"#,
+        "metadata"
+    )]
+    #[case::bars_naming_an_identifier(
+        r#"{ data = "bars", instrument_id = "ESH24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }, identifier = "ES" }"#,
+        "identifier"
+    )]
+    fn a_series_of_ticks_or_bars_naming_an_identifier_or_metadata_is_refused_naming_it(
+        #[case] series: &str,
+        #[case] key: &str,
+    ) {
+        let err = shape_message(&with_custom(&[series]));
 
-            assert!(err.contains(key), "{series}: {err}");
-        }
+        assert!(err.contains(key), "{err}");
     }
 
-    /// The catalog stores a series under its type's folder, then its
-    /// identifier's, made URI-safe: `/` removed. An identifier left empty
-    /// so keys the folder of its type alone, as none does; a blank one
-    /// names nothing either.
+    /// The catalog stores a series under the folder for its type, then the folder for its
+    /// identifier, made URI-safe by removing `/`. An identifier left empty so keys the type's
+    /// folder alone, as none does.
     #[rstest]
-    fn a_custom_series_of_an_identifier_naming_no_catalog_folder_is_refused_naming_it() {
-        for identifier in ["", "  ", "/", "//"] {
-            let toml = with_custom(&[&US10Y.replace(
-                r#"identifier = "US10Y""#,
-                &format!(r#"identifier = "{identifier}""#),
-            )]);
-
-            let err = shape_message(&toml);
-
-            assert!(
-                err.contains(&format!("identifier {identifier:?}")),
-                "{identifier:?}: {err}"
-            );
-        }
-    }
-
-    /// Nautilus writes the series under `US/10Y`, a backslash a folder
-    /// separator there, and reads it back under `US\10Y`, keeping it: a
-    /// fill would find nothing missing and a backtest read nothing.
-    #[rstest]
-    fn a_custom_series_of_an_identifier_holding_a_backslash_is_refused_naming_it() {
-        // As TOML basic strings: a backslash is written escaped.
-        for (written, identifier) in [
-            (r"US\\10Y", r"US\10Y"),
-            (r"\\US10Y", r"\US10Y"),
-            (r"\\", r"\"),
-        ] {
-            let toml = with_custom(&[&US10Y.replace(
-                r#"identifier = "US10Y""#,
-                &format!(r#"identifier = "{written}""#),
-            )]);
-
-            let err = shape_message(&toml);
-
-            assert!(
-                err.contains("backslash") && err.contains(&format!("{identifier:?}")),
-                "{identifier}: {err}"
-            );
-        }
-    }
-
-    /// Nautilus' own `DataType` deserializer would take a `topic` and set
-    /// the data type's topic by it; an entry takes none.
-    #[rstest]
-    fn a_custom_series_with_an_unknown_key_is_refused_naming_it() {
+    #[case::empty("")]
+    #[case::blank("  ")]
+    #[case::a_slash("/")]
+    #[case::slashes("//")]
+    fn a_custom_series_of_an_identifier_naming_no_catalog_folder_is_refused_naming_it(
+        #[case] identifier: &str,
+    ) {
         let toml = with_custom(&[&US10Y.replace(
-            r#"identifier = "US10Y","#,
-            r#"identifier = "US10Y", topic = "LseRow.US10Y","#,
+            r#"identifier = "US10Y""#,
+            &format!(r#"identifier = "{identifier}""#),
         )]);
 
         let err = shape_message(&toml);
 
-        assert!(err.contains("topic"), "{err}");
+        assert!(err.contains(&format!("identifier {identifier:?}")), "{err}");
     }
 
-    /// Nautilus reserves the key for the identifier.
+    /// Nautilus writes the series under `US/10Y`, where a backslash is a folder separator, and
+    /// reads it back under `US\10Y`. A fill would find nothing missing, and a backtest would read
+    /// nothing.
+    #[rstest]
+    // These are TOML basic strings, so a backslash is written escaped
+    #[case::within(r"US\\10Y", r"US\10Y")]
+    #[case::leading(r"\\US10Y", r"\US10Y")]
+    #[case::alone(r"\\", r"\")]
+    fn a_custom_series_of_an_identifier_holding_a_backslash_is_refused_naming_it(
+        #[case] written: &str,
+        #[case] identifier: &str,
+    ) {
+        let toml = with_custom(&[&US10Y.replace(
+            r#"identifier = "US10Y""#,
+            &format!(r#"identifier = "{written}""#),
+        )]);
+
+        let err = shape_message(&toml);
+
+        assert!(
+            err.contains("backslash") && err.contains(&format!("{identifier:?}")),
+            "{err}"
+        );
+    }
+
     #[rstest]
     fn a_custom_series_naming_an_identifier_in_its_metadata_is_refused_naming_it() {
         let toml = with_custom(&[&US10Y.replace(
@@ -1826,11 +1690,9 @@ mod tests {
 
         let err = shape_message(&toml);
 
-        assert!(err.contains("reserved"), "{err}");
+        assert!(err.contains("`identifier`"), "{err}");
     }
 
-    /// Custom data of the tests' own, of a type no row of the routing
-    /// table routes, as a strategy author writes into the catalog by hand.
     #[nautilus_serialization::arrow_custom_data]
     #[nautilus_model::custom_data]
     pub struct Signal {
@@ -1839,8 +1701,6 @@ mod tests {
         pub ts_init: nautilus_core::UnixNanos,
     }
 
-    /// The catalog's, registered by the test: no source serves it, and it
-    /// loads under its identifier, with metadata or without.
     #[rstest]
     fn a_custom_series_of_a_registered_type_no_row_routes_loads_as_the_catalog_s() {
         nautilus_serialization::ensure_custom_data_registered::<Signal>();
@@ -1861,8 +1721,6 @@ mod tests {
         );
     }
 
-    /// Nautilus decodes custom data by its type's registered schema, and
-    /// has none of a type of that name: a typo of LSE's rows' type.
     #[rstest]
     fn a_custom_series_of_a_type_nautilus_has_no_registration_of_is_refused_under_its_entry_naming_it()
      {
@@ -1876,9 +1734,8 @@ mod tests {
         );
     }
 
-    /// Nautilus' Databento adapter is compiled in, its imbalances and
-    /// statistics with it, so helix registers both: no row routes them,
-    /// so each is the catalog's.
+    /// Nautilus' Databento adapter is compiled in, so helix registers its imbalances and
+    /// statistics. No row routes them, so each is the catalog's.
     #[rstest]
     fn databento_s_custom_series_load_as_the_catalog_s() {
         let toml = with_custom(&[
@@ -1897,17 +1754,6 @@ mod tests {
         );
     }
 
-    /// LSE's client asks LSE for a source's symbol.
-    #[rstest]
-    fn lse_s_rows_naming_no_symbol_are_refused_under_their_entry_naming_it() {
-        let toml = with_custom(&[&US10Y.replace(r#", symbol = "US10Y""#, "")]);
-
-        let reason = invalid_value(&toml, "data.series[3]");
-
-        assert!(reason.contains("symbol"), "{reason}");
-    }
-
-    /// The 10-year and the 2-year US yields, each under its own identifier.
     #[rstest]
     fn custom_series_of_one_type_under_identifiers_of_their_own_load() {
         let us02y = US10Y.replace("US10Y", "US02Y");
@@ -1920,8 +1766,6 @@ mod tests {
         );
     }
 
-    /// The 2-year yield under the 10-year's identifier: both would be
-    /// stored under one catalog path, whatever their metadata.
     #[rstest]
     fn a_custom_series_of_a_type_under_an_identifier_listed_again_is_refused_under_its_later_listing_naming_it()
      {
@@ -1944,58 +1788,71 @@ mod tests {
         );
     }
 
-    /// `US/10Y` is stored under `US10Y`'s folder, and `US^10Y` under
-    /// `US_10Y`'s: Nautilus removes `/` and makes `^` `_`.
+    /// Nautilus removes `/` and makes `^` `_`.
     #[rstest]
-    fn a_custom_series_of_an_identifier_stored_under_the_folder_of_one_listed_already_is_refused_under_its_later_listing()
-     {
-        for (listed, again) in [("US10Y", "US/10Y"), ("US_10Y", "US^10Y")] {
-            let keyed = |identifier: &str| {
-                US10Y.replace(
-                    r#"identifier = "US10Y""#,
-                    &format!(r#"identifier = "{identifier}""#),
-                )
-            };
-            let toml = with_custom(&[&keyed(listed), &keyed(again)]);
+    #[case::a_slash_removed("US10Y", "US/10Y")]
+    #[case::a_caret_made_an_underscore("US_10Y", "US^10Y")]
+    fn a_custom_series_of_an_identifier_stored_under_the_folder_of_one_listed_already_is_refused_under_its_later_listing(
+        #[case] listed: &str,
+        #[case] again: &str,
+    ) {
+        let keyed = |identifier: &str| {
+            US10Y.replace(
+                r#"identifier = "US10Y""#,
+                &format!(r#"identifier = "{identifier}""#),
+            )
+        };
+        let toml = with_custom(&[&keyed(listed), &keyed(again)]);
 
-            assert_eq!(error_fields(&toml), ["data.series[4]"], "{again}");
-        }
+        let err = load(&toml).unwrap_err();
+
+        assert_eq!(fields_of(&err), ["data.series[4]"]);
+        let [
+            ConfigError::Duplicate {
+                value: Some(value), ..
+            },
+        ] = &errors_of(&err)[..]
+        else {
+            panic!("not a duplicate naming the folder: {err:?}");
+        };
+        assert!(
+            value.contains(&format!("folder {listed} ")) && value.contains("data.series[3]"),
+            "{value}"
+        );
     }
 
-    /// GC.GLBX's series is stored on GCZ26.GLBX under GCZ26.GLBX's folder
-    /// while GCZ26 stands for the root, as the series of GCZ26.GLBX listed
-    /// beside it of other metadata is, whichever comes first.
+    const GC_SIGNALS: &str =
+        r#"{ data = "Custom:Signal", identifier = "GC.GLBX", metadata = { window = "5m" } }"#;
+    const GCZ26_SIGNALS: &str = r#"{ data = "Custom:Signal", identifier = "GCZ26.GLBX" }"#;
+
     #[rstest]
-    fn a_root_s_custom_series_and_its_contract_s_of_other_metadata_are_refused_under_the_later_naming_both()
-     {
+    #[case::the_root_s_first([GC_SIGNALS, GCZ26_SIGNALS])]
+    #[case::the_contract_s_first([GCZ26_SIGNALS, GC_SIGNALS])]
+    fn a_root_s_custom_series_and_its_contract_s_of_other_metadata_are_refused_under_the_later_naming_both(
+        #[case] entries: [&str; 2],
+    ) {
         nautilus_serialization::ensure_custom_data_registered::<Signal>();
-        let root =
-            r#"{ data = "Custom:Signal", identifier = "GC.GLBX", metadata = { window = "5m" } }"#;
-        let contract = r#"{ data = "Custom:Signal", identifier = "GCZ26.GLBX" }"#;
-        for entries in [[root, contract], [contract, root]] {
-            let err = load(&with_custom(&entries)).unwrap_err();
 
-            assert_eq!(fields_of(&err), ["data.series[4]"], "{entries:?}");
-            let [
-                ConfigError::Duplicate {
-                    value: Some(value), ..
-                },
-            ] = &errors_of(&err)[..]
-            else {
-                panic!("not a duplicate naming the series: {err:?}");
-            };
-            assert!(
-                value.contains("data.series[3]")
-                    && value.contains("identifier=GC.GLBX")
-                    && value.contains("identifier=GCZ26.GLBX"),
-                "{value}"
-            );
-        }
+        let err = load(&with_custom(&entries)).unwrap_err();
+
+        assert_eq!(fields_of(&err), ["data.series[4]"]);
+        let [
+            ConfigError::Duplicate {
+                value: Some(value), ..
+            },
+        ] = &errors_of(&err)[..]
+        else {
+            panic!("not a duplicate naming the series: {err:?}");
+        };
+        assert!(
+            value.contains("data.series[3]")
+                && value.contains("identifier=GC.GLBX")
+                && value.contains("identifier=GCZ26.GLBX"),
+            "{value}"
+        );
     }
 
-    /// GCZ26.GLBX's series of the root's metadata is the root's on GCZ26,
-    /// read once; GCV26 is no contract GC rolls through, so its folder is
-    /// its own whatever its metadata.
+    /// GCV26 is no contract GC rolls through, so its folder is its own.
     #[rstest]
     fn a_contract_s_custom_series_beside_its_root_s_loads_if_it_is_the_root_s_on_it_or_one_it_never_rolls_through()
      {
@@ -2008,7 +1865,6 @@ mod tests {
         load(&with_custom(&[root, on_it, unrolled])).unwrap();
     }
 
-    /// The same series twice is a series listed again, refused once.
     #[rstest]
     fn a_custom_series_listed_again_is_refused_once_under_its_later_listing() {
         let err = load(&with_custom(&[US10Y, US10Y])).unwrap_err();
@@ -2028,8 +1884,6 @@ mod tests {
         assert_eq!(error_fields(&toml), ["data.session"]);
     }
 
-    /// A strategy trading on no model has no `[model]`: it is a key no
-    /// table takes.
     #[rstest]
     fn a_strategy_taking_no_model_refuses_a_model_table() {
         let toml = format!("{TOML}\n[model]\nretrain = \"24h\"\n");
@@ -2037,16 +1891,12 @@ mod tests {
         assert!(err.contains("`model`"), "{err}");
     }
 
-    /// Its id keys no model store: a base without one loads.
     #[rstest]
     fn a_strategy_taking_no_model_needs_no_strategy_id() {
         let config = load(&format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")).unwrap();
         assert_eq!(config.base.strategy_id, None);
     }
 
-    /// Execution needs the prices of what is traded, model or not: an
-    /// instrument traded that no series prices adds its quotes, after the
-    /// series' ticks; the series stay as listed.
     #[rstest]
     fn a_traded_instrument_no_series_reads_loads_its_quotes_into_the_requirements() {
         let toml = TOML.replace(
@@ -2070,38 +1920,34 @@ mod tests {
         assert_eq!(config.data.series.len(), 3);
     }
 
-    /// Depth and book deltas of an instrument traded give Nautilus no
-    /// price of it for a market order, and deltas move no L1 book: an
-    /// instrument traded that only they read adds its quotes, after the
-    /// series' ticks.
+    /// Depth and book deltas give Nautilus no price for a market order, and deltas move no L1 book.
     #[rstest]
-    fn a_traded_instrument_read_only_through_depth_or_deltas_loads_its_quotes() {
-        for data in ["order_book_depths", "order_book_deltas"] {
-            let toml = TOML.replace(
-                r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 5, aggregation = "MINUTE", price_type = "BID" } },"#,
-                &format!(r#"{{ data = "{data}", instrument_id = "ESM24.CME" }},"#),
-            );
-            let config = load(&toml).unwrap();
-            let es = |data: &str, instrument_id: &str| TickSeries {
-                data: NautilusDataType::from_str(data).unwrap(),
-                instrument_id: InstrumentId::from(instrument_id),
-            };
-            assert_eq!(
-                config.data_requirements().ticks,
-                [
-                    es(data, "ESM24.CME"),
-                    es("trades", "ESH24.CME"),
-                    es("quotes", "ESM24.CME"),
-                ],
-                "{data}"
-            );
-        }
+    #[case::depth("order_book_depths")]
+    #[case::deltas("order_book_deltas")]
+    fn a_traded_instrument_read_only_through_depth_or_deltas_loads_its_quotes(#[case] data: &str) {
+        let toml = TOML.replace(
+            r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 5, aggregation = "MINUTE", price_type = "BID" } },"#,
+            &format!(r#"{{ data = "{data}", instrument_id = "ESM24.CME" }},"#),
+        );
+
+        let config = load(&toml).unwrap();
+
+        let es = |data: &str, instrument_id: &str| TickSeries {
+            data: NautilusDataType::from_str(data).unwrap(),
+            instrument_id: InstrumentId::from(instrument_id),
+        };
+        assert_eq!(
+            config.data_requirements().ticks,
+            [
+                es(data, "ESM24.CME"),
+                es("trades", "ESH24.CME"),
+                es("quotes", "ESM24.CME"),
+            ]
+        );
     }
 
-    /// A custom series under an instrument traded's id, its custom data,
-    /// gives Nautilus no price of it either, and brings no instrument: an
-    /// instrument traded that only it reads adds its quotes, after the
-    /// series' ticks.
+    /// A custom series under a traded instrument's id gives Nautilus no price and brings no
+    /// instrument.
     #[rstest]
     fn a_traded_instrument_read_only_through_a_custom_series_under_its_id_loads_its_quotes() {
         nautilus_serialization::ensure_custom_data_registered::<Signal>();
@@ -2129,20 +1975,6 @@ mod tests {
         );
     }
 
-    /// Each instrument traded is read by a series, its bars or its
-    /// trades: no quotes are added.
-    #[rstest]
-    fn a_traded_instrument_a_series_reads_adds_no_quotes() {
-        assert_eq!(
-            load(TOML).unwrap().data_requirements().ticks,
-            [TickSeries {
-                data: NautilusDataType::TradeTick,
-                instrument_id: InstrumentId::from("ESH24.CME"),
-            }]
-        );
-    }
-
-    /// `TOML` converting through `pairs`, its `[trade] conversions`.
     fn converting(pairs: &str) -> String {
         let toml = TOML.replace(
             "risk = \"0.5%\"",
@@ -2152,25 +1984,6 @@ mod tests {
         toml
     }
 
-    /// A config lists the FX pairs it converts through as their ids, in
-    /// order; one without lists none.
-    #[rstest]
-    fn the_conversions_are_the_pairs_listed_and_none_without() {
-        let config = load(&converting(r#"["EURUSD.ICMARKETS", "USDJPY.ICMARKETS"]"#)).unwrap();
-
-        assert_eq!(
-            config.trade.conversions.pairs(),
-            [
-                InstrumentId::from("EURUSD.ICMARKETS"),
-                InstrumentId::from("USDJPY.ICMARKETS"),
-            ]
-        );
-        assert_eq!(load(TOML).unwrap().trade.conversions.pairs(), []);
-    }
-
-    /// Their rates come from data: each pair's quotes are read, after the
-    /// series' ticks, so that a backtest replays them and fill-catalog
-    /// fills them; the series stay as listed.
     #[rstest]
     fn the_pairs_converted_through_load_their_quotes_into_the_requirements() {
         let config = load(&converting(r#"["EURUSD.ICMARKETS", "USDJPY.ICMARKETS"]"#)).unwrap();
@@ -2193,7 +2006,6 @@ mod tests {
         assert_eq!(config.data.series.len(), 3);
     }
 
-    /// A pair whose quotes a series already reads is read once.
     #[rstest]
     fn a_pair_whose_quotes_a_series_reads_is_read_once() {
         let toml = converting(r#"["EURUSD.ICMARKETS"]"#).replace(
@@ -2210,10 +2022,8 @@ mod tests {
         );
     }
 
-    /// IB's history serves an FX pair as its 1-minute BID and ASK bars,
-    /// no quotes, which Nautilus' rates read when a pair has no quotes: an
-    /// IDEALPRO pair loads its bars, after the series' bar types, and no
-    /// ticks; the series stay as listed.
+    /// IB's history serves an FX pair as 1-minute BID and ASK bars, not quotes. Nautilus' rates
+    /// read those bars when a pair has no quotes.
     #[rstest]
     fn an_ib_pair_converted_through_loads_its_bid_and_ask_minute_bars_into_the_requirements() {
         let config = load(&converting(r#"["EUR/USD.IDEALPRO"]"#)).unwrap();
@@ -2238,9 +2048,8 @@ mod tests {
         assert_eq!(config.data.series.len(), 3);
     }
 
-    /// OKX's history serves no pair's BID and ASK bars, its candles being of
-    /// trades, and no quotes, so no rate of an OKX pair could be read: it
-    /// is refused under its field, naming the pair and its venue.
+    /// OKX's history serves no pair's BID and ASK bars, because its candles are of trades, and
+    /// serves no quotes. So no rate of an OKX pair could be read.
     #[rstest]
     fn a_pair_whose_venue_serves_neither_its_bars_nor_its_quotes_is_refused_naming_both() {
         let err = load(&converting(r#"["USDC-USDT.OKX"]"#)).unwrap_err();
@@ -2254,8 +2063,6 @@ mod tests {
         );
     }
 
-    /// A strategy's rates are Nautilus' on one venue: pairs on two are
-    /// refused under the conversions, naming both venues.
     #[rstest]
     fn pairs_on_more_than_one_venue_are_refused_naming_the_venues() {
         let err = load(&converting(r#"["EURUSD.ICMARKETS", "EUR/USD.IDEALPRO"]"#)).unwrap_err();
@@ -2269,8 +2076,6 @@ mod tests {
         );
     }
 
-    /// `TOML` trading IC Markets' gold in place of ESM24.CME, converting
-    /// through `pairs`.
     fn trading_gold_converting(pairs: &str) -> String {
         let toml = converting(pairs).replace(
             "{ instrument_id = \"ESM24.CME\" }",
@@ -2280,10 +2085,8 @@ mod tests {
         toml
     }
 
-    /// An IC Markets account has a base currency, which Nautilus converts
-    /// its margins, commissions and P&L into only through rates on the
-    /// traded instrument's venue: an IDEALPRO pair is refused for the gold
-    /// IC trades, under its field, naming the pair and the gold.
+    /// An IC Markets account has a base currency. Nautilus converts its margins, commissions and
+    /// P&L into it only through rates on the traded instrument's venue.
     #[rstest]
     fn a_pair_off_the_venue_of_an_instrument_whose_account_has_a_base_currency_is_refused() {
         let err = load(&trading_gold_converting(r#"["EUR/USD.IDEALPRO"]"#)).unwrap_err();
@@ -2297,31 +2100,22 @@ mod tests {
         );
     }
 
-    /// IC's own pair is on the gold's venue.
+    /// IB's account, as helix configures it, has no base currency, so only the sizer converts, at
+    /// the pairs' venue.
     #[rstest]
-    fn a_pair_on_the_venue_of_an_instrument_whose_account_has_a_base_currency_is_taken() {
-        let config = load(&trading_gold_converting(r#"["EURUSD.ICMARKETS"]"#)).unwrap();
+    #[case::of_ib_for_futures_on_cme(converting(r#"["EUR/USD.IDEALPRO"]"#), "EUR/USD.IDEALPRO")]
+    #[case::of_ic_for_futures_on_cme(converting(r#"["EURUSD.ICMARKETS"]"#), "EURUSD.ICMARKETS")]
+    #[case::of_ic_for_ic_s_gold(
+        trading_gold_converting(r#"["EURUSD.ICMARKETS"]"#),
+        "EURUSD.ICMARKETS"
+    )]
+    fn a_pair_is_taken_of_any_venue_for_an_account_of_no_base_currency_and_of_its_own_for_one_of_a_base_currency(
+        #[case] toml: String,
+        #[case] pair: &str,
+    ) {
+        let config = load(&toml).unwrap();
 
-        assert_eq!(
-            config.trade.conversions.pairs(),
-            [InstrumentId::from("EURUSD.ICMARKETS")]
-        );
-    }
-
-    /// IB's account, as helix configures it, has no base currency, so only
-    /// the sizer converts, at the pairs' venue: for the futures IB trades,
-    /// on CME, a pair of any one venue is taken.
-    #[rstest]
-    fn a_pair_of_any_venue_is_taken_for_instruments_whose_account_has_no_base_currency() {
-        for pair in ["EUR/USD.IDEALPRO", "EURUSD.ICMARKETS"] {
-            let config = load(&converting(&format!(r#"["{pair}"]"#))).unwrap();
-
-            assert_eq!(
-                config.trade.conversions.pairs(),
-                [InstrumentId::from(pair)],
-                "{pair}"
-            );
-        }
+        assert_eq!(config.trade.conversions.pairs(), [InstrumentId::from(pair)]);
     }
 
     #[rstest]
@@ -2350,16 +2144,11 @@ mod tests {
         );
     }
 
-    /// A strategy that does not size its trades by risk, holding a target
-    /// exposure say, which sizes its orders itself: its `[trade]` has no
-    /// risk.
     mod sizing_itself {
         use rstest::rstest;
 
         use super::*;
 
-        /// A rebalancer: one instrument, no fields of its own, its orders
-        /// sized by itself.
         #[derive(Debug, Clone, Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Rebalancer {}
@@ -2375,7 +2164,6 @@ mod tests {
                 }
             }
 
-            /// Every series it lists.
             fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>> {
                 Ok(config.data.series.clone())
             }
@@ -2403,41 +2191,31 @@ mod tests {
                 config.trade.instrument_ids(),
                 [InstrumentId::from("SPY.XNAS")]
             );
+            assert_eq!(config.trade.risk, None);
+            assert_eq!(config.trade.conversions.pairs(), []);
         }
 
-        /// A risk it would never read is refused, not ignored, as a key its
-        /// `[trade]` does not take.
         #[rstest]
-        fn a_strategy_not_sizing_by_risk_refuses_a_risk_as_an_unknown_key() {
+        #[case::a_risk("risk = \"0.5%\"", "risk")]
+        #[case::conversions("conversions = [\"EUR/USD.IDEALPRO\"]", "conversions")]
+        fn a_strategy_not_sizing_by_risk_refuses_a_risk_or_conversions_as_an_unknown_key(
+            #[case] line: &str,
+            #[case] key: &str,
+        ) {
             let toml = TOML.replace(
                 r#"instruments = [{ instrument_id = "SPY.XNAS" }]"#,
-                "instruments = [{ instrument_id = \"SPY.XNAS\" }]\nrisk = \"0.5%\"",
+                &format!("instruments = [{{ instrument_id = \"SPY.XNAS\" }}]\n{line}"),
             );
             assert_ne!(toml, TOML);
-            let err = shape_of(&load(&toml).unwrap_err());
-            assert!(err.contains("unknown") && err.contains("`risk`"), "{err}");
-        }
 
-        /// It sizes no trade from equity, so it converts none: pairs it
-        /// would never read are refused, not ignored, as a key its
-        /// `[trade]` does not take.
-        #[rstest]
-        fn a_strategy_not_sizing_by_risk_refuses_conversions_as_an_unknown_key() {
-            let toml = TOML.replace(
-                r#"instruments = [{ instrument_id = "SPY.XNAS" }]"#,
-                "instruments = [{ instrument_id = \"SPY.XNAS\" }]\nconversions = \
-                 [\"EUR/USD.IDEALPRO\"]",
-            );
-            assert_ne!(toml, TOML);
             let err = shape_of(&load(&toml).unwrap_err());
+
             assert!(
-                err.contains("unknown") && err.contains("`conversions`"),
+                err.contains("unknown") && err.contains(&format!("`{key}`")),
                 "{err}"
             );
         }
 
-        /// It has no stake to ask for: asking is the code's mistake, which
-        /// a config of such a strategy cannot satisfy.
         #[rstest]
         #[should_panic(expected = "does not size its trades by risk")]
         fn a_strategy_not_sizing_by_risk_has_no_stake() {
@@ -2445,9 +2223,6 @@ mod tests {
         }
     }
 
-    /// The rules of a strategy trading on a model, the shared config's:
-    /// its `[model]`, its strategy id; and the quotes of what it trades,
-    /// which its harness reads.
     mod model {
         use nautilus_indicators::average::MovingAverageType;
         use rstest::rstest;
@@ -2459,11 +2234,9 @@ mod tests {
                 learner::LearnerConfig,
                 targets::{BracketSpec, Distance, Target},
             },
-            strategy::{AtrArgs, risk::R},
+            strategy::AtrArgs,
         };
 
-        /// A strategy trading on a model: one instrument, no fields of its
-        /// own.
         #[derive(Debug, Clone, Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Modeled {}
@@ -2479,8 +2252,6 @@ mod tests {
                 }
             }
 
-            /// Every series it lists: the harness' answer is tested with
-            /// the harness (`model::reads`).
             fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>> {
                 Ok(config.data.series.clone())
             }
@@ -2503,10 +2274,9 @@ mod tests {
             target = { limit = "30m", atr = { period = 1 } }
             retrain = "24h"
             window = "48h"
-            holdout = "12h"
+            calibration = "12h"
             margins = { long = "0.5R", short = "0.5R" }
-            min_expectancy = "0.5R"
-            min_trades = 30
+            min_rows = 30
             learner = { kind = "baseline" }
         "#;
 
@@ -2514,33 +2284,15 @@ mod tests {
             StandardConfig::load(toml)
         }
 
-        /// The fields of the config errors refusing `toml`, in order.
         fn error_fields(toml: &str) -> Vec<String> {
             fields_of(&load(toml).unwrap_err())
         }
 
-        /// The message of the error refusing `toml`, serde's on its shape.
         fn shape_error(toml: &str) -> String {
             shape_of(&load(toml).unwrap_err())
         }
 
-        /// The reason of the one config error refusing `toml`, under a
-        /// field of `[model]`.
-        fn model_refusal(toml: &str) -> String {
-            let err = load(toml).unwrap_err();
-            match err.downcast_ref::<ConfigError>() {
-                Some(ConfigError::InvalidValue { field, reason })
-                    if field.starts_with("model.") =>
-                {
-                    reason.clone()
-                }
-                _ => panic!("not refused under model: {err}"),
-            }
-        }
-
-        /// `TOML` on a bracket 2 ATRs out and 1.5 ATRs against, closed
-        /// after 45 minutes, its ATR `atr`, as the `target` line has it,
-        /// warmed up over the 3 hourly bars an ATR of 3 bars needs.
+        /// Returns `TOML` with its ATR set to `atr`.
         fn with_atr(atr: &str) -> String {
             TOML.replace(r#"warmup = "1h""#, r#"warmup = "3h""#).replace(
                 r#"target = { limit = "30m", atr = { period = 1 } }"#,
@@ -2550,9 +2302,9 @@ mod tests {
             )
         }
 
-        /// A pair no rate of which can be read, an OKX pair, is refused under
-        /// its field, once, as a strategy trading on no model refuses it,
-        /// the model's rules reading the requirements it is left out of.
+        /// An OKX pair, no rate of which can be read, is refused once, as a strategy trading on no
+        /// model refuses it. It is also off the venue of the gold traded, whose IC account has a
+        /// base currency, so it is refused once for that too.
         #[rstest]
         fn a_pair_whose_venue_serves_neither_its_bars_nor_its_quotes_is_refused_once() {
             let toml = TOML.replace(
@@ -2562,15 +2314,21 @@ mod tests {
 
             let err = load(&toml).unwrap_err();
 
-            assert!(
-                fields_of(&err).contains(&"trade.conversions[0]".to_string()),
-                "{err}"
-            );
-            let err = err.to_string();
             assert_eq!(
-                err.matches("no rate of USDC-USDT.OKX can be read").count(),
-                1,
-                "{err}"
+                fields_of(&err),
+                ["trade.conversions[0]", "trade.conversions[0]"]
+            );
+            let [no_rate, off_venue] = &errors_of(&err)[..] else {
+                panic!("not two refusals: {err:?}");
+            };
+            let (no_rate, off_venue) = (no_rate.to_string(), off_venue.to_string());
+            assert!(
+                no_rate.contains("USDC-USDT.OKX") && no_rate.contains("OKX's history"),
+                "{no_rate}"
+            );
+            assert!(
+                off_venue.contains("USDC-USDT.OKX") && off_venue.contains("XAUUSD.ICMARKETS"),
+                "{off_venue}"
             );
         }
 
@@ -2591,8 +2349,6 @@ mod tests {
             assert_eq!(model.learner, LearnerConfig::Baseline {});
         }
 
-        /// A strategy trading on a model has a `[model]`, as it has a
-        /// `[trade]`.
         #[rstest]
         fn a_strategy_taking_a_model_requires_its_table() {
             let start = TOML.find("[model]").unwrap();
@@ -2600,23 +2356,36 @@ mod tests {
             assert!(err.contains("`model`"), "{err}");
         }
 
-        /// The target trades what `[trade]` names: its one instrument, at
-        /// its risk, the reference stake.
         #[rstest]
-        fn the_target_trades_the_instrument_and_risk_of_the_trade_table() {
-            let target = load(TOML).unwrap().model().target;
+        fn the_target_trades_the_instrument_risk_and_conversions_of_the_trade_table() {
+            let toml = TOML.replace(
+                r#"risk = "0.5%""#,
+                "risk = \"0.5%\"\nconversions = [\"EURUSD.ICMARKETS\"]",
+            );
+            assert_ne!(toml, TOML);
+
+            let target = load(&toml).unwrap().model().target;
+
             assert_eq!(target.instrument_id, InstrumentId::from("XAUUSD.ICMARKETS"));
             assert_eq!(target.risk, "0.5%".parse().unwrap());
+            assert_eq!(
+                target.conversions,
+                Conversions::new(vec![InstrumentId::from("EURUSD.ICMARKETS")])
+            );
         }
 
         #[rstest]
-        fn a_target_naming_an_instrument_or_a_quantity_is_refused_at_load() {
-            for key in [r#"instrument_id = "XAUUSD.ICMARKETS""#, r#"quantity = "1""#] {
-                let toml = TOML.replace("target = { limit", &format!("target = {{ {key}, limit"));
-                let name = key.split(' ').next().unwrap();
-                let err = shape_error(&toml);
-                assert!(err.contains(&format!("`{name}`")), "{name}: {err}");
-            }
+        #[case::an_instrument(r#"instrument_id = "XAUUSD.ICMARKETS""#, "instrument_id")]
+        #[case::a_quantity(r#"quantity = "1""#, "quantity")]
+        fn a_target_naming_an_instrument_or_a_quantity_is_refused_at_load(
+            #[case] key: &str,
+            #[case] name: &str,
+        ) {
+            let toml = TOML.replace("target = { limit", &format!("target = {{ {key}, limit"));
+
+            let err = shape_error(&toml);
+
+            assert!(err.contains(&format!("`{name}`")), "{err}");
         }
 
         #[rstest]
@@ -2628,64 +2397,8 @@ mod tests {
             assert_eq!(error_fields(&toml), ["trade.instruments"]);
         }
 
-        /// The harness reads the quotes of the instrument traded when no
-        /// series prices it: the requirements hold them after the series'
-        /// ticks.
-        #[rstest]
-        fn a_traded_instrument_not_read_loads_its_quotes_into_the_requirements() {
-            let toml = TOML.replace(
-                r#"instruments = [{ instrument_id = "XAUUSD.ICMARKETS""#,
-                r#"instruments = [{ instrument_id = "EURUSD.ICMARKETS""#,
-            );
-
-            let requirements = load(&toml).unwrap().data_requirements();
-
-            assert_eq!(
-                requirements.ticks,
-                [TickSeries {
-                    data: NautilusDataType::QuoteTick,
-                    instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
-                }]
-            );
-        }
-
-        /// The traded instrument's 1-minute bars are its own series of it:
-        /// the harness reads them and adds no quotes.
-        #[rstest]
-        fn a_traded_instrument_a_series_reads_adds_no_quotes() {
-            let requirements = load(TOML).unwrap().data_requirements();
-
-            assert_eq!(requirements.ticks, []);
-        }
-
-        /// The series read the trades of the GC root and nothing of the
-        /// gold traded: the harness reads its quotes.
-        #[rstest]
-        fn a_traded_instrument_beside_series_on_a_root_loads_its_quotes() {
-            let toml = TOML.replace(
-                r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#,
-                r#"{ data = "trades", instrument_id = "GC.GLBX" },"#,
-            );
-
-            let requirements = load(&toml).unwrap().data_requirements();
-
-            assert_eq!(
-                requirements.ticks,
-                [
-                    TickSeries {
-                        data: NautilusDataType::TradeTick,
-                        instrument_id: InstrumentId::from("GC.GLBX"),
-                    },
-                    TickSeries {
-                        data: NautilusDataType::QuoteTick,
-                        instrument_id: InstrumentId::from("XAUUSD.ICMARKETS"),
-                    },
-                ]
-            );
-        }
-
-        /// Trading OKX on hourly bars built from its 1-minute candles:
-        /// fill-catalog fetches those candles alone, no quotes.
+        /// Trading OKX on hourly bars built from its 1-minute candles, where fill-catalog fetches
+        /// those candles alone, with no quotes.
         #[rstest]
         fn an_okx_strategy_on_composite_bars_requires_its_candles_alone() {
             let toml = TOML
@@ -2709,32 +2422,6 @@ mod tests {
             );
         }
 
-        /// Gold's 1-minute LAST bars are built from its trades, and the
-        /// strategy reads no quote of it: the target's ATR of 3 bars,
-        /// decided hourly, runs on hourly bars of its trades.
-        #[rstest]
-        fn the_target_atr_of_a_strategy_reading_trades_runs_on_their_bars() {
-            let config = load(
-                &with_atr(", atr = { period = 3 }")
-                    .replace(r#"price_type = "MID""#, r#"price_type = "LAST""#),
-            )
-            .unwrap();
-            let model = config.model();
-
-            let atr = model
-                .target
-                .atr_bars(model.decision, &config.data_requirements())
-                .unwrap()
-                .unwrap();
-
-            assert_eq!(
-                atr.bar_type,
-                BarType::from("XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL")
-            );
-        }
-
-        /// Quotes of the instrument traded the series list already, as its
-        /// one series, are listed once.
         #[rstest]
         fn traded_quotes_the_series_read_are_required_once() {
             let toml = TOML.replace(
@@ -2753,9 +2440,8 @@ mod tests {
             );
         }
 
-        /// The shared trade rules refuse the root, under its field of
-        /// `[trade]`; the model, whose target trades it, does not refuse it
-        /// again.
+        /// The shared trade rules refuse the root, under its `[trade]` field. The model does not
+        /// refuse it again.
         #[rstest]
         fn a_futures_root_traded_is_refused_at_load_by_the_trade_rules() {
             let toml = TOML.replace(
@@ -2767,33 +2453,12 @@ mod tests {
             assert!(err.to_string().contains("GC.GLBX"), "{err}");
         }
 
-        /// A trade closed after an hour, decided every hour, would still
-        /// be open at the next decision.
-        #[rstest]
-        fn a_target_not_shorter_than_the_decision_cadence_is_refused() {
-            let toml = TOML.replace(r#"limit = "30m""#, r#"limit = "1h""#);
-            let reason = model_refusal(&toml);
-            assert!(
-                reason.contains("limit 1h") && reason.contains("cadence 1h"),
-                "{reason}"
-            );
-        }
-
-        /// The strategy id keys the model's store.
         #[rstest]
         fn a_base_without_a_strategy_id_is_refused() {
             let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n");
             assert_eq!(error_fields(&toml), ["base.strategy_id"]);
         }
 
-        #[rstest]
-        fn a_misspelt_field_of_the_model_is_refused_at_load() {
-            let err = shape_error(&TOML.replace("min_expectancy", "min_expectanc"));
-            assert!(err.contains("unknown field `min_expectanc`"), "{err}");
-        }
-
-        /// The target's ATR takes Nautilus' `AverageTrueRange` arguments
-        /// by their names, the moving average by Nautilus' name of it.
         #[rstest]
         fn the_target_atr_takes_nautilus_average_true_range_arguments() {
             let toml = with_atr(
@@ -2806,12 +2471,15 @@ mod tests {
                     bracket: Some(BracketSpec {
                         take_profit: Distance::Atr(2.into()),
                         stop: Distance::Atr(rust_decimal::Decimal::new(15, 1)),
-                        atr: Some(AtrArgs {
-                            period: 3,
-                            ma_type: Some(MovingAverageType::Simple),
-                            use_previous: Some(false),
-                            value_floor: Some(0.5),
-                        }),
+                        atr: Some(
+                            AtrArgs {
+                                period: 3,
+                                ma_type: Some(MovingAverageType::Simple),
+                                use_previous: Some(false),
+                                value_floor: Some(0.5),
+                            }
+                            .into()
+                        ),
                     }),
                     limit: SignedDuration::from_mins(45),
                     atr: None,
@@ -2819,122 +2487,21 @@ mod tests {
             );
         }
 
-        #[rstest]
-        fn a_moving_average_nautilus_does_not_name_is_refused_at_load() {
-            let err = shape_error(&with_atr(
-                r#", atr = { period = 3, ma_type = "TRIANGULAR" }"#,
-            ));
-            assert!(err.contains("TRIANGULAR"), "{err}");
-        }
-
-        /// Nautilus' `AverageTrueRange::new` panics on an argument it
-        /// refuses, and the load builds the ATR.
-        #[rstest]
-        #[should_panic(expected = "period must be in 1..=")]
-        fn a_target_atr_of_no_bars_panics_at_load() {
-            let _ = load(&with_atr(", atr = { period = 0 }"));
-        }
-
-        /// The model's violations are its target's ATR of an hourly bar
-        /// warming over longer than the warmup of nought, and its limit of
-        /// an hour, decided every hour, reported under their fields,
-        /// `model.target.atr` and `model.target.limit`, after the standard
-        /// ones and the strategy id's.
+        /// Reports the model's violations after the standard ones and the strategy id's.
         #[rstest]
         fn reports_the_models_violations_with_the_standard_ones() {
             let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")
                 .replace("\"1h\"\n", "\"0s\"\n")
-                .replace(r#"limit = "30m""#, r#"limit = "1h""#);
+                .replace(r#"limit = "30m""#, r#"limit = "0s""#);
             assert_eq!(
                 error_fields(&toml),
                 [
                     "data.warmup",
                     "base.strategy_id",
-                    "model.target.atr",
-                    "model.target.limit"
+                    "model.target.limit",
+                    "model.target.atr"
                 ]
             );
-        }
-
-        /// Three violations of the model, each reported under its field at
-        /// once: margins naming no side, no trade required on the holdout,
-        /// and a limit of an hour decided every hour.
-        #[rstest]
-        fn reports_every_violation_of_the_model_under_its_field() {
-            let toml = TOML
-                .replace(
-                    r#"margins = { long = "0.5R", short = "0.5R" }"#,
-                    "margins = {}",
-                )
-                .replace("min_trades = 30", "min_trades = 0")
-                .replace(r#"limit = "30m""#, r#"limit = "1h""#);
-
-            let mut fields = error_fields(&toml);
-            fields.sort();
-
-            assert_eq!(
-                fields,
-                ["model.margins", "model.min_trades", "model.target.limit"]
-            );
-        }
-
-        /// TOML with a bracket, and `meta` after it.
-        fn with_meta(meta: &str) -> String {
-            format!(
-                "{}\n{meta}",
-                TOML.replace(
-                    r#"target = { limit = "30m", atr = { period = 1 } }"#,
-                    r#"target = { bracket = { take_profit = { bps = 10 }, stop = { bps = 10 } }, limit = "45m" }"#,
-                )
-            )
-        }
-
-        /// The meta model's violations are reported under `[model.meta]`'s
-        /// fields: its holdout and the calibration as long leave no fitted
-        /// row in its window, and it requires no trade on its holdout.
-        #[rstest]
-        fn reports_the_meta_models_violations_under_its_fields() {
-            let toml = with_meta(
-                r#"
-                [model.meta]
-                window = "48h"
-                holdout = "24h"
-                margin = "0.25R"
-                min_expectancy = "0.5R"
-                min_trades = 0
-                learner = { kind = "baseline" }
-                "#,
-            );
-
-            let mut fields = error_fields(&toml);
-            fields.sort();
-
-            assert_eq!(fields, ["model.meta.holdout", "model.meta.min_trades"]);
-        }
-
-        /// A meta model is a `[model.meta]` table, and no more: a meta of
-        /// the meta is an unknown field. It learns the trades of its
-        /// sides' target.
-        #[rstest]
-        fn loads_a_meta_model_from_its_table_alone_and_no_deeper() {
-            let toml = with_meta(
-                r#"
-                [model.meta]
-                window = "48h"
-                holdout = "12h"
-                margin = "0.25R"
-                min_expectancy = "0.5R"
-                min_trades = 30
-                learner = { kind = "baseline" }
-                "#,
-            );
-
-            let config = load(&toml).unwrap();
-            assert_eq!(config.model().meta.unwrap().margin, R::new(0.25));
-
-            let nested = format!("{toml}\n[model.meta.meta]\nmargin = \"0.5R\"\n");
-            let err = shape_error(&nested);
-            assert!(err.contains("unknown field `meta`"), "{err}");
         }
     }
 }

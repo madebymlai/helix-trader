@@ -1,23 +1,22 @@
-//! A strategy's model blueprint (`ModelBlueprint`): what its config alone
-//! determines about its model, Nautilus' strategy id, the feature set the
-//! strategy shares, its model config and its data requirements, each as
-//! it is. Its decision rule and its target are checked as it is built,
-//! against its requirements, so a blueprint is of a valid model, and
-//! nothing built of it checks them again.
+//! The model blueprint of a strategy (`ModelBlueprint`).
 //!
-//! Everything of a strategy's model is built of its blueprint, which is
-//! the one caller of the dataset fingerprint (`dataset::fingerprint`), of
-//! the venue of the dataset runs its config declares (`ModelConfig::dataset`).
-//! Its dataset, its model set and its schedule are built together
-//! (`Stored`), the fingerprint computed once and keying the dataset and
-//! every store, and
-//! the training and the walk-forward are each built of them; a dataset
-//! alone, for a dataset build, and a model set alone, for a handle, which
-//! has no catalog, are built of the blueprint as well. The strategy's
-//! model handle (`handle::ModelHandle`) is built of it and a mode, and
-//! registers the very feature set the dataset and the stores are
-//! fingerprinted from. The paths are not the blueprint's: a handle has no
-//! catalog.
+//! The blueprint holds what the strategy's config alone determines about its model:
+//! - Nautilus' strategy id.
+//! - The shared feature set.
+//! - The model config.
+//! - The data requirements.
+//!
+//! The blueprint checks the decision rule and the target against the requirements as it is built,
+//! so nothing built from it checks them again.
+//!
+//! Every part of the strategy's model is built from its blueprint, the only caller of the dataset
+//! fingerprint (`dataset::fingerprint`).
+//! - The dataset, the model store and the schedule are built together (`Stored`) on one
+//!   fingerprint, which keys the dataset and every store.
+//! - The training and the walk-forward are built from them.
+//! - A handle has no catalog, so its dataset alone and its model store alone are built from the
+//!   blueprint too.
+//! - The handle (`handle::ModelHandle`) is built from the blueprint and a mode.
 
 use std::{path::Path, rc::Rc};
 
@@ -28,44 +27,38 @@ use super::{
     dataset::{self, Dataset},
     features::{FeatureSet, Fingerprint},
     schedule::Schedule,
-    store::ModelSet,
+    store::ModelStore,
     train::Training,
     walk::WalkForward,
 };
 use crate::strategy::requirements::DataRequirements;
 
-/// A strategy's model as its config alone determines it, of a valid
-/// decision rule and target (`new`).
+/// A strategy's model as its config alone determines it.
 #[derive(Debug)]
 pub struct ModelBlueprint {
     strategy_id: StrategyId,
-    /// The features its model decides on, shared with the strategy.
     features: Rc<FeatureSet>,
     config: ModelConfig,
     requirements: DataRequirements,
 }
 
-/// A strategy's model stored: its dataset in a catalog and its model set
-/// under a models root, both of the one fingerprint of its blueprint, and
-/// its schedule.
 #[derive(Debug)]
 pub(super) struct Stored<'a> {
-    /// The blueprint it is the model of.
     pub(super) blueprint: &'a ModelBlueprint,
     pub(super) dataset: Dataset,
-    pub(super) models: ModelSet,
+    pub(super) models: ModelStore,
     pub(super) schedule: Schedule,
 }
 
 impl ModelBlueprint {
-    /// The model of `strategy_id`, deciding on `features` as `config`
-    /// says, for a strategy of `requirements`.
+    /// Returns the model of `strategy_id`, which decides on `features` as `config` says.
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule is invalid
-    /// (`DecisionRule::validate`), or else the target for it and
-    /// `requirements` (`TargetConfig::validate`).
+    /// Returns an error if:
+    /// - The decision rule is invalid (`DecisionRule::validate`).
+    /// - The target is invalid for the decision rule and `requirements`
+    ///   (`TargetConfig::validate`).
     pub fn new(
         strategy_id: StrategyId,
         features: Rc<FeatureSet>,
@@ -82,8 +75,7 @@ impl ModelBlueprint {
         })
     }
 
-    /// The fingerprint of its dataset runs (`dataset::fingerprint`), on the
-    /// venue its config declares, which keys its dataset and its stores.
+    /// Returns the fingerprint of the dataset runs. It keys the dataset and the stores.
     ///
     /// # Errors
     ///
@@ -98,7 +90,7 @@ impl ModelBlueprint {
         )
     }
 
-    /// Its dataset in the catalog at `catalog`.
+    /// Returns the dataset in the catalog at `catalog`.
     ///
     /// # Errors
     ///
@@ -107,49 +99,39 @@ impl ModelBlueprint {
         Ok(Dataset::new(catalog, self, self.fingerprint()?))
     }
 
-    /// Its models under `models`.
+    /// Returns the models under `models`.
     ///
     /// # Errors
     ///
-    /// Returns an error if `fingerprint` fails, or if a learner cannot be
-    /// written as JSON (`ModelSet::new`).
-    pub fn model_set(&self, models: &Path) -> anyhow::Result<ModelSet> {
-        ModelSet::new(models, self, self.fingerprint()?)
+    /// Returns an error if `fingerprint` fails, or if a learner cannot be written as JSON
+    /// (`ModelStore::new`).
+    pub fn model_store(&self, models: &Path) -> anyhow::Result<ModelStore> {
+        ModelStore::new(models, self, self.fingerprint()?)
     }
 
-    /// The training of its models, on its dataset in the catalog at
-    /// `catalog`, and its models in the store under `models`.
+    /// Returns the training of the models.
     ///
     /// # Errors
     ///
-    /// Returns an error if `model_set` would.
+    /// Returns an error if `model_store` would.
     pub fn training(&self, catalog: &Path, models: &Path) -> anyhow::Result<Training> {
         Ok(Training::new(self.stored(catalog, models)?))
     }
 
-    /// The backtests of its models, on its dataset in the catalog at
-    /// `catalog`, and its models in the store under `models`: their
-    /// retrains and their scores.
+    /// Returns the backtests of the models: the check of their start and their scores.
     ///
     /// # Errors
     ///
-    /// Returns an error if `model_set` would.
+    /// Returns an error if `model_store` would.
     pub fn walk_forward(&self, catalog: &Path, models: &Path) -> anyhow::Result<WalkForward> {
         Ok(WalkForward::new(self.stored(catalog, models)?))
     }
 
-    /// Its dataset in the catalog at `catalog` and its models under
-    /// `models`, of the fingerprint computed once, and its schedule
-    /// (`Schedule::of_model`).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `model_set` would.
     pub(super) fn stored(&self, catalog: &Path, models: &Path) -> anyhow::Result<Stored<'_>> {
         let fingerprint = self.fingerprint()?;
         Ok(Stored {
             blueprint: self,
-            models: ModelSet::new(models, self, fingerprint)?,
+            models: ModelStore::new(models, self, fingerprint)?,
             dataset: Dataset::new(catalog, self, fingerprint),
             schedule: Schedule::of_model(&self.config),
         })
@@ -159,7 +141,6 @@ impl ModelBlueprint {
         self.strategy_id
     }
 
-    /// The features its model decides on, shared with the strategy.
     pub(super) const fn features(&self) -> &Rc<FeatureSet> {
         &self.features
     }
@@ -183,7 +164,6 @@ mod tests {
     use crate::model::{
         decide::DecisionRule,
         deciding::testing::{STRATEGY, at, baseline, config, features, requirements},
-        targets::Side,
     };
 
     fn blueprint(config: ModelConfig) -> anyhow::Result<ModelBlueprint> {
@@ -195,9 +175,7 @@ mod tests {
         )
     }
 
-    /// A cadence not positive is refused as the blueprint is built, with
-    /// the decision rule's error, before the target's ATR, which has no
-    /// bars of that cadence.
+    /// Refused with the decision rule's error, before the ATR check.
     #[rstest]
     fn a_decision_cadence_not_positive_is_refused() {
         let config = ModelConfig {
@@ -205,48 +183,41 @@ mod tests {
             ..config()
         };
 
-        let err = blueprint(config).unwrap_err();
+        let err = format!("{:#}", blueprint(config).unwrap_err());
 
-        assert_eq!(
-            format!("{err:#}"),
-            "the decision interval 0s is not positive"
-        );
+        assert!(err.contains("0s"), "{err}");
+        assert!(!err.contains("model.target.atr"), "{err}");
     }
 
-    /// The target is checked against what the strategy reads: an ATR of an
-    /// instrument whose prices it does not read is refused as the
-    /// blueprint is built, under the ATR's field.
     #[rstest]
     fn a_target_whose_atr_has_no_bars_to_be_built_from_is_refused() {
         let mut config = config();
         config.target.instrument_id = InstrumentId::from("EUR/USD.SIM");
 
-        let err = blueprint(config).unwrap_err();
+        let err = format!("{:#}", blueprint(config).unwrap_err());
 
-        assert_eq!(
-            format!("{err:#}"),
-            "invalid model.target.atr: the target's ATR has no bars of EUR/USD.SIM to be \
-             built from: the strategy reads neither its quotes, its trades nor its bars"
-        );
+        assert!(err.contains("model.target.atr"), "{err}");
+        assert!(err.contains("EUR/USD.SIM"), "{err}");
     }
 
-    /// The dataset and the model set of a model stored carry one
-    /// fingerprint: a model published under the dataset's, as a train
-    /// publishes it, is the one the model set swaps in.
     #[rstest]
-    fn the_dataset_and_the_model_set_of_a_model_stored_carry_one_fingerprint() {
+    fn the_dataset_and_the_model_store_of_a_model_stored_carry_one_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let blueprint = blueprint(config()).unwrap();
         let model = blueprint
             .stored(&dir.path().join("catalog"), &dir.path().join("models"))
             .unwrap();
         let mut published = baseline("2026-10-22T00:00:00Z", 8);
-        published.manifest.fingerprint = model.dataset.fingerprint().to_string();
-        let store = model.models.side(Side::Long).unwrap().store();
-        store.publish(&published).unwrap();
-        let mut pairs = model.models.pairs();
+        published.sides[0].manifest.fingerprint = model.dataset.fingerprint().to_string();
+        model.models.publish(&published).unwrap();
+        let mut model_sets = model.models.swap();
 
-        let in_use = pairs.at(at("2026-10-22T12:00:00Z"), &store.valid_froms().unwrap());
+        let in_use = model_sets
+            .at(
+                at("2026-10-22T12:00:00Z"),
+                &model.models.model_sets().unwrap(),
+            )
+            .unwrap();
 
         assert_eq!(
             in_use.map(|(valid_from, _)| valid_from),

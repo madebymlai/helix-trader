@@ -1,23 +1,17 @@
-//! End to end on a cTrader broker's demo, with orders: `Live` on XAU/USD
-//! and EUR/USD with the broker's clients, a strategy sending, once it has a quote
-//! of each, one bracket of 3 oz of gold (`GOLD_OUNCES`)
-//! (a market buy, its stop loss 30.00 below the bid, its take profit 30.00
-//! above the ask), closing the position it opens at once by its id
-//! (`close_position`), and recording every order event. The node stops
-//! once the position is closed; then the broker's execution client reads
-//! the account: no position, no order open.
+//! End to end on a cTrader broker's demo, with orders. `Live` runs on XAU/USD and EUR/USD. Once a
+//! strategy has a quote of each, it sends one bracket of 3 oz of gold (`GOLD_OUNCES`): a market
+//! buy, a stop loss 30.00 below the bid and a take profit 30.00 above the ask.
 //!
-//! EUR/USD's quotes are there for Nautilus' risk engine: on an account in
-//! EUR, as IC's demo is, it converts an order's USD margin at the cache's
-//! EUR/USD, and denies the order without one (`VALIDATION_FAILED: Account
-//! currency conversion failed: No exchange rate from USD to EUR`, demo,
-//! 2026-10-26). An account in USD does not need them.
+//! The strategy closes the position at once by its id (`close_position`), and the node stops once
+//! it is closed. Then the broker's execution client reads the account, which has no position and no
+//! order open.
 //!
-//! It needs what `ctrader_live_demo.rs` needs, and gold's market open.
-//! Gated as `ctrader_demo.rs` is. One node per process, hence its own
-//! module, run alone (`main.rs`). The node keeps its cache in Redis under
-//! the test's trader, `HELIXTEST-102`, whose records the test deletes. Run
-//! it with:
+//! EUR/USD's quotes are there for Nautilus' risk engine. On an account in EUR, as IC's demo is, the
+//! engine converts an order's USD margin at the cache's EUR/USD. It denies the order without one
+//! (`VALIDATION_FAILED: Account currency conversion failed: No exchange rate from USD to EUR`,
+//! demo, 2026-10-26). An account in USD does not need them.
+//!
+//! Needs what `ctrader_live_demo.rs` needs, and gold's market open. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_orders_demo:: -- --nocapture
@@ -27,10 +21,7 @@ use std::{
     cell::RefCell,
     process::Command,
     rc::Rc,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -72,8 +63,7 @@ use crate::{
 
 const TRADER: &str = "HELIXTEST-102";
 
-/// What the strategy saw, in order: each order event as `(client order id,
-/// what)`, and the fills.
+/// Holds each order event as `(client order id, what)`, and the fills.
 #[derive(Debug, Default)]
 struct Record {
     events: Vec<(String, String)>,
@@ -83,15 +73,15 @@ struct Record {
     closed: Option<PositionClosed>,
 }
 
-/// Sends one bracket on gold's first quote after a EUR/USD quote, and
-/// closes the position it opens.
+/// Notifies `done` once the position has closed and both legs are canceled, or the bracket
+/// failed.
 #[derive(Debug)]
 struct BracketOnce {
     core: StrategyCore,
     gold: InstrumentId,
     eurusd: InstrumentId,
     record: Arc<Mutex<Record>>,
-    done: Arc<AtomicBool>,
+    done: Arc<tokio::sync::Notify>,
     rate_known: bool,
     sent: bool,
 }
@@ -106,11 +96,22 @@ impl BracketOnce {
             .events
             .push((id.to_string(), what));
     }
+
+    fn done_if_flat(&self) {
+        let record = self.record.lock().unwrap();
+        let canceled = record
+            .events
+            .iter()
+            .filter(|(_, what)| what == "canceled")
+            .count();
+
+        if record.closed.is_some() && canceled == 2 {
+            self.done.notify_one();
+        }
+    }
 }
 
 nautilus_strategy!(BracketOnce, {
-    /// The instruments its config claims, which the live node registers
-    /// as it adds it.
     fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
         self.config().external_order_instrument_ids.clone()
     }
@@ -139,6 +140,7 @@ nautilus_strategy!(BracketOnce, {
 
     fn on_order_canceled(&mut self, event: &OrderCanceled) {
         self.note(&event.client_order_id, "canceled");
+        self.done_if_flat();
     }
 
     fn on_order_rejected(&mut self, event: OrderRejected) {
@@ -146,12 +148,12 @@ nautilus_strategy!(BracketOnce, {
             &event.client_order_id,
             format!("rejected: {}", event.reason),
         );
-        self.done.store(true, Ordering::SeqCst);
+        self.done.notify_one();
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
         self.note(&event.client_order_id, format!("denied: {}", event.reason));
-        self.done.store(true, Ordering::SeqCst);
+        self.done.notify_one();
     }
 
     fn on_position_opened(&mut self, event: PositionOpened) {
@@ -164,13 +166,13 @@ nautilus_strategy!(BracketOnce, {
         };
         if let Err(e) = self.close_position(&position, None, None, None, None, None, None) {
             self.note(&position_id, format!("close failed: {e}"));
-            self.done.store(true, Ordering::SeqCst);
+            self.done.notify_one();
         }
     }
 
     fn on_position_closed(&mut self, event: PositionClosed) {
         self.record.lock().unwrap().closed = Some(event);
-        self.done.store(true, Ordering::SeqCst);
+        self.done_if_flat();
     }
 });
 
@@ -205,7 +207,6 @@ impl DataActor for BracketOnce {
         self.submit_order_list(orders, None, None, None)
     }
 
-    /// Leaves nothing open, whatever happened.
     fn on_stop(&mut self) -> anyhow::Result<()> {
         let id = self.gold;
         self.cancel_all_orders(id, None, None, true, None)?;
@@ -213,7 +214,6 @@ impl DataActor for BracketOnce {
     }
 }
 
-/// How long the bracket gets, from the node's start, to open and close.
 const DEADLINE: Duration = Duration::from_secs(180);
 
 #[tokio::test(flavor = "multi_thread")]
@@ -233,8 +233,9 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         warmup: SignedDuration::from_mins(5),
     };
     let record = Arc::new(Mutex::new(Record::default()));
-    let done = Arc::new(AtomicBool::new(false));
-    // The gold alone is traded, EUR/USD read for its rate.
+    let done = Arc::new(tokio::sync::Notify::new());
+
+    // Only the gold is traded, and EUR/USD is read for its rate
     let gold = broker.gold();
     let strategy = BracketOnce {
         core: StrategyCore::new(StrategyConfig {
@@ -250,9 +251,9 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         rate_known: false,
         sent: false,
     };
-    // An empty catalog of its own: the venue answers the whole warmup.
+
     let catalog = tempfile::tempdir().unwrap();
-    // Outside the catalog, as `Live` requires.
+
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
@@ -261,15 +262,10 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),
     };
-    // As Ctrl-C would, once the position closed or the deadline passed.
+
     let finished = Arc::clone(&done);
     let interrupt = get_runtime().spawn(async move {
-        let deadline = tokio::time::Instant::now() + DEADLINE;
-        while !finished.load(Ordering::SeqCst) && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        // The last events out first.
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        let _ = tokio::time::timeout(DEADLINE, finished.notified()).await;
         let status = Command::new("kill")
             .args(["-INT", &std::process::id().to_string()])
             .status()
@@ -305,7 +301,8 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     assert_eq!(opened.side, PositionSide::Long);
     assert_eq!(opened.quantity, Quantity::from(GOLD_OUNCES));
     assert_eq!(closed.position_id, opened.position_id);
-    // The cTrader position id is the Nautilus position id.
+
+    // The cTrader position id is the Nautilus position id
     assert!(
         opened.position_id.as_str().parse::<i64>().is_ok(),
         "{}",
@@ -354,9 +351,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     assert_eq!(close.order_side, OrderSide::Sell);
 }
 
-/// The open positions and orders the execution client of `broker` reports
-/// on the demo account, as the node's startup reconciliation reads them:
-/// the mass status also holds the orders closed over its window.
+/// Returns the open positions and orders the broker reports, as startup reconciliation reads them.
 async fn open_at_broker(broker: &DemoBroker) -> (usize, usize) {
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     replace_exec_event_sender(tx);

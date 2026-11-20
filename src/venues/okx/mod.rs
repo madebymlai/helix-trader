@@ -1,15 +1,11 @@
-//! OKX: its history, filled through the node (see `catalog::NodeFill`) by
-//! Nautilus' OKX data client, and the live node's clients (see `live`),
-//! both keying an instrument by its contract (`Contract`). See `README.md`.
+//! Provides OKX history and the live node's clients. Nautilus' OKX data client fills the history
+//! through the node (see `catalog::NodeFill`). The live clients are in `live`. Both key an
+//! instrument by its contract (`Contract`). See `README.md`.
 //!
-//! The node asks Nautilus' `OKXDataClient` for the bars of OKX swaps and
-//! X-Perps and for their funding over what the catalog lacks of them
-//! (`requests`), and the data engine writes back the windows the client
-//! answers in full. The definitions are not asked of the node, for their
-//! margins (see `README.md`): `OkxHistory` writes them, from OKX's public
-//! REST API through the adapter's `OKXRawHttpClient` and
-//! `parse_instrument_any`, with the account's margins, 1 / the leverage it
-//! trades each at (see `instrument_from`, `account`).
+//! The node asks `OKXDataClient` for the bars and funding the catalog lacks (`requests`). It does
+//! not ask for the definitions, because of their margins (see `README.md`). `OkxHistory` writes
+//! them from OKX's public REST API through `OKXRawHttpClient` and `parse_instrument_any`. Their
+//! margins are 1 / the account leverage (see `instrument_from`, `account`).
 
 use anyhow::Context;
 use jiff::SignedDuration;
@@ -48,37 +44,35 @@ mod live;
 pub(in crate::venues) use live::BOOK;
 pub(crate) use live::{clients, streams};
 
-/// The window one funding request holds at most: two weeks, 336 funding
-/// times at an hourly interval, within the one page of 400 the client
-/// reads. The oldest update of each window comes without the interval
-/// before it, which a backtest does not settle, so the windows are long.
+/// Two weeks, which is 336 hourly funding times and fits the client's one page of 400.
+///
+/// The oldest update of each window comes without its interval, which a backtest does not settle,
+/// so the windows are long.
 const FUNDING_PERIOD: SignedDuration = SignedDuration::from_hours(14 * 24);
 
-/// The window one request of bars holds at most: a day, 1,440 minute
-/// bars, 15 of the client's history pages of 100.
+/// One day: 1,440 minute bars, or 15 of the client's history pages of 100.
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
-/// OKX's public REST API, through the adapter's default client (no key),
-/// for the definitions of OKX instruments, and the account, through its
-/// key, for the leverage it trades each at (`account::Account`).
+/// Reads instrument definitions from OKX's public REST API, through the adapter's keyless client.
 #[derive(Debug, Default)]
 pub struct OkxHistory {
     client: OKXHttpClient,
 }
 
 impl OkxHistory {
-    /// Writes into `catalog` the definition of each instrument of `slices`
-    /// it lacks, as OKX's API defines it now, with the account's margins at
-    /// the leverage it trades it at now (see `instrument_from`): the
-    /// account, of the environment's key, is read only if a definition is
-    /// lacking.
+    /// Writes into `catalog` the definition of each `slices` instrument that it lacks.
+    ///
+    /// Each definition is as OKX defines it now, with the account's current leverage. The account
+    /// is read only if a definition is lacking.
     ///
     /// # Errors
     ///
-    /// Returns an error if an instrument is not an OKX swap or X-Perp, if
-    /// OKX does not define it, if the account cannot be read (its
-    /// environment or key missing, OKX unreachable or refusing it, no
-    /// leverage listed), or if the catalog cannot be read or written.
+    /// Returns an error if:
+    /// - An instrument is not an OKX swap or X-Perp.
+    /// - OKX does not define an instrument.
+    /// - The account cannot be read (environment or key missing, OKX unreachable or refusing it)
+    ///   or lists no leverage.
+    /// - The catalog cannot be read or written.
     pub async fn write_definitions(
         &self,
         catalog: &ParquetDataCatalog,
@@ -98,8 +92,6 @@ impl OkxHistory {
         .await
     }
 
-    /// The instrument of `id`, an OKX swap or X-Perp, with the account's
-    /// margins at `leverage` (see `instrument_from`).
     async fn instrument(
         &self,
         id: InstrumentId,
@@ -123,17 +115,17 @@ impl OkxHistory {
     }
 }
 
-/// Writes into `catalog` the definition of each instrument of `slices` it
-/// lacks, once, as `instrument` gives it.
 async fn write_definitions(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
     mut instrument: impl AsyncFnMut(InstrumentId) -> anyhow::Result<InstrumentAny>,
 ) -> anyhow::Result<()> {
     let mut ids: Vec<InstrumentId> = Vec::new();
-    for SeriesSlice { slice, .. } in slices {
-        if !ids.contains(&slice.instrument_id) {
-            ids.push(slice.instrument_id);
+
+    for slice in slices {
+        let id = slice.series.instrument_id();
+        if !ids.contains(&id) {
+            ids.push(id);
         }
     }
     let names: Vec<String> = ids.iter().map(ToString::to_string).collect();
@@ -153,18 +145,16 @@ async fn write_definitions(
     Ok(())
 }
 
-/// Checks that Nautilus' OKX data client, which OKX's fill and a live
-/// warmup ask, serves the history of `source`, an OKX instrument's: its
-/// trades (`request_trades`) and its candles (`request_bars`), EXTERNAL
-/// bars of the LAST price at a width OKX has a candle of
-/// (`bar_spec_as_okx_channel`, the widths the client asks the candles
-/// endpoint in). The client asks for trade-price candles whatever price a
-/// bar type names, so it serves no other price, and it requests no quotes
-/// and no book (Nautilus' `DataClient` defaults refuse them).
+/// Checks that the OKX data client serves the history of `source`.
+///
+/// The client serves trades (`request_trades`) and candles (`request_bars`). Candles are EXTERNAL
+/// bars of the LAST price, at a width `bar_spec_as_okx_channel` accepts. The client asks for
+/// trade-price candles whatever price a bar type names. It requests no quotes or book
+/// (`DataClient` defaults refuse them).
 ///
 /// # Errors
 ///
-/// Returns an error if `source` is not served, naming it and saying why.
+/// Returns an error if `source` is not served.
 pub(super) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     match source {
         CatalogSeries::Bars(bar_type) => anyhow::ensure!(
@@ -184,19 +174,16 @@ pub(super) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether `bar_type` is of OKX's candles, which Nautilus' OKX client asks
-/// its history (`request_bars`) and its candle channels
-/// (`subscribe_bars`) for alike: EXTERNAL bars at a spec OKX has a
-/// trade-price candle of (`bar_spec_as_okx_channel`).
+/// Returns whether `bar_type` is EXTERNAL with a spec `bar_spec_as_okx_channel` accepts.
+///
+/// `request_bars` and `subscribe_bars` serve such bars alike.
 fn is_candle(bar_type: &BarType) -> bool {
     bar_type.is_externally_aggregated() && bar_spec_as_okx_channel(bar_type.spec()).is_ok()
 }
 
-/// What `catalog` lacks of `slices`, series of OKX instruments
-/// (`DataRequirements::slices`), and of the funding of each slice's
-/// instrument over the slice, the funding first (see `catalog::missing`),
-/// without the definitions, which `OkxHistory::write_definitions` writes
-/// rather than the node (see the module doc).
+/// Returns what `catalog` lacks for `slices` and for their instruments' funding.
+///
+/// Funding comes first. The definitions are left out (see the module doc).
 ///
 /// # Errors
 ///
@@ -206,32 +193,30 @@ pub fn requests(
     slices: &[SeriesSlice],
 ) -> anyhow::Result<Vec<FillRequest>> {
     let funding = slices.iter().map(|of| SeriesSlice {
-        series: (
-            NautilusDataType::FundingRateUpdate,
-            of.slice.instrument_id.to_string(),
-        ),
-        slice: of.slice,
+        series: CatalogSeries::Ticks(TickSeries {
+            data: NautilusDataType::FundingRateUpdate,
+            instrument_id: of.series.instrument_id(),
+        }),
+        from: of.from,
+        to: of.to,
     });
     let slices = SeriesSlice::merged(funding.chain(slices.iter().cloned()));
     Ok(missing(catalog, &slices)?
         .into_iter()
-        .filter(|request| request.data != FillData::Instrument)
+        .filter(|request| !matches!(request.data, FillData::Instrument(_)))
         .collect())
 }
 
-/// The window one request of `data` holds at most (see `NodeFill::add`):
-/// `FUNDING_PERIOD` of funding, a day of bars.
+/// Returns the window of one request for `data` (see `NodeFill::add`).
 #[must_use]
 pub fn period(data: FillData) -> SignedDuration {
     match data {
-        FillData::Funding => FUNDING_PERIOD,
+        FillData::Funding(_) => FUNDING_PERIOD,
         _ => DAY,
     }
 }
 
-/// The node's data client: Nautilus' OKX data client loading the instrument
-/// types and families of `instrument_ids` (see `selection`), on OKX's
-/// public API with no key.
+/// Returns the node's data client, which uses OKX's public API with no key.
 ///
 /// # Errors
 ///
@@ -248,9 +233,6 @@ pub fn node_client(instrument_ids: &[InstrumentId]) -> anyhow::Result<NodeClient
     })
 }
 
-/// The instrument types and families of `instrument_ids`, OKX swaps or
-/// X-Perps, each once in the order they first come: what Nautilus' OKX
-/// clients load (see `Contract`).
 fn selection(
     instrument_ids: &[InstrumentId],
 ) -> anyhow::Result<(Vec<OKXInstrumentType>, Vec<String>)> {
@@ -269,8 +251,7 @@ fn selection(
     Ok((instrument_types, families))
 }
 
-/// The margin of a position on an account trading it at `leverage`, as a
-/// fraction of its notional: 1 / `leverage`, which OKX locks.
+/// Returns the margin as a fraction of notional: 1 / `leverage`.
 ///
 /// # Errors
 ///
@@ -283,15 +264,11 @@ fn margin_at(leverage: Decimal) -> anyhow::Result<Decimal> {
     Ok(Decimal::ONE / leverage)
 }
 
-/// The instrument of `raw`, an OKX swap or X-Perp (a future whose rule
-/// type is `xperp`), through the adapter's `parse_instrument_any`, with
-/// the initial and maintenance margins of an account trading it at
-/// `leverage` (`margin_at`); a dated future is refused. OKX locks notional
-/// / leverage on a position, which is Nautilus' default margin model
-/// (notional / leverage x the instrument's margin) at a backtest's
-/// leverage of 1, so the catalog holds the account's margin, as IC's
-/// definitions hold IC's. The adapter would leave them at 0, which locks
-/// nothing.
+/// Refuses a dated future, since only a future with rule type `xperp` is served.
+///
+/// OKX locks notional / leverage. That is Nautilus' default margin model (notional / leverage x the
+/// instrument's margin) at a backtest leverage of 1. The adapter would leave the margins at 0,
+/// which locks nothing.
 fn instrument_from(
     raw: &OKXInstrument,
     leverage: Decimal,
@@ -310,21 +287,15 @@ fn instrument_from(
         .with_context(|| format!("{id} is not an instrument Nautilus supports"))
 }
 
-/// An OKX swap (`BTC-USDT-SWAP.OKX`) or future
-/// (`BTC-USD_UM_XPERP-310404.OKX`), keyed in OKX's API and in the clients'
-/// configs by its instrument type and family.
+/// An OKX swap (`BTC-USDT-SWAP.OKX`) or future (`BTC-USD_UM_XPERP-310404.OKX`).
 #[derive(Debug, Clone, Copy)]
 struct Contract {
-    /// `Swap` or `Futures`, from the symbol (the adapter's
-    /// `okx_instrument_type_from_symbol`).
     inst_type: OKXInstrumentType,
-    /// `BTC-USDT`, `BTC-USD_UM_XPERP`, from the symbol (the adapter's
-    /// `extract_inst_family`).
+    /// `BTC-USDT` or `BTC-USD_UM_XPERP`.
     family: &'static str,
 }
 
 impl Contract {
-    /// The contract of `id`; an error if it is not an OKX swap or future.
     fn of(id: InstrumentId) -> anyhow::Result<Self> {
         anyhow::ensure!(
             Row::of(id.venue).history == HistorySource::Okx,
@@ -353,7 +324,7 @@ impl Contract {
 #[cfg(test)]
 mod tests {
     use jiff::Timestamp;
-    use nautilus_model::data::BarType;
+    use nautilus_model::data::{BarType, FundingRateUpdate};
     use rstest::rstest;
 
     use super::*;
@@ -365,8 +336,7 @@ mod tests {
         serde_json::from_str(INSTRUMENT).unwrap()
     }
 
-    /// BTC-USDT-SWAP.OKX as OKX's public API defined it on 2026-10-21, on
-    /// an account trading it at leverage 10.
+    /// Returns BTC-USDT-SWAP.OKX as OKX defined it on 2026-10-21, at leverage 10.
     fn btc_instrument() -> InstrumentAny {
         instrument_from(&raw_instrument(), Decimal::TEN, UnixNanos::default()).unwrap()
     }
@@ -378,56 +348,60 @@ mod tests {
         serde_json::from_str(XPERP_INSTRUMENT).unwrap()
     }
 
-    /// BTC-USD_UM_XPERP-310404.OKX as OKX's public API defined it on
-    /// 2026-10-22, on an account trading it at leverage 25.
+    /// Returns BTC-USD_UM_XPERP-310404.OKX as OKX defined it on 2026-10-22, at leverage 25.
     fn xperp_instrument() -> InstrumentAny {
         instrument_from(&raw_xperp(), Decimal::from(25), UnixNanos::default()).unwrap()
     }
 
-    /// The account's margin of a position, a tenth of its notional at
-    /// leverage 10, as IC's definitions hold the account's.
     #[rstest]
-    fn an_okx_swap_is_a_crypto_perpetual_with_the_account_s_margins() {
-        let InstrumentAny::CryptoPerpetual(btc) = btc_instrument() else {
-            panic!("not a CryptoPerpetual");
+    #[case::a_swap_a_crypto_perpetual(btc_instrument(), "CryptoPerpetual", (1, 2), Decimal::new(1, 1))]
+    #[case::an_x_perp_a_crypto_future(xperp_instrument(), "CryptoFuture", (1, 0), Decimal::new(4, 2))]
+    fn an_okx_swap_or_x_perp_is_a_crypto_instrument_with_the_account_s_margins(
+        #[case] instrument: InstrumentAny,
+        #[case] kind: &str,
+        #[case] precisions: (u8, u8),
+        #[case] margin: Decimal,
+    ) {
+        let of_kind = match &instrument {
+            InstrumentAny::CryptoPerpetual(_) => "CryptoPerpetual",
+            InstrumentAny::CryptoFuture(_) => "CryptoFuture",
+            _ => "another kind",
         };
-        assert_eq!((btc.price_precision, btc.size_precision), (1, 2));
-        let tenth = Decimal::new(1, 1);
-        assert_eq!((btc.margin_init, btc.margin_maint), (tenth, tenth));
-    }
-
-    /// At leverage 25, 4% of the notional.
-    #[rstest]
-    fn an_okx_x_perp_is_a_crypto_future_with_the_account_s_margins() {
-        let InstrumentAny::CryptoFuture(btc) = xperp_instrument() else {
-            panic!("not a CryptoFuture");
-        };
-        assert_eq!((btc.price_precision, btc.size_precision), (1, 0));
-        let four_percent = Decimal::new(4, 2);
+        assert_eq!(of_kind, kind);
         assert_eq!(
-            (btc.margin_init, btc.margin_maint),
-            (four_percent, four_percent)
+            (instrument.price_precision(), instrument.size_precision()),
+            precisions
+        );
+        assert_eq!(
+            (instrument.margin_init(), instrument.margin_maint()),
+            (margin, margin)
         );
     }
 
     #[rstest]
-    fn a_leverage_not_positive_is_refused() {
-        for leverage in [Decimal::ZERO, Decimal::NEGATIVE_ONE] {
-            let err = instrument_from(&raw_instrument(), leverage, UnixNanos::default())
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("leverage"), "{leverage}: {err}");
-        }
+    #[case::nought(Decimal::ZERO, "0")]
+    #[case::negative(Decimal::NEGATIVE_ONE, "-1")]
+    fn a_leverage_not_positive_is_refused_naming_it(
+        #[case] leverage: Decimal,
+        #[case] named: &str,
+    ) {
+        let err = instrument_from(&raw_instrument(), leverage, UnixNanos::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&format!("was {named}")), "{err}");
     }
 
     #[rstest]
-    fn a_dated_future_is_refused() {
+    fn a_dated_future_is_refused_naming_it_and_its_rule_type() {
         let mut dated = raw_xperp();
         dated.rule_type = "normal".to_string();
         let err = instrument_from(&dated, Decimal::TEN, UnixNanos::default())
             .unwrap_err()
             .to_string();
-        assert!(err.contains("X-Perp"), "{err}");
+        assert!(
+            err.contains("BTC-USD_UM_XPERP-310404") && err.contains("\"normal\""),
+            "{err}"
+        );
     }
 
     #[rstest]
@@ -442,13 +416,17 @@ mod tests {
             (future.inst_type, future.family),
             (OKXInstrumentType::Futures, "BTC-USD_UM_XPERP")
         );
-        for id in [
-            "BTC-USDT.OKX",
-            "BTC-USD-261225-100000-C.OKX",
-            "BTC-USDT-SWAP.BINANCE",
-        ] {
-            assert!(Contract::of(InstrumentId::from(id)).is_err(), "{id}");
-        }
+    }
+
+    #[rstest]
+    #[case::a_spot_pair("BTC-USDT.OKX")]
+    #[case::an_option("BTC-USD-261225-100000-C.OKX")]
+    #[case::a_swap_of_another_venue("BTC-USDT-SWAP.BINANCE")]
+    fn an_id_not_of_an_okx_swap_or_future_has_no_contract_naming_it(#[case] id: &str) {
+        let err = Contract::of(InstrumentId::from(id))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(id), "{err}");
     }
 
     fn btc() -> InstrumentId {
@@ -469,17 +447,14 @@ mod tests {
         ParquetDataCatalog::new(dir.path(), None, None, None, None)
     }
 
-    fn fill(data: FillData, id: InstrumentId, from: &str, to: &str) -> FillRequest {
+    fn fill(data: FillData, from: &str, to: &str) -> FillRequest {
         FillRequest {
             data,
-            instrument_id: id,
             from: at(from),
             to: at(to),
         }
     }
 
-    /// The slices of strategy bars on BTC built from its 1-minute and
-    /// 5-minute bars over `[from, to]`.
     fn btc_slices(from: &str, to: &str) -> Vec<SeriesSlice> {
         DataRequirements {
             bar_types: vec![
@@ -503,11 +478,50 @@ mod tests {
         assert_eq!(
             asked,
             [
-                fill(FillData::Funding, btc(), from, to),
-                fill(FillData::Bars(BarType::from(BTC_MINUTES)), btc(), from, to),
+                fill(FillData::Funding(btc()), from, to),
+                fill(FillData::Bars(BarType::from(BTC_MINUTES)), from, to),
                 fill(
                     FillData::Bars(BarType::from("BTC-USDT-SWAP.OKX-5-MINUTE-LAST-EXTERNAL")),
+                    from,
+                    to
+                ),
+            ]
+        );
+    }
+
+    /// Funding stored through October 4 does not cover either bar series. The next funding request
+    /// still starts on October 5, not October 1.
+    #[rstest]
+    fn stored_funding_shortens_only_the_funding_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = new_catalog(&dir);
+        let (from, to) = ("2026-10-01T00:00:00Z", "2026-10-08T00:00:00Z");
+        let update = at("2026-10-03T08:00:00Z").into();
+        catalog
+            .write_to_parquet(
+                &[FundingRateUpdate::new(
                     btc(),
+                    Decimal::new(1, 4),
+                    Some(480),
+                    None,
+                    update,
+                    update,
+                )],
+                Some(at(from).into()),
+                Some(at("2026-10-04T23:59:59.999999999Z").into()),
+                None,
+            )
+            .unwrap();
+
+        let asked = requests(&catalog, &btc_slices(from, to)).unwrap();
+
+        assert_eq!(
+            asked,
+            [
+                fill(FillData::Funding(btc()), "2026-10-05T00:00:00Z", to),
+                fill(FillData::Bars(BarType::from(BTC_MINUTES)), from, to),
+                fill(
+                    FillData::Bars(BarType::from("BTC-USDT-SWAP.OKX-5-MINUTE-LAST-EXTERNAL")),
                     from,
                     to
                 ),
@@ -517,7 +531,10 @@ mod tests {
 
     #[rstest]
     fn funding_is_asked_in_two_weeks_and_bars_in_days() {
-        assert_eq!(period(FillData::Funding), SignedDuration::from_hours(336));
+        assert_eq!(
+            period(FillData::Funding(btc())),
+            SignedDuration::from_hours(336)
+        );
         assert_eq!(
             period(FillData::Bars(BarType::from(BTC_MINUTES))),
             SignedDuration::from_hours(24)
@@ -549,7 +566,11 @@ mod tests {
                 .slices(at("2026-10-01T00:00:00Z"), at("2026-10-08T00:00:00Z")),
             )
             .collect();
-        assert!(slices.iter().any(|s| s.series.1 == xperp_minutes));
+        assert!(
+            slices
+                .iter()
+                .any(|s| s.series == CatalogSeries::Bars(BarType::from(xperp_minutes)))
+        );
         let mut asked = Vec::new();
 
         write_definitions(&catalog, &slices, async |id| {

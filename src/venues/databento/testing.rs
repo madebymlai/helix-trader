@@ -1,25 +1,8 @@
-//! A mock Databento historical API for the tests: an HTTP server on
-//! 127.0.0.1 answering the two calls a definitions fill makes with what
-//! Databento answered of the call's dataset (`test_data/`), whatever else
-//! they ask, and recording each call it receives.
+//! A mock Databento historical API.
 //!
-//! - `metadata.get_dataset_range`: the range of `GLBX.MDP3`, captured on
-//!   2026-11-13 (its end 2026-11-13T09:31:29.885311Z), of `OPRA.PILLAR`,
-//!   captured on 2026-11-13 (its end 2026-11-13T14:30:00Z), and of
-//!   `XNAS.ITCH`, captured on 2026-11-14 (its end 2026-11-13T05:00:00Z).
-//! - `timeseries.get_range`: GCZ6's definition records of 12 November 2026
-//!   (`schema=definition`, `symbols=GCZ6`, `stype_in=raw_symbol`, DBN
-//!   compressed with zstd, as Databento's client asks), captured on
-//!   2026-11-13 for $0.0000008; and of `OPRA.PILLAR`, the definition record
-//!   of AAPL's 355 call of 20 November 2026 of 12 November 2026
-//!   (`symbols=AAPL  261120C00355000`, otherwise as GCZ6's, and so as
-//!   Databento's client asks), captured on 2026-11-13 for $0.0000017, the
-//!   cost Databento's `metadata.get_cost` gave before; and of `XNAS.ITCH`,
-//!   NVDA's three definition records of 12 November 2026 (`symbols=NVDA`,
-//!   otherwise as GCZ6's), captured on 2026-11-14 for $0.000016093, the
-//!   cost `metadata.get_cost` gave before, Nautilus' Databento client
-//!   answering with the last, in round lots of 100: each DBN version 1, as
-//!   Databento sent it, which Databento's client upgrades as it decodes.
+//! Answers each call with Databento's captured answer for its dataset (`test_data/`), whatever
+//! else the call asks, and records it. Nautilus' client answers XNAS.ITCH's three definition
+//! records with the last one, in round lots of 100.
 
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -29,10 +12,6 @@ use std::{
 
 use nautilus_network::http::Url;
 
-/// Databento's answers of each dataset: its range, and its definition of
-/// an instrument, GCZ6 of 2026, `GCZ26.GLBX`, of `GLBX.MDP3`, AAPL's 355
-/// call of 20 November 2026, `AAPL  261120C00355000.OPRA`, of
-/// `OPRA.PILLAR`, and NVDA, `NVDA.XNAS`, of `XNAS.ITCH`.
 const DATASETS: [(&str, &[u8], &[u8]); 3] = [
     (
         "GLBX.MDP3",
@@ -51,8 +30,6 @@ const DATASETS: [(&str, &[u8], &[u8]); 3] = [
     ),
 ];
 
-/// A call the peer received: its path and its parameters, of its query or
-/// its form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DatabentoCall {
     pub(crate) path: String,
@@ -60,7 +37,6 @@ pub(crate) struct DatabentoCall {
 }
 
 impl DatabentoCall {
-    /// The parameter `name`.
     pub(crate) fn param(&self, name: &str) -> Option<&str> {
         self.params
             .iter()
@@ -69,7 +45,6 @@ impl DatabentoCall {
     }
 }
 
-/// The peer: its address and the calls it received.
 #[derive(Debug)]
 pub(crate) struct MockDatabento {
     url: String,
@@ -77,7 +52,6 @@ pub(crate) struct MockDatabento {
 }
 
 impl MockDatabento {
-    /// Starts the peer, answering each call on a thread of its own.
     pub(crate) fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
         let url = format!("http://{}/", listener.local_addr().expect("an address"));
@@ -93,18 +67,15 @@ impl MockDatabento {
         Self { url, calls }
     }
 
-    /// The peer's address, the historical API's base URL.
     pub(crate) fn url(&self) -> &str {
         &self.url
     }
 
-    /// The calls answered so far, in the order they came.
     pub(crate) fn calls(&self) -> Vec<DatabentoCall> {
         self.calls.lock().expect("not poisoned").clone()
     }
 }
 
-/// Answers the one call of a connection, then closes it.
 fn serve(stream: TcpStream, log: &Mutex<Vec<DatabentoCall>>) {
     let mut reader = BufReader::new(stream.try_clone().expect("a stream"));
     let mut writer = stream;

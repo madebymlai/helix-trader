@@ -1,11 +1,19 @@
-//! fill-catalog's fill through a Nautilus node, at its seam: what the
-//! catalog lacks (`catalog::missing`), filled by a `NodeFill` whose node holds
-//! fake data clients answering as Databento's does (a completed
-//! `DataResponseEnvelope`, `RequestFailed` on an error), each asked by the
-//! requests naming it, and the catalog. The data engine writes each answer
-//! back; the tests read the catalog, what each client was asked and by which
-//! name, and what the fill returns. Hermetic: no venue. Each test runs its
-//! nodes on its own thread, as Nautilus' message bus is thread-local.
+//! Tests fill-catalog's fill through a Nautilus node, at its seam.
+//!
+//! A `NodeFill` fills what the catalog lacks (`catalog::missing`). Its node holds fake data clients
+//! that answer as Databento's does: a completed `DataResponseEnvelope`, or `RequestFailed` on an
+//! error. Each client is asked by the requests naming it. The data engine writes each answer back.
+//! The tests read the catalog, what each client was asked and by which name, and what the fill
+//! returns.
+//!
+//! The venue holds GCZ26 (`GCZ26.GLBX`) data over a weekend, from Friday 17 October 2025 to
+//! Tuesday 21 October. Its book has a snapshot at 10:00 on Friday, Monday and Tuesday, and none on
+//! the weekend. It has one delta on Monday at 10:00, one minute bar closing on Friday at 10:00 and
+//! one funding rate on Friday at 08:00. A fill asks the definition first, then a window of one
+//! `DAY` a request, each starting 1 ns after the one before.
+//!
+//! The tests are hermetic: no venue. Each test runs its nodes on its own thread, as Nautilus'
+//! message bus is thread-local.
 //!
 //! ```sh
 //! cargo test --test node_fill
@@ -20,12 +28,12 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use helix_trader::{
     catalog::{FillData, FillRequest, NodeClient, NodeFill, missing},
-    rolls::Slice,
-    strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
+    strategy::requirements::{CatalogSeries, DataRequirements, SeriesSlice, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -33,7 +41,7 @@ use nautilus_common::{
     clients::DataClient,
     clock::Clock,
     factories::{ClientConfig, DataClientFactory},
-    live::{get_runtime, runner::get_data_event_sender, sender::EventSender},
+    live::{clock::LiveClock, get_runtime, runner::get_data_event_sender, sender::EventSender},
     messages::{
         DataEvent, DataResponse,
         data::{
@@ -60,8 +68,6 @@ use rstest::rstest;
 
 const GCZ26: &str = "GCZ26.GLBX";
 
-/// Friday 17 October 2025 to Tuesday 21 October: a weekend without data
-/// inside.
 const FRI: &str = "2025-10-17T00:00:00Z";
 const SAT: &str = "2025-10-18T00:00:00Z";
 const SUN: &str = "2025-10-19T00:00:00Z";
@@ -71,6 +77,10 @@ const WED: &str = "2025-10-22T00:00:00Z";
 
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
+fn december() -> InstrumentId {
+    InstrumentId::from(GCZ26)
+}
+
 fn ts(s: &str) -> Timestamp {
     s.parse().unwrap()
 }
@@ -79,24 +89,23 @@ fn ns(s: &str) -> u64 {
     UnixNanos::from(ts(s)).as_u64()
 }
 
-/// 1 ns before `s`: the end of the window before it.
+/// Returns 1 ns before `s`.
 fn before(s: &str) -> u64 {
     ns(s) - 1
 }
 
-/// 1 ns after `s`: where the window after one ending at `s` starts.
+/// Returns 1 ns after `s`.
 fn after(s: &str) -> u64 {
     ns(s) + 1
 }
 
-/// The time 1 ns before `s`.
 fn end_before(s: &str) -> Timestamp {
     ts(s) - SignedDuration::from_nanos(1)
 }
 
-fn gcz6() -> InstrumentAny {
+fn definition(id: InstrumentId) -> InstrumentAny {
     let mut contract = futures_contract_es(None, None);
-    contract.id = InstrumentId::from(GCZ26);
+    contract.id = id;
     InstrumentAny::FuturesContract(contract)
 }
 
@@ -108,8 +117,8 @@ fn depth(at: &str) -> OrderBookDepth {
     depth
 }
 
-/// A bid of one contract at 4000.00 added to GCZ26's book at `at`, the
-/// last delta of its event.
+/// Returns a bid of one contract at 4000.00, added to GCZ26's book at `at`, as the last delta of
+/// its event.
 fn delta(at: &str) -> OrderBookDelta {
     OrderBookDelta::new(
         InstrumentId::from(GCZ26),
@@ -122,20 +131,19 @@ fn delta(at: &str) -> OrderBookDelta {
     )
 }
 
-fn trade(id: &str, at: &str) -> TradeTick {
+fn trade(id: InstrumentId, at: Timestamp) -> TradeTick {
     TradeTick::new(
-        InstrumentId::from(id),
+        id,
         Price::from("4000.00"),
         Quantity::from(1),
         AggressorSide::Buy,
         TradeId::new("1"),
-        ts(at).into(),
-        ts(at).into(),
+        at.into(),
+        at.into(),
     )
 }
 
-/// The book of GCZ26 the venue has: a snapshot on Friday, Monday and
-/// Tuesday, none on the weekend.
+/// Returns the book of GCZ26 the venue has.
 fn book() -> Vec<OrderBookDepth> {
     vec![
         depth("2025-10-17T10:00:00Z"),
@@ -144,39 +152,33 @@ fn book() -> Vec<OrderBookDepth> {
     ]
 }
 
-/// How the fake venue answers a data request.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Answer {
-    /// A completed envelope, at once.
+    /// A completed envelope.
     Data,
-    /// A completed envelope, 50 ms later from a task, as Databento's
-    /// client answers from its HTTP request.
+    /// A completed envelope 50 ms later, as Databento's client answers over HTTP.
     Later,
-    /// `RequestFailed` with the rows got, as Databento's client on an
-    /// error.
+    /// `RequestFailed` with the rows received, as Databento's client sends on an error.
     Failed,
-    /// A completed envelope with a failure reason, as IC's client.
+    /// A completed envelope with a failure reason, as IC's client sends.
     FailureEnvelope,
-    /// The request refused (`Err`).
+    /// Refuses the request (`Err`).
     Refused,
-    /// Trades of GCQ26 to a request of GCZ26's: rows the engine cannot
-    /// write back.
+    /// Answers a request for GCZ26 with trades of GCQ26. The engine cannot write those rows back.
     OtherContract,
-    /// As `Data` for a window starting before this time, as `Failed` from
-    /// it on: the venue cutting the history part way through a request.
+    /// `Data` for a window starting before this time, and `Failed` from it on.
     FailedFrom(u64),
 }
 
-/// What the fake venue holds and was asked.
 #[derive(Debug)]
 struct FakeVenue {
     book: Vec<OrderBookDepth>,
     answer: Answer,
     /// Each request: what, from, to (ns).
     asked: Vec<(FillData, u64, u64)>,
-    /// The client each request named, in the same order.
+    /// The client each request named.
     named: Vec<Option<ClientId>>,
-    /// Requests asked and not answered yet, and the most at once.
+    /// Requests not yet answered, and the most at once.
     in_flight: Arc<AtomicUsize>,
     most_in_flight: usize,
 }
@@ -203,7 +205,6 @@ impl ClientConfig for FakeConfig {
     }
 }
 
-/// The factory of a client of the fake venue, named as given.
 #[derive(Debug)]
 struct FakeFactory(Rc<RefCell<FakeVenue>>, &'static str);
 
@@ -232,8 +233,7 @@ impl DataClientFactory for FakeFactory {
     }
 }
 
-/// A data client answering as the fake venue says; on no venue, as
-/// Databento's, so asked only by the requests naming it.
+/// A data client on no venue, as Databento's is.
 struct FakeClient {
     id: ClientId,
     venue: Rc<RefCell<FakeVenue>>,
@@ -242,8 +242,7 @@ struct FakeClient {
 }
 
 impl FakeClient {
-    /// Records the request of `data` over `[start, end]` naming
-    /// `client_id`, then answers it with `response` as the venue says.
+    /// Records the request, then answers it with `response` as the venue says.
     fn answer(
         &self,
         data: FillData,
@@ -339,14 +338,18 @@ impl DataClient for FakeClient {
         let (start, end) = window(request.start, request.end);
         {
             let mut venue = self.venue.borrow_mut();
-            venue.asked.push((FillData::Instrument, start, end));
+            venue.asked.push((
+                FillData::Instrument(request.single_instrument_id()?),
+                start,
+                end,
+            ));
             venue.named.push(request.client_id);
         }
         let response = InstrumentResponse::new(
             request.request_id,
             self.id,
             request.single_instrument_id()?,
-            gcz6(),
+            definition(request.single_instrument_id()?),
             Some(UnixNanos::from(start)),
             Some(UnixNanos::from(end)),
             UnixNanos::from(end),
@@ -379,14 +382,13 @@ impl DataClient for FakeClient {
             request.params.clone(),
         ));
         self.answer(
-            FillData::Depth,
+            FillData::Depth(request.single_instrument_id()?),
             (request.request_id, request.client_id),
             (start, end),
             response,
         )
     }
 
-    /// One delta, on Monday at 10:00, if the window holds it.
     fn request_book_deltas(&self, request: RequestBookDeltas) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
         let rows: Vec<OrderBookDelta> = [delta("2025-10-20T10:00:00Z")]
@@ -404,7 +406,7 @@ impl DataClient for FakeClient {
             request.params.clone(),
         ));
         self.answer(
-            FillData::Deltas,
+            FillData::Deltas(request.single_instrument_id()?),
             (request.request_id, request.client_id),
             (start, end),
             response,
@@ -413,30 +415,30 @@ impl DataClient for FakeClient {
 
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
+        let id = request.single_instrument_id()?;
         let of = if self.venue.borrow().answer == Answer::OtherContract {
-            "GCQ26.GLBX"
+            InstrumentId::from("GCQ26.GLBX")
         } else {
-            GCZ26
+            id
         };
         let response = DataResponse::Trades(TradesResponse::new(
             request.request_id,
             self.id,
             request.instrument_ids.clone(),
-            vec![trade(of, "2025-10-17T10:00:00Z")],
+            vec![trade(of, Timestamp::from(UnixNanos::from(start)))],
             Some(UnixNanos::from(start)),
             Some(UnixNanos::from(end)),
             UnixNanos::from(end),
             request.params.clone(),
         ));
         self.answer(
-            FillData::Trades,
+            FillData::Trades(id),
             (request.request_id, request.client_id),
             (start, end),
             response,
         )
     }
 
-    /// One bar, closing on Friday at 10:00, if the window holds it.
     fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
         let bar_type = request.single_bar_type()?;
@@ -462,7 +464,6 @@ impl DataClient for FakeClient {
         )
     }
 
-    /// One funding rate, on Friday at 08:00, if the window holds it.
     fn request_funding_rates(&self, request: RequestFundingRates) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
         let rows: Vec<FundingRateUpdate> = [funding("2025-10-17T08:00:00Z")]
@@ -480,7 +481,7 @@ impl DataClient for FakeClient {
             request.params.clone(),
         ));
         self.answer(
-            FillData::Funding,
+            FillData::Funding(request.single_instrument_id()?),
             (request.request_id, request.client_id),
             (start, end),
             response,
@@ -488,7 +489,6 @@ impl DataClient for FakeClient {
     }
 }
 
-/// The requirements reading `data` of GCZ26.
 fn reading(data: NautilusDataType) -> DataRequirements {
     DataRequirements {
         bar_types: vec![],
@@ -501,9 +501,8 @@ fn reading(data: NautilusDataType) -> DataRequirements {
     }
 }
 
-/// fill-catalog's fill through the node of the series `requirements` reads
-/// over `[start, end]` into the catalog in `dir`: what the catalog lacks,
-/// asked of the fake `venue` in windows of `period`.
+/// Fills through the node of `requirements` over `[start, end]` into `dir`, asking the fake `venue`
+/// for what the catalog lacks, in windows of `period`.
 fn fill(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
@@ -514,9 +513,7 @@ fn fill(
     fill_slices(dir, venue, &requirements.slices(start, end), period)
 }
 
-/// fill-catalog's fill through the node of `slices` into the catalog in
-/// `dir`: what the catalog lacks, asked of the fake `venue` in windows of
-/// `period`.
+/// As `fill`, for `slices`.
 fn fill_slices(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
@@ -530,16 +527,20 @@ fn fill_slices(
     run(node, dir)
 }
 
-/// Runs `node` into the catalog in `dir`.
+/// Runs `node` into `dir`, and fails the test unless it ends within a minute, as `NodeFill` sets no
+/// deadline of its own.
 fn run(node: NodeFill, dir: &Path) -> anyhow::Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(node.run(dir))
+        .block_on(async {
+            let fill = node.run(dir, || Rc::new(RefCell::new(LiveClock::default())));
+            tokio::time::timeout(Duration::from_secs(60), fill).await
+        })
+        .expect("the fill ends within a minute")
 }
 
-/// A client of the fake `venue` named `name`, on no venue.
 fn fake_client(venue: &Rc<RefCell<FakeVenue>>, name: &'static str) -> NodeClient {
     NodeClient {
         factory: Box::new(FakeFactory(Rc::clone(venue), name)),
@@ -553,7 +554,6 @@ fn depth_intervals(dir: &Path) -> Vec<(u64, u64)> {
         .unwrap()
 }
 
-/// What the catalog in `dir` lacks of GCZ26's book over `[from, to]`.
 fn depth_lacking(dir: &Path, (from, to): (&str, &str)) -> Vec<(u64, u64)> {
     ParquetDataCatalog::new(dir, None, None, None, None)
         .get_missing_intervals_for_request(
@@ -575,6 +575,39 @@ fn stored_book(dir: &Path) -> Vec<u64> {
         .collect()
 }
 
+/// GC rolls from August to December at midnight. The explicit December trades start an hour
+/// earlier, so its history is needed once for both hours.
+#[rstest]
+fn a_root_and_explicit_contract_ask_each_contract_once_over_its_required_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Data);
+    let mut requirements = reading(NautilusDataType::TradeTick);
+    requirements.ticks.insert(
+        0,
+        TickSeries {
+            data: NautilusDataType::TradeTick,
+            instrument_id: InstrumentId::from("GC.GLBX"),
+        },
+    );
+    let august = InstrumentId::from("GCQ26.GLBX");
+    let december = InstrumentId::from(GCZ26);
+    let from = "2026-07-28T23:00:00Z";
+    let roll = "2026-07-29T00:00:00Z";
+    let to = "2026-07-29T01:00:00Z";
+
+    fill(dir.path(), &venue, &requirements, (ts(from), ts(to)), DAY).unwrap();
+
+    assert_eq!(
+        venue.borrow().asked,
+        [
+            (FillData::Instrument(august), ns(from), before(roll)),
+            (FillData::Trades(august), ns(from), before(roll)),
+            (FillData::Instrument(december), ns(from), ns(to)),
+            (FillData::Trades(december), ns(from), ns(to)),
+        ]
+    );
+}
+
 #[rstest]
 fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     let dir = tempfile::tempdir().unwrap();
@@ -593,23 +626,23 @@ fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     let asked_twice = venue.borrow().asked.len();
     fill(dir.path(), &venue, &book_of, (ts(FRI), ts(WED)), DAY).unwrap();
 
-    // The definition over the window, then a day a request from its start;
-    // the weekend asked once, answered empty. Then only what Tuesday adds;
-    // then nothing.
+    // The weekend is asked once and answered empty. The second fill asks only for what Tuesday
+    // adds, the third for nothing.
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, ns(FRI), before(TUE)),
-            (FillData::Depth, ns(FRI), ns(SAT)),
-            (FillData::Depth, after(SAT), ns(SUN)),
-            (FillData::Depth, after(SUN), ns(MON)),
-            (FillData::Depth, after(MON), before(TUE)),
-            // The definition stored, the catalog answers it.
-            (FillData::Depth, ns(TUE), ns(WED)),
+            (FillData::Instrument(december()), ns(FRI), before(TUE)),
+            (FillData::Depth(december()), ns(FRI), ns(SAT)),
+            (FillData::Depth(december()), after(SAT), ns(SUN)),
+            (FillData::Depth(december()), after(SUN), ns(MON)),
+            (FillData::Depth(december()), after(MON), before(TUE)),
+            // The definition stored, the catalog answers it
+            (FillData::Depth(december()), ns(TUE), ns(WED)),
         ]
     );
     assert_eq!(asked_twice, 6);
-    // The empty weekend covered too.
+
+    // The empty weekend is covered too
     assert_eq!(depth_lacking(dir.path(), (FRI, WED)), []);
     assert_eq!(
         stored_book(dir.path()),
@@ -626,9 +659,8 @@ fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     assert_eq!(stored[0].id(), InstrumentId::from(GCZ26));
 }
 
-/// The book stored over Friday to Monday but for 0.2 s before Friday's
-/// midnight, as a live node's daily promotions leave a sliver between
-/// their files. The venue holds nothing in the sliver.
+/// The book is stored over Friday to Monday, but for 0.2 s before Friday's midnight, the sliver a
+/// live node's daily promotions leave between their files. The venue holds nothing in it.
 #[rstest]
 fn a_sliver_between_stored_files_is_asked_once_and_closed_by_its_write_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -663,7 +695,7 @@ fn a_sliver_between_stored_files_is_asked_once_and_closed_by_its_write_back() {
         .unwrap();
     }
 
-    // The sliver and its definition, by the first fill only.
+    // Only the first fill asks
     let sliver = (
         ns("2025-10-17T23:59:59.500000001Z"),
         ns("2025-10-17T23:59:59.699999999Z"),
@@ -671,14 +703,12 @@ fn a_sliver_between_stored_files_is_asked_once_and_closed_by_its_write_back() {
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, sliver.0, sliver.1),
-            (FillData::Depth, sliver.0, sliver.1),
+            (FillData::Instrument(december()), sliver.0, sliver.1),
+            (FillData::Depth(december()), sliver.0, sliver.1),
         ]
     );
 }
 
-/// Friday from midnight to noon in windows of three hours: the book's
-/// snapshot at 10:00 is in the last.
 #[rstest]
 fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
     let dir = tempfile::tempdir().unwrap();
@@ -717,10 +747,9 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
     assert_eq!(venue.borrow().most_in_flight, 1);
 }
 
-/// The venue holds only Tuesday's snapshot: every window but the last is
-/// empty, the most a request can hold, and none of them ends the fill. With
-/// no stored data beside them they record nothing, so the next fill asks for
-/// them again.
+/// The venue holds only Tuesday's snapshot, so every window but the last is empty.
+///
+/// With no stored data beside them the empty windows record nothing, so the next fill asks again.
 #[rstest]
 fn a_run_of_empty_windows_does_not_end_the_fill() {
     let dir = tempfile::tempdir().unwrap();
@@ -757,8 +786,6 @@ fn a_run_of_empty_windows_does_not_end_the_fill() {
     );
 }
 
-/// The venue cuts the history at Sunday's window. What came before stays
-/// written, window by window, and the next fill asks only from there.
 #[rstest]
 fn a_window_failing_keeps_those_before_it_and_the_next_fill_asks_only_from_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -771,7 +798,8 @@ fn a_window_failing_keeps_those_before_it_and_the_next_fill_asks_only_from_it() 
         .to_string();
 
     assert!(err.contains("venue cut the history"), "{err}");
-    // The definition and three windows: Monday's never asked.
+
+    // The definition and three windows, Monday's never asked
     assert_eq!(venue.borrow().asked.len(), 4);
     assert_eq!(stored_book(dir.path()), [ns("2025-10-17T10:00:00Z")]);
     assert_eq!(
@@ -786,8 +814,8 @@ fn a_window_failing_keeps_those_before_it_and_the_next_fill_asks_only_from_it() 
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Depth, after(SUN), ns(MON) + 1),
-            (FillData::Depth, ns(MON) + 2, before(TUE)),
+            (FillData::Depth(december()), after(SUN), ns(MON) + 1),
+            (FillData::Depth(december()), ns(MON) + 2, before(TUE)),
         ]
     );
     assert_eq!(
@@ -800,43 +828,40 @@ fn a_window_failing_keeps_those_before_it_and_the_next_fill_asks_only_from_it() 
     );
 }
 
+/// The error names the venue's reason, whether the venue fails the request or answers it with a
+/// failure envelope. When the client refuses the request, it names Nautilus' reason instead.
 #[rstest]
-fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
+#[case::failed(Answer::Failed, "failed: venue cut the history")]
+#[case::failure_envelope(Answer::FailureEnvelope, "failed: venue cut the history")]
+#[case::refused(Answer::Refused, "failed: ")]
+fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing(
+    #[case] answer: Answer,
+    #[case] failure: &str,
+) {
     let friday_on = "the book depths of GCZ26.GLBX over \
                      [2025-10-17T00:00:00Z, 2025-10-18T23:59:59.999999999Z]";
-    for (answer, failure) in [
-        // The venue's reason.
-        (Answer::Failed, "failed: venue cut the history"),
-        (Answer::FailureEnvelope, "failed: venue cut the history"),
-        // Nautilus' reason, not the client's.
-        (Answer::Refused, "failed: "),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let venue = FakeVenue::new(answer);
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(answer);
 
-        let err = fill(
-            dir.path(),
-            &venue,
-            &reading(NautilusDataType::OrderBookDepth),
-            (ts(FRI), end_before(SUN)),
-            DAY,
-        )
-        .unwrap_err()
-        .to_string();
+    let err = fill(
+        dir.path(),
+        &venue,
+        &reading(NautilusDataType::OrderBookDepth),
+        (ts(FRI), end_before(SUN)),
+        DAY,
+    )
+    .unwrap_err()
+    .to_string();
 
-        assert!(
-            err.contains(&format!("{friday_on} {failure}")),
-            "{answer:?}: {err}"
-        );
-        // The first window failed: the second never asked.
-        assert_eq!(venue.borrow().asked.len(), 2, "{answer:?}");
-        assert_eq!(depth_intervals(dir.path()), [], "{answer:?}");
-    }
+    assert!(err.contains(&format!("{friday_on} {failure}")), "{err}");
+
+    // The second window is never asked
+    assert_eq!(venue.borrow().asked.len(), 2);
+    assert_eq!(depth_intervals(dir.path()), []);
 }
 
-/// GCZ26's definition asked of one client and its book of another, both on
-/// no venue and with no route, as two sources of one venue share a fill's
-/// node: each request names its client, and that client answers it.
+/// GCZ26's definition is asked of one client and its book of another, both on no venue and with no
+/// route, as two sources of one venue share a fill's node.
 #[rstest]
 fn each_request_is_answered_by_the_client_it_names() {
     let dir = tempfile::tempdir().unwrap();
@@ -847,7 +872,7 @@ fn each_request_is_answered_by_the_client_it_names() {
     let (definition, book): (Vec<FillRequest>, Vec<FillRequest>) = missing(&catalog, &slices)
         .unwrap()
         .into_iter()
-        .partition(|request| request.data == FillData::Instrument);
+        .partition(|request| matches!(request.data, FillData::Instrument(_)));
     let mut node = NodeFill::new();
     node.add(
         fake_client(&definitions, "DEFINITIONS"),
@@ -860,7 +885,7 @@ fn each_request_is_answered_by_the_client_it_names() {
 
     assert_eq!(
         definitions.borrow().asked,
-        [(FillData::Instrument, ns(FRI), before(SUN))]
+        [(FillData::Instrument(december()), ns(FRI), before(SUN))]
     );
     assert_eq!(
         definitions.borrow().named,
@@ -869,8 +894,8 @@ fn each_request_is_answered_by_the_client_it_names() {
     assert_eq!(
         history.borrow().asked,
         [
-            (FillData::Depth, ns(FRI), ns(SAT)),
-            (FillData::Depth, after(SAT), before(SUN)),
+            (FillData::Depth(december()), ns(FRI), ns(SAT)),
+            (FillData::Depth(december()), after(SAT), before(SUN)),
         ]
     );
     assert_eq!(history.borrow().named, [Some(ClientId::from("HISTORY")); 2]);
@@ -916,9 +941,9 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, ns(MON), before(WED)),
-            (FillData::Deltas, ns(MON), ns(TUE)),
-            (FillData::Deltas, after(TUE), before(WED)),
+            (FillData::Instrument(december()), ns(MON), before(WED)),
+            (FillData::Deltas(december()), ns(MON), ns(TUE)),
+            (FillData::Deltas(december()), after(TUE), before(WED)),
         ]
     );
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -930,8 +955,8 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
 
 const BARS: &str = "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL";
 
-/// GCZ26's minute bar closing at `close`, stamped at its close, as
-/// Databento's client stamps bars by default (`bars_timestamp_on_close`).
+/// Returns GCZ26's minute bar closing at `close`, stamped at its close as Databento's client stamps
+/// bars by default (`bars_timestamp_on_close`).
 fn bar(close: &str) -> Bar {
     let price = Price::from("4000.00");
     Bar::new(
@@ -946,7 +971,6 @@ fn bar(close: &str) -> Bar {
     )
 }
 
-/// GCZ26's funding at `at`, eight hours after the one before.
 fn funding(at: &str) -> FundingRateUpdate {
     FundingRateUpdate::new(
         InstrumentId::from(GCZ26),
@@ -958,26 +982,25 @@ fn funding(at: &str) -> FundingRateUpdate {
     )
 }
 
-/// The slice of GCZ26's `series` over `[from, to]`.
-fn series_slice(series: (NautilusDataType, &str), from: Timestamp, to: Timestamp) -> SeriesSlice {
-    SeriesSlice {
-        series: (series.0, series.1.to_string()),
-        slice: Slice {
-            instrument_id: InstrumentId::from(GCZ26),
-            from,
-            to,
-        },
-    }
-}
-
 #[rstest]
 fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_series() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Data);
     let (from, to) = (ts(FRI), end_before(SUN));
     let slices = [
-        series_slice((NautilusDataType::FundingRateUpdate, GCZ26), from, to),
-        series_slice((NautilusDataType::Bar, BARS), from, to),
+        SeriesSlice {
+            series: CatalogSeries::Ticks(TickSeries {
+                data: NautilusDataType::FundingRateUpdate,
+                instrument_id: InstrumentId::from(GCZ26),
+            }),
+            from,
+            to,
+        },
+        SeriesSlice {
+            series: CatalogSeries::Bars(BarType::from(BARS)),
+            from,
+            to,
+        },
     ];
 
     fill_slices(dir.path(), &venue, &slices, DAY).unwrap();
@@ -986,9 +1009,9 @@ fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_serie
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, ns(FRI), before(SUN)),
-            (FillData::Funding, ns(FRI), ns(SAT)),
-            (FillData::Funding, after(SAT), before(SUN)),
+            (FillData::Instrument(december()), ns(FRI), before(SUN)),
+            (FillData::Funding(december()), ns(FRI), ns(SAT)),
+            (FillData::Funding(december()), after(SAT), before(SUN)),
             (bars, ns(FRI), ns(SAT)),
             (bars, after(SAT), before(SUN)),
         ]

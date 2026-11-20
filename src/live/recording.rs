@@ -1,28 +1,20 @@
-//! Recording the live data into the catalog.
+//! Records the live data into the catalog.
 //!
-//! The live node streams the market data it receives, and the instrument
-//! definitions its clients load, through Nautilus' streaming writer
-//! (`StreamingConfig`): Feather files appended under a staging directory
-//! outside the catalog, in `live/<instance id>/`, promoted into the catalog
-//! the node registers daily and on a clean stop, each staging file deleted
-//! once promoted. A retrain the node starts then trains on the data up to
-//! the last promotion, at most a day old (`model::launcher`). Each
-//! promotion names its files by their rows, so a run's files of a series
-//! leave a sliver between them, one a day, which the catalog counts as
-//! missing: a backtest replays the rows through it, and the live warmup
-//! and fill-catalog ask the venue for it once, its answer written back
-//! over it.
+//! The live node streams the market data it receives and the instrument definitions its clients
+//! load, through Nautilus' streaming writer (`StreamingConfig`).
+//! - The writer creates Feather files under a staging directory outside the catalog, in
+//!   `live/<instance id>/`.
+//! - The files are promoted into the catalog daily and on a clean stop, then deleted.
+//! - The retrain actor checks catalog coverage, not staged rows (`model::launcher`).
 //!
-//! The node keeps one instance id per trader across restarts, in a file in
-//! the staging directory: a run after a crash writes to the same
-//! `live/<instance id>/`, where Nautilus recovers the files the crashed
-//! run left; the start promotes them as soon as the node is built
-//! (`promote_staged`), before its warmup reads the catalog and writes back
-//! to it.
+//! Each promotion names its files by their rows. So a series leaves a daily sliver between files,
+//! and the catalog counts that sliver as missing. The live warmup and fill-catalog ask the venue
+//! for it once and write the answer back.
 //!
-//! Order and position events, account states and custom data are not
-//! streamed: the catalog holds market data, and the strategies' custom data
-//! has a store of its own.
+//! The node keeps one instance id per trader across restarts, in the staging directory. A run
+//! after a crash writes to the same `live/<instance id>/`, where Nautilus recovers the crashed
+//! run's files. `promote_staged` promotes them before the warmup reads the catalog. Order and
+//! position events, account states and custom data are not streamed.
 
 use std::{io::ErrorKind, path::PathBuf};
 
@@ -36,34 +28,32 @@ use nautilus_persistence::{
     config::{DataCatalogConfig, RotationConfig, StreamingConfig},
 };
 
-/// Where the live node stages the data it streams; it promotes it into the
-/// catalog daily (`PROMOTION_INTERVAL`).
+/// Where the live node stages the data it streams.
 #[derive(Debug, Clone)]
 pub struct Recording {
-    /// The staging directory, outside the catalog; created if missing. It
-    /// also keeps each trader's instance id.
+    /// The staging directory, outside the catalog and created if missing.
+    ///
+    /// It also keeps the instance id of each trader.
     pub staging: PathBuf,
 }
 
 impl Recording {
-    /// The streaming config of the node registering `catalog`: staged under
-    /// `staging`, promoted into `catalog` daily and on a clean stop, staging
-    /// files deleted once promoted. Each directory goes to Nautilus by its
-    /// path as given, which it resolves against the working directory.
+    /// Returns the streaming config of the node that registers `catalog`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the staging directory is inside the catalog,
-    /// either cannot be resolved, or the staging path is not UTF-8.
+    /// Returns an error if:
+    /// - The staging directory is inside the catalog.
+    /// - Either path cannot be resolved.
+    /// - The staging path is not UTF-8.
     pub fn streaming(&self, catalog: &DataCatalogConfig) -> anyhow::Result<StreamingConfig> {
         let staging = self
             .staging
             .to_str()
             .with_context(|| format!("staging path {} is not UTF-8", self.staging.display()))?;
-        // Apart, so that readers and maintenance of the catalog never meet
-        // unpromoted files. Compared where Nautilus finds them, however
-        // each is given: against the working directory, `..` and symlinks
-        // resolved.
+        // The directories stay apart so that readers of the catalog never meet unpromoted files,
+        // compared by the paths where Nautilus finds them: against the working directory, with
+        // `..` and symlinks resolved.
         let staged = normalize_storage_location(staging)
             .with_context(|| format!("resolving the staging directory {staging}"))?;
         let promoted = normalize_storage_location(&catalog.connect_config().uri)
@@ -84,6 +74,8 @@ impl Recording {
             u64::try_from(PROMOTION_INTERVAL.as_millis())
                 .expect("a day of milliseconds fits in u64"),
         );
+        // Closing the writer promotes what it staged, and `promote_staged` relies on that
+        streaming.promote_on_close = true;
         streaming.delete_feather_after_promotion = true;
         streaming.data_types = Some(STREAMED.to_vec());
         streaming
@@ -92,14 +84,17 @@ impl Recording {
         Ok(streaming)
     }
 
-    /// The instance id of `trader_id`'s node: the one its last run kept in
-    /// the staging directory, else a new one, kept there.
+    /// Returns the instance id of the node of `trader_id`.
+    ///
+    /// That is the id the last run kept, or else a new id, which is kept.
     ///
     /// # Errors
     ///
-    /// Returns an error if the staging directory cannot be created, or the
-    /// trader's instance id file cannot be read, holds no instance id, or
-    /// cannot be written.
+    /// Returns an error if:
+    /// - The staging directory cannot be created.
+    /// - The trader's instance id file cannot be read.
+    /// - The file holds no instance id.
+    /// - The file cannot be written.
     pub fn instance_id(&self, trader_id: TraderId) -> anyhow::Result<UUID4> {
         let file = self.staging.join(format!("{trader_id}.instance-id"));
         match std::fs::read_to_string(&file) {
@@ -115,7 +110,7 @@ impl Recording {
                     format!("creating the staging directory {}", self.staging.display())
                 })?;
                 let instance_id = UUID4::new();
-                // Written whole or not at all: a crash leaves no half id.
+                // Written whole or not at all, so a crash leaves no half id
                 let written = self.staging.join(format!("{trader_id}.instance-id.new"));
                 std::fs::write(&written, instance_id.to_string())
                     .and_then(|()| std::fs::rename(&written, &file))
@@ -137,25 +132,21 @@ impl Recording {
     }
 }
 
-/// Promotes into the catalog what the last run of `node`'s instance left
-/// staged, a crashed run's rows: call it once the node is built, before it
-/// runs. The node's writer recovered those files when it was built, but
-/// would promote them only at its first promotion, after the strategy's
-/// warmup has read the catalog and written the venue's answer back over
-/// the crash, which they would then overlap: Nautilus refuses them, and
-/// they are lost. Closing the writer promotes them with Nautilus' own
-/// promotion (`StreamingConfig::promote_on_close`); it is reopened in the
-/// same run directory, empty, before the node runs.
+/// Promotes into the catalog what the last run of `node`'s instance left staged.
 ///
-/// The overlap comes only from the warmup's write-back running first, so
-/// promoting before the warmup is the fix, and closing and reopening the
-/// writer is the kernel's one public way to promote now (the writer's own
-/// `promote_now` is internal to Nautilus).
+/// Call it once the node is built, before it runs.
+///
+/// If the node's writer promoted them, it would do so only after the warmup wrote the venue's
+/// answer over the crashed run's rows. Nautilus refuses the overlap, so the rows would be lost.
+/// Closing the writer promotes them instead (`StreamingConfig::promote_on_close`), and the writer
+/// is reopened empty. This is the kernel's only public way to promote now, because the writer's
+/// `promote_now` is internal.
 ///
 /// # Errors
 ///
-/// Returns an error if the staged files cannot be promoted, the catalog
-/// already holding rows over them, or the writer cannot be reopened.
+/// Returns an error if:
+/// - The staged files cannot be promoted, because the catalog already holds rows over them.
+/// - The writer cannot be reopened.
 pub(super) fn promote_staged(node: &mut LiveNode) -> anyhow::Result<()> {
     let kernel = node.kernel_mut();
     kernel
@@ -166,18 +157,11 @@ pub(super) fn promote_staged(node: &mut LiveNode) -> anyhow::Result<()> {
         .context("reopening the streaming writer")
 }
 
-/// How often the writer flushes what it buffered to its staging files: what
-/// a crash loses at most.
 const FLUSH_INTERVAL_MS: u64 = 1_000;
 
-/// How often the staged data is promoted into the catalog: daily, so that
-/// a series gains a file, and a sliver between files, a day, and staging
-/// holds at most a day.
+/// A series gains one file and one sliver a day, and staging holds at most a day.
 const PROMOTION_INTERVAL: SignedDuration = SignedDuration::from_hours(24);
 
-/// The data the node streams: the market data its strategy can read and
-/// backtests replay, and the instrument definitions, which a backtest over
-/// the catalog needs.
 const STREAMED: [NautilusDataType; 9] = [
     NautilusDataType::Instrument,
     NautilusDataType::QuoteTick,
@@ -220,9 +204,8 @@ mod tests {
             streaming.catalog.unwrap().path(),
             dir.path().join("catalog").to_str().unwrap()
         );
+        assert_eq!(streaming.flush_interval_ms, 1_000);
         assert_eq!(streaming.promotion_interval_ms, Some(24 * 60 * 60 * 1_000));
-        // Nautilus' default, which `promote_staged` relies on.
-        assert!(streaming.promote_on_close);
         assert!(streaming.delete_feather_after_promotion);
     }
 
@@ -261,20 +244,6 @@ mod tests {
         assert_eq!(streaming.record_filters, None);
     }
 
-    #[rstest]
-    fn a_staging_directory_inside_the_catalog_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog_dir = dir.path().join("catalog");
-        std::fs::create_dir(&catalog_dir).unwrap();
-        let err = recording(catalog_dir.join("staging"))
-            .streaming(&catalog(&catalog_dir))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("inside the catalog"), "{err}");
-    }
-
-    /// `dir` by a path relative to the working directory: up to the root,
-    /// then down to it.
     fn relative(dir: &Path) -> PathBuf {
         let cwd = std::env::current_dir().unwrap();
         let mut relative: PathBuf =
@@ -283,26 +252,39 @@ mod tests {
         relative
     }
 
-    /// Either directory by a path relative to the working directory, as
-    /// `--catalog` and `--staging` take them, the other absolute or
-    /// relative too.
+    fn absolute(dir: &Path) -> PathBuf {
+        dir.to_path_buf()
+    }
+
     #[rstest]
-    fn a_staging_directory_inside_the_catalog_is_refused_however_either_is_given() {
+    #[case::both_absolute(absolute, absolute)]
+    #[case::the_catalog_relative(relative, absolute)]
+    #[case::the_staging_relative(absolute, relative)]
+    #[case::both_relative(relative, relative)]
+    fn a_staging_directory_inside_the_catalog_is_refused_however_either_is_given(
+        #[case] catalog_given: fn(&Path) -> PathBuf,
+        #[case] staging_given: fn(&Path) -> PathBuf,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let catalog_dir = dir.path().join("catalog");
         std::fs::create_dir(&catalog_dir).unwrap();
-        let staging = catalog_dir.join("staging");
-        for (catalog_dir, staging) in [
-            (relative(&catalog_dir), staging.clone()),
-            (catalog_dir.clone(), relative(&staging)),
-            (relative(&catalog_dir), relative(&staging)),
-        ] {
-            let err = recording(staging)
-                .streaming(&catalog(&catalog_dir))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("inside the catalog"), "{err}");
-        }
+        let (catalog_dir, staging) = (
+            catalog_given(&catalog_dir),
+            staging_given(&catalog_dir.join("staging")),
+        );
+        let err = recording(staging.clone())
+            .streaming(&catalog(&catalog_dir))
+            .unwrap_err()
+            .to_string();
+        // The catalog's path starts the staging path, so check the error names the staging
+        // directory apart.
+        let staging = staging.to_str().unwrap();
+        assert!(err.contains(staging), "{err}");
+        assert!(
+            err.replace(staging, "")
+                .contains(catalog_dir.to_str().unwrap()),
+            "{err}"
+        );
     }
 
     #[rstest]

@@ -1,22 +1,20 @@
-//! Fills the catalog with the history of the given instruments: the
-//! instruments and the series their strategy's bars are built from.
+//! Fills the catalog with the history of the given instruments and the series their strategy's
+//! bars are built from.
 //!
-//! Source-agnostic, no node: the data comes from a fetch function the
-//! caller passes, backed by an adapter's historical client (`venues::ib`). A series is a Nautilus data type and its catalog
-//! identifier (see `strategy::requirements::catalog_keys`): the quotes of an
-//! instrument, keyed by its id, or the bars of a bar type, keyed by the bar
-//! type. Per series it resumes after its stored range
-//! (`query_first_timestamp`, `query_last_timestamp`), checks the response,
-//! sorts it by `ts_init` and writes it with `write_instruments` and
-//! `write_data_enum` on a `ParquetDataCatalog` (`nautilus_persistence`),
-//! which stores each series under its data type and identifier. Nautilus
-//! does not persist requested data on its own.
+//! The module is source-agnostic and uses no node. The caller passes a fetch function, backed by
+//! an adapter's historical client (`venues::ib`). For each series the module:
+//! - Resumes after the stored range.
+//! - Checks the response.
+//! - Sorts it by `ts_init`.
+//! - Writes it with `write_data_enum`, which stores each series under its data type and
+//!   identifier.
 //!
-//! Temporary, with IB's fill that uses it: IB's data client answers
-//! without a `DataResponseEnvelope`, so Nautilus writes none of its
-//! answers back. Once nautilus_trader#5472 is fixed, IB fills through the
-//! node (see `node_fill`), and this file goes: helix-trader issue #4
-//! (<https://github.com/madebymlai/helix-trader/issues/4>).
+//! Nautilus does not persist requested data on its own.
+//!
+//! Temporary, together with IB's fill that uses it: IB's data client answers without a
+//! `DataResponseEnvelope`, so Nautilus writes none of its answers back. Once
+//! nautilus_trader#5472 is fixed, IB fills through the node (see `node_fill`), and this file
+//! goes: helix-trader issue #4 (<https://github.com/madebymlai/helix-trader/issues/4>).
 
 use std::collections::HashSet;
 
@@ -32,44 +30,35 @@ use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
 };
 
-use crate::strategy::requirements::SeriesSlice;
+use crate::strategy::requirements::{CatalogSeries, SeriesSlice};
 
-/// Fills `catalog` with `instruments`, then over `[start, end]` with each
-/// of `series`, a Nautilus data type and its catalog identifier, fetched one
-/// series at a time through `fetch`.
+/// Fills `catalog` with `instruments`, then with each of `series` over `[start, end]`.
 ///
-/// Instruments already in the catalog are not written again. A series is
-/// stored over the windows asked for (widened to its oldest and newest
-/// item). Once stored, it resumes 1 ns after the end of that range,
-/// whatever `start` (no hole between the stored range and `start`): a
-/// covered window asks for nothing, and returned items at or before that
-/// point are dropped. A `start` before the stored range is an error, raised
-/// before fetching: extending history backwards is not supported.
+/// The fill fetches one series at a time through `fetch`.
 ///
-/// A fetch over `[from, to]` returns the items of the series with `ts_init`
-/// in it: the closed interval stored, as all of Nautilus' catalog intervals
-/// (the next is contiguous when it starts 1 ns after the end). Any error
-/// stops the run; series filled before it stay stored. An empty response on
-/// a series' first fill (naming the series and the window asked for), or an
-/// item of another series, is an error. Once a
-/// series is stored, an empty response, or one of only already stored
-/// items, means nothing new: nothing is written and the next series run.
-/// Items are stored sorted by `ts_init`, a bar per `ts_init`, and ticks as
-/// fetched, those of one `ts_init` in the order fetched: the fetch drops a
-/// tick it was given again, and ticks alike in every field are the venue's,
-/// each stored.
+/// Instruments already in the catalog are not written again. A series is stored over the windows
+/// asked for, widened to its oldest and newest item. It resumes 1 ns after the end of that range,
+/// whatever `start` is:
+/// - A covered window asks for nothing.
+/// - Returned items at or before that point are dropped.
+/// - A `start` before the stored range is an error, raised before fetching, because extending
+///   history backwards is not supported.
+///
+/// A fetch over `[from, to]` returns the items of the series with `ts_init` in that closed
+/// interval. Any error stops the run, and series filled before it stay stored.
+/// - An empty response on a series' first fill is an error.
+/// - An item of another series is an error.
+/// - Once the series is stored, an empty response writes nothing.
+///
+/// Items are stored sorted by `ts_init`, with one bar per `ts_init`. Ticks are stored as fetched.
+/// Ticks that are alike in every field come from the venue, and each is stored.
 pub async fn fill_catalog(
     catalog: &mut ParquetDataCatalog,
     instruments: Vec<InstrumentAny>,
-    series: &[(NautilusDataType, String)],
+    series: &[CatalogSeries],
     start: Timestamp,
     end: Timestamp,
-    mut fetch: impl AsyncFnMut(
-        &NautilusDataType,
-        &str,
-        Timestamp,
-        Timestamp,
-    ) -> anyhow::Result<Vec<Data>>,
+    mut fetch: impl AsyncFnMut(&CatalogSeries, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
 ) -> anyhow::Result<()> {
     let ids: Vec<String> = instruments.iter().map(|i| i.id().to_string()).collect();
     let stored: HashSet<InstrumentId> = catalog
@@ -86,23 +75,23 @@ pub async fn fill_catalog(
         .write_instruments(new)
         .context("writing instruments")?;
     let end_ns = UnixNanos::from(end);
-    for (data_type, identifier) in series {
-        let named = || format!("the {} of {identifier}", data_path_prefix(data_type));
-        let (Some(from), resume_point) = resumed(catalog, data_type, identifier, start, end)?
-        else {
+
+    for source in series {
+        let named = || {
+            let (kind, key) = source.key();
+            format!("the {} of {key}", data_path_prefix(&kind))
+        };
+        let (Some(from), resume_point) = resumed(catalog, source, start, end)? else {
             continue;
         };
-        let mut items = fetch(data_type, identifier, from, end)
+        let mut items = fetch(source, from, end)
             .await
             .with_context(|| format!("fetching {}", named()))?;
         if items.is_empty() && resume_point.is_none() {
             anyhow::bail!("empty response for {} over [{from}, {end}]", named());
         }
 
-        if let Some(foreign) = items
-            .iter()
-            .find(|item| !is_of(item, data_type, identifier))
-        {
+        if let Some(foreign) = items.iter().find(|item| !is_of(item, source)) {
             anyhow::bail!(
                 "response for {} holds {} of {}",
                 named(),
@@ -114,11 +103,8 @@ pub async fn fill_catalog(
             items.retain(|item| item.ts_init() > last);
         }
         items.sort_by_key(HasTsInit::ts_init);
-        // One bar per close, a walk back's requests overlapping at their
-        // bounds. Ticks are kept as given: the fetch drops those it was
-        // given again, and two ticks alike in every field are two of the
-        // venue's, a venue stamping to the second (IB) giving such ticks
-        // with no id to tell them apart.
+        // One bar per close, since a walk back's requests overlap at their bounds. Ticks are kept
+        // as given, since a venue that stamps to the second (IB) gives ticks alike in every field.
         items.dedup_by(|later, earlier| match (later, earlier) {
             (Data::Bar(later), Data::Bar(earlier)) => later.ts_init == earlier.ts_init,
             _ => false,
@@ -135,32 +121,31 @@ pub async fn fill_catalog(
     Ok(())
 }
 
-/// Where a fill of the series of `data_type` and `identifier` over the
-/// window `[start, end]` resumes, by what `catalog` stores of it: from
-/// `start` if it stores nothing of it, else 1 ns after its stored end,
-/// whatever `start`, so that no hole opens between the stored range and
-/// the window; none if that is at or after `end`, the fill asking its
-/// source nothing of the series. With the stored end, if any.
+/// Returns where a fill of `series` over `[start, end]` resumes, with the stored end, if any.
+///
+/// The fill resumes at `start` if `catalog` stores nothing of the series, else 1 ns after the
+/// stored end. It returns none if that point is at or after `end`.
 ///
 /// # Errors
 ///
-/// Returns an error if the catalog cannot be read, or if `start` is before
-/// the stored range: extending history backwards is not supported.
+/// Returns an error if:
+/// - The catalog cannot be read.
+/// - `start` is before the stored range, because extending history backwards is not supported.
 pub(crate) fn resumed(
     catalog: &ParquetDataCatalog,
-    data_type: &NautilusDataType,
-    identifier: &str,
+    series: &CatalogSeries,
     start: Timestamp,
     end: Timestamp,
 ) -> anyhow::Result<(Option<Timestamp>, Option<UnixNanos>)> {
-    let named = || format!("the {} of {identifier}", data_path_prefix(data_type));
+    let (data_type, identifier) = series.key();
+    let named = || format!("the {} of {identifier}", data_path_prefix(&data_type));
     let catalog_type = data_type.clone().into();
     let reading = || format!("reading the stored range of {}", named());
     let first = catalog
-        .query_first_timestamp(&catalog_type, Some(identifier))
+        .query_first_timestamp(&catalog_type, Some(&identifier))
         .with_context(reading)?;
     let last = catalog
-        .query_last_timestamp(&catalog_type, Some(identifier))
+        .query_last_timestamp(&catalog_type, Some(&identifier))
         .with_context(reading)?;
 
     if let (Some(first), Some(last)) = (first, last)
@@ -179,31 +164,26 @@ pub(crate) fn resumed(
     Ok(((from < end).then_some(from), last))
 }
 
-/// Fills `catalog` with `slices`, each a series on a contract over its
-/// slice (`DataRequirements::slices`, the requests of the node fill too),
-/// one `fill_catalog` per slice in order, with the instrument of the
-/// slice's contract among `instruments` and `fetch` as its fetch.
-/// Temporary: IB's fill until nautilus_trader#5472 is fixed, then IB fills
-/// through the node.
+/// Fills `catalog` with `slices` (`DataRequirements::slices`), one `fill_catalog` per slice.
+///
+/// Temporary: this is IB's fill until nautilus_trader#5472 is fixed. Then IB fills through the
+/// node.
 ///
 /// # Errors
 ///
-/// Returns an error if no instrument of `instruments` is a slice's
-/// contract, when that slice's turn comes, or as `fill_catalog`. The slices
-/// filled before stay stored.
+/// Returns an error if:
+/// - No instrument in `instruments` is a slice's contract, when that slice's turn comes.
+/// - `fill_catalog` fails.
+///
+/// The slices filled before the error stay stored.
 pub(crate) async fn fill_slices(
     catalog: &mut ParquetDataCatalog,
     instruments: &[InstrumentAny],
     slices: &[SeriesSlice],
-    mut fetch: impl AsyncFnMut(
-        &NautilusDataType,
-        &str,
-        Timestamp,
-        Timestamp,
-    ) -> anyhow::Result<Vec<Data>>,
+    mut fetch: impl AsyncFnMut(&CatalogSeries, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
 ) -> anyhow::Result<()> {
-    for SeriesSlice { series, slice } in slices {
-        let id = slice.instrument_id;
+    for slice in slices {
+        let id = slice.series.instrument_id();
         let instrument = instruments
             .iter()
             .find(|instrument| instrument.id() == id)
@@ -211,23 +191,27 @@ pub(crate) async fn fill_slices(
         fill_catalog(
             catalog,
             vec![instrument.clone()],
-            std::slice::from_ref(series),
+            std::slice::from_ref(&slice.series),
             slice.from,
             slice.to,
-            async |data_type, identifier, from, to| fetch(data_type, identifier, from, to).await,
+            &mut fetch,
         )
         .await?;
     }
     Ok(())
 }
 
-/// Whether `item` belongs to the series of `data_type` and `identifier`.
-fn is_of(item: &Data, data_type: &NautilusDataType, identifier: &str) -> bool {
-    NautilusDataType::from_data(item) == *data_type && catalog_identifier(item) == identifier
+fn is_of(item: &Data, series: &CatalogSeries) -> bool {
+    match (item, series) {
+        (Data::Bar(bar), CatalogSeries::Bars(expected)) => bar.bar_type == *expected,
+        (Data::Bar(_), _) | (_, CatalogSeries::Bars(_)) => false,
+        (_, CatalogSeries::Ticks(tick)) => {
+            NautilusDataType::from_data(item) == tick.data
+                && item.instrument_id() == tick.instrument_id
+        }
+    }
 }
 
-/// The identifier the catalog stores `item` under, as `write_data_enum`
-/// keys it: the bar type of a bar, the instrument id of anything else.
 fn catalog_identifier(item: &Data) -> String {
     match item {
         Data::Bar(bar) => bar.bar_type.to_string(),
@@ -235,8 +219,7 @@ fn catalog_identifier(item: &Data) -> String {
     }
 }
 
-/// The first nanosecond after `last`; jiff reaches past any `UnixNanos`,
-/// so even `u64::MAX` has one.
+/// Returns the first nanosecond after `last`. jiff reaches past `u64::MAX` nanoseconds.
 fn just_after(last: UnixNanos) -> Timestamp {
     Timestamp::from(last) + SignedDuration::from_nanos(1)
 }
@@ -254,12 +237,10 @@ mod tests {
         types::{Price, Quantity},
     };
     use nautilus_persistence::catalog::types::{CatalogDataType, HasCatalogDataType};
+    use rstest::rstest;
 
     use super::*;
-    use crate::{
-        rolls::Slice,
-        strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
-    };
+    use crate::strategy::requirements::{CatalogSeries, DataRequirements, SeriesSlice, TickSeries};
 
     fn instrument() -> InstrumentAny {
         InstrumentAny::FuturesContract(futures_contract_es(None, None))
@@ -281,7 +262,6 @@ mod tests {
         ts.as_nanosecond().try_into().unwrap()
     }
 
-    /// A quote of `id` stamped `ts`.
     fn quote_at(id: InstrumentId, ts: u64) -> QuoteTick {
         QuoteTick::new(
             id,
@@ -294,8 +274,6 @@ mod tests {
         )
     }
 
-    /// Fills `instruments` and the quotes of each over `[start, end]`,
-    /// fetched through `fetch_quotes`.
     async fn fill_quotes(
         catalog: &mut ParquetDataCatalog,
         instruments: Vec<InstrumentAny>,
@@ -309,7 +287,12 @@ mod tests {
     ) -> anyhow::Result<()> {
         let series: Vec<_> = instruments
             .iter()
-            .map(|i| (NautilusDataType::QuoteTick, i.id().to_string()))
+            .map(|i| {
+                CatalogSeries::Ticks(TickSeries {
+                    data: NautilusDataType::QuoteTick,
+                    instrument_id: i.id(),
+                })
+            })
             .collect();
         fill_catalog(
             catalog,
@@ -317,21 +300,20 @@ mod tests {
             &series,
             start,
             end,
-            async |data_type, identifier, from, to| {
-                assert_eq!(*data_type, NautilusDataType::QuoteTick);
-                let quotes = fetch_quotes(InstrumentId::from(identifier), from, to).await?;
+            async |series, from, to| {
+                let CatalogSeries::Ticks(tick) = series else {
+                    panic!("{series}")
+                };
+                assert_eq!(tick.data, NautilusDataType::QuoteTick);
+                let quotes = fetch_quotes(tick.instrument_id, from, to).await?;
                 Ok(quotes.into_iter().map(Data::Quote).collect())
             },
         )
         .await
     }
 
-    /// The instrument and window the source was asked for, in nanoseconds.
     type Asked = (InstrumentId, u64, u64);
 
-    /// Fills `instruments` and their quotes over `[start, end]`
-    /// (nanoseconds) and returns the result with the windows the source was
-    /// asked for.
     async fn fill(
         catalog: &mut ParquetDataCatalog,
         instruments: Vec<InstrumentAny>,
@@ -367,7 +349,6 @@ mod tests {
         ParquetDataCatalog::new(dir.path(), None, None, None, None)
     }
 
-    /// The kinds of data `catalog` stores.
     fn stored_kinds(catalog: &ParquetDataCatalog) -> HashSet<CatalogDataType> {
         catalog.list_data_types().unwrap().into_iter().collect()
     }
@@ -395,7 +376,6 @@ mod tests {
         );
     }
 
-    /// Every file under `dir`, by path relative to it, with its bytes.
     fn files(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
         let mut files = vec![];
         let mut dirs = vec![dir.to_path_buf()];
@@ -449,8 +429,6 @@ mod tests {
         assert!(filled == written, "the files' bytes differ");
     }
 
-    /// Each instrument's quotes, sorted by `ts_init`; one given twice at a
-    /// stamp is two quotes, as a venue stamping to the second gives them.
     #[tokio::test]
     async fn quotes_are_written_and_read_back_per_instrument_sorted() {
         let dir = tempfile::tempdir().unwrap();
@@ -475,9 +453,8 @@ mod tests {
         assert_eq!(stored_quotes(&mut catalog, aapl_id), vec![5]);
     }
 
-    /// IB stamps its historical ticks to the second, and two of its ticks
-    /// alike in every field are two ticks: the quotes of one second are
-    /// stored as given, in the order given, one given twice stored twice.
+    /// IB stamps its historical ticks to the second, so quotes from one second are stored as
+    /// given.
     #[tokio::test]
     async fn every_quote_of_one_stamp_is_stored_as_given() {
         let dir = tempfile::tempdir().unwrap();
@@ -530,7 +507,10 @@ mod tests {
         r.unwrap();
         let ids = vec!["ESZ21.GLBX".to_string()];
         let stored = catalog.instruments(Some(&ids), None, None).unwrap();
-        assert_eq!(stored.len(), 1);
+        let [kept] = &stored[..] else {
+            panic!("{stored:?}")
+        };
+        assert_eq!(Instrument::ts_init(kept), UnixNanos::from(1));
     }
 
     #[tokio::test]
@@ -706,7 +686,11 @@ mod tests {
             Ok(vec![quote_at(id, 10)])
         })
         .await;
-        r.unwrap_err();
+        let err = format!("{:#}", r.unwrap_err());
+        assert!(
+            err.contains(&format!("quotes of {aapl_id}")) && err.contains("source down"),
+            "{err}"
+        );
         assert_eq!(stored_quotes(&mut catalog, es_id()), vec![10]);
         let (r, asked) = fill(&mut catalog, both(), 0, 100, |id| {
             Ok(vec![quote_at(id, 20)])
@@ -764,7 +748,10 @@ mod tests {
         .await;
         let err = r.unwrap_err().to_string();
         assert!(err.contains("quotes of ESZ21.GLBX"), "{err}");
-        assert!(err.contains("backwards"), "{err}");
+        assert!(
+            err.contains("[100, 200]") && err.contains("1970-01-01T00:00:00.00000005Z"),
+            "{err}"
+        );
         assert_eq!(asked, vec![]);
         assert_eq!(stored_quotes(&mut catalog, es_id()), vec![150]);
     }
@@ -838,8 +825,6 @@ mod tests {
 
     const MINUTE_NS: u64 = 60_000_000_000;
 
-    /// A source of one quote a minute: the quotes of `id` stamped 1 ns
-    /// before each minute's close over `[from, to]`.
     fn minute_quotes(id: InstrumentId, from: u64, to: u64) -> Vec<QuoteTick> {
         (from / MINUTE_NS + 1..=to / MINUTE_NS + 1)
             .map(|minute| quote_at(id, minute * MINUTE_NS - 1))
@@ -875,7 +860,6 @@ mod tests {
 
     const BARS: &str = "ESZ21.GLBX-1-MINUTE-LAST-EXTERNAL";
 
-    /// The minute bar of `BARS` stamped `ts`.
     fn bar_at(ts: u64) -> Bar {
         let price = Price::from("100.00");
         let ts = UnixNanos::from(ts);
@@ -891,27 +875,22 @@ mod tests {
         )
     }
 
-    /// Fills the instrument and the bars of `BARS` over `[start, end]` from
-    /// `source`, and returns the result with the windows asked for.
     async fn fill_bars(
         catalog: &mut ParquetDataCatalog,
         start: u64,
         end: u64,
         source: impl Fn(u64, u64) -> Vec<Data>,
-    ) -> (
-        anyhow::Result<()>,
-        Vec<(NautilusDataType, String, u64, u64)>,
-    ) {
+    ) -> (anyhow::Result<()>, Vec<(CatalogSeries, u64, u64)>) {
         let mut asked = Vec::new();
         let result = fill_catalog(
             catalog,
             vec![instrument()],
-            &[(NautilusDataType::Bar, BARS.to_string())],
+            &[CatalogSeries::Bars(BarType::from(BARS))],
             ns(start),
             ns(end),
-            async |data_type, identifier, from, to| {
+            async |series, from, to| {
                 let (from, to) = (as_ns(from), as_ns(to));
-                asked.push((data_type.clone(), identifier.to_string(), from, to));
+                asked.push((series.clone(), from, to));
                 Ok(source(from, to))
             },
         )
@@ -945,7 +924,7 @@ mod tests {
         r.unwrap();
         assert_eq!(
             asked,
-            vec![(NautilusDataType::Bar, BARS.to_string(), 101, 200)]
+            vec![(CatalogSeries::Bars(BarType::from(BARS)), 101, 200)]
         );
         assert_eq!(stored_bars(&mut catalog), vec![10, 20, 30, 150]);
         let intervals = catalog
@@ -961,33 +940,30 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::a_quote(
+        vec![Data::Bar(bar_at(10)), Data::Quote(quote_at(es_id(), 20))],
+        "quotes of ESZ21.GLBX"
+    )]
+    #[case::bars_of_another_bar_type(
+        vec![Data::Bar(Bar {
+            bar_type: BarType::from("ESZ21.GLBX-1-HOUR-LAST-EXTERNAL"),
+            ..bar_at(10)
+        })],
+        "bars of ESZ21.GLBX-1-HOUR-LAST-EXTERNAL"
+    )]
     #[tokio::test]
-    async fn a_quote_in_a_response_for_bars_is_an_error_naming_both() {
+    async fn a_foreign_item_in_a_response_for_bars_is_an_error_naming_both(
+        #[case] response: Vec<Data>,
+        #[case] foreign: &str,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let mut catalog = new_catalog(&dir);
-        let (r, _) = fill_bars(&mut catalog, 0, 100, |_, _| {
-            vec![Data::Bar(bar_at(10)), Data::Quote(quote_at(es_id(), 20))]
-        })
-        .await;
+        let (r, _) = fill_bars(&mut catalog, 0, 100, |_, _| response.clone()).await;
         let err = r.unwrap_err().to_string();
         assert!(err.contains(&format!("bars of {BARS}")), "{err}");
-        assert!(err.contains("quotes of ESZ21.GLBX"), "{err}");
+        assert!(err.contains(foreign), "{err}");
         assert!(stored_bars(&mut catalog).is_empty());
-    }
-
-    #[tokio::test]
-    async fn bars_of_another_bar_type_are_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut catalog = new_catalog(&dir);
-        let other = "ESZ21.GLBX-1-HOUR-LAST-EXTERNAL";
-        let (r, _) = fill_bars(&mut catalog, 0, 100, |_, _| {
-            let mut bar = bar_at(10);
-            bar.bar_type = BarType::from(other);
-            vec![Data::Bar(bar)]
-        })
-        .await;
-        let err = r.unwrap_err().to_string();
-        assert!(err.contains(&format!("bars of {other}")), "{err}");
     }
 
     #[tokio::test]
@@ -999,7 +975,6 @@ mod tests {
         assert!(err.contains(&format!("bars of {BARS}")), "{err}");
     }
 
-    /// A trade of ES stamped `ts`.
     fn trade_at(ts: u64) -> TradeTick {
         let ts = UnixNanos::from(ts);
         TradeTick::new(
@@ -1013,7 +988,6 @@ mod tests {
         )
     }
 
-    /// A book depth snapshot of ES stamped `ts`.
     fn depth_at(ts: u64) -> OrderBookDepth {
         let mut depth = stub_depth10();
         let ts = UnixNanos::from(ts);
@@ -1021,10 +995,6 @@ mod tests {
         depth
     }
 
-    /// Fills the instrument and the series of requirements reading ES's
-    /// trades and book depth, no bars, over `[start, end]`, from a source
-    /// of trades at 10, 60 and 150 and snapshots at 20 and 180, and
-    /// returns the result with the windows asked for.
     async fn fill_ticks(
         catalog: &mut ParquetDataCatalog,
         start: u64,
@@ -1050,12 +1020,16 @@ mod tests {
         let result = fill_catalog(
             catalog,
             vec![instrument()],
-            &requirements.catalog_keys(),
+            &requirements.catalog_series(),
             ns(start),
             ns(end),
-            async |data_type, identifier, from, to| {
+            async |series, from, to| {
+                let CatalogSeries::Ticks(tick) = series else {
+                    panic!("{series}")
+                };
+                let data_type = &tick.data;
                 let (from, to) = (as_ns(from), as_ns(to));
-                asked.push((data_type.clone(), identifier.to_string(), from, to));
+                asked.push((data_type.clone(), tick.instrument_id.to_string(), from, to));
                 let within = |ts: &u64| (from..=to).contains(ts);
                 Ok(match data_type {
                     NautilusDataType::TradeTick => [10, 60, 150]
@@ -1107,8 +1081,6 @@ mod tests {
         assert_eq!(depths, [20, 180]);
     }
 
-    /// ES's December 2021 contract, and its March 2022 one, as two
-    /// contracts a rolled root's slices stand on.
     fn contracts() -> Vec<InstrumentAny> {
         let mut march = futures_contract_es(None, None);
         march.id = InstrumentId::from("ESH22.GLBX");
@@ -1117,12 +1089,12 @@ mod tests {
 
     fn quotes_slice(id: &str, from: u64, to: u64) -> SeriesSlice {
         SeriesSlice {
-            series: (NautilusDataType::QuoteTick, id.to_string()),
-            slice: Slice {
+            series: CatalogSeries::Ticks(TickSeries {
+                data: NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from(id),
-                from: ns(from),
-                to: ns(to),
-            },
+            }),
+            from: ns(from),
+            to: ns(to),
         }
     }
 
@@ -1140,10 +1112,13 @@ mod tests {
             &mut catalog,
             &contracts(),
             &slices,
-            async |data_type, identifier, from, to| {
-                assert_eq!(*data_type, NautilusDataType::QuoteTick);
-                asked.push((identifier.to_string(), as_ns(from), as_ns(to)));
-                let id = InstrumentId::from(identifier);
+            async |series, from, to| {
+                let CatalogSeries::Ticks(tick) = series else {
+                    panic!("{series}")
+                };
+                assert_eq!(tick.data, NautilusDataType::QuoteTick);
+                let id = tick.instrument_id;
+                asked.push((id.to_string(), as_ns(from), as_ns(to)));
                 Ok(vec![Data::Quote(quote_at(id, as_ns(from) + 10))])
             },
         )
@@ -1180,8 +1155,8 @@ mod tests {
             &mut catalog,
             &contracts(),
             &slices,
-            async |_, identifier, from, _| {
-                let id = InstrumentId::from(identifier);
+            async |series, from, _| {
+                let id = series.instrument_id();
                 Ok(vec![Data::Quote(quote_at(id, as_ns(from) + 10))])
             },
         )

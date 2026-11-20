@@ -141,6 +141,13 @@ repos:
         language: system
         types_or: [rust, markdown]
 
+      - id: check-release-entries
+        name: check release entries are short
+        description: Each entry of the release in progress is one line of 160 characters at most
+        entry: python3 -B .pre-commit-hooks/check_release_entries.py
+        language: system
+        files: ^RELEASES\.md$
+
       - id: check-hidden-chars
         name: check hidden unicode/control chars
         description: Fail on hidden control or zero-width unicode characters in source
@@ -185,6 +192,13 @@ repos:
         entry: python3 -B .pre-commit-hooks/test_check_workarounds.py
         language: system
         files: ^\.pre-commit-hooks/(test_)?check_workarounds\.py$
+        pass_filenames: false
+
+      - id: test-check-release-entries
+        name: test check-release-entries
+        entry: python3 -B .pre-commit-hooks/test_check_release_entries.py
+        language: system
+        files: ^\.pre-commit-hooks/(test_)?check_release_entries\.py$
         pass_filenames: false
 
       - id: check-commit-message

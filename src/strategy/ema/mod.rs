@@ -1,28 +1,23 @@
-//! EMA crossover, an example strategy trading one instrument: each time the
-//! fast EMA crosses the slow one on that instrument's bars, inside its
-//! session if it has one, it opens a trade in the cross direction through
-//! the shared order module (`strategy::orders`): a Nautilus bracket, its
-//! take profit and stop loss 100 and 50 bps from the close of the bar it
-//! decided on (`TAKE_PROFIT_BPS`, `STOP_LOSS_BPS`), held 4 hours (`HOLD`)
-//! from its send unless either ends it first, sent at the config's stake:
-//! sized to risk `[trade] risk` of equity over its stop's distance, its one
-//! R (`orders::Trade::send`). It hands the module its time
-//! events, which close a trade at its time, and the module sets the time of
-//! the trades still open again at start. Trades may overlap: on a hedging
-//! venue each is a position of its own, on a netting venue they add into
-//! one, as the venue keeps them.
+//! EMA crossover, an example strategy that trades one instrument.
 //!
-//! The config (`EmaCrossConfig`) lists the series read in `[data]`, whose
-//! bars it subscribes to through `strategy::subscriptions`, their warmup
-//! requested live through `strategy::warmup`; `[trade]` names the one
-//! instrument traded, read on its one bars series, the only series `[data]`
-//! lists, and the FX pairs its equity converts through, a cTrader pair's
-//! quotes its warmup asks the history of and it subscribes to from its
-//! start through the same subscriptions; and
-//! `[indicators]` its fast and slow EMAs. Its signal is its Nautilus indicator, and it
-//! decides only once its indicators are initialized, on the replay in a
-//! backtest, on the warmup live. A minimal strategy to drive data,
-//! backtest and paper.
+//! Each time the fast EMA crosses the slow EMA on the instrument's bars, the strategy opens a
+//! Nautilus bracket in the cross direction through `strategy::orders`. Crosses count only inside
+//! the instrument's session, if it has one. The bracket has:
+//! - a take profit and a stop loss at `TAKE_PROFIT_BPS` and `STOP_LOSS_BPS` from the close of the
+//!   deciding bar
+//! - a hold of `HOLD` from the send
+//!
+//! The stake sizes the trade to risk `[trade] risk` of equity over the stop's distance, which is
+//! one R. Trades may overlap. On a hedging venue each is its own position. On a netting venue
+//! they add into one.
+//!
+//! The config has:
+//! - `[data]` lists the one bars series of the traded instrument.
+//! - `[trade]` names the instrument and the FX pairs its equity converts through.
+//! - `[indicators]` holds the fast and slow EMAs.
+//!
+//! The signal is a Nautilus indicator fed by the warmup (`Warmup::on_bar`). The strategy decides
+//! only once the signal is initialized and the warmup has ended.
 
 mod signal;
 
@@ -30,7 +25,10 @@ use std::rc::Rc;
 
 use jiff::SignedDuration;
 use nautilus_common::{
-    actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
+    actor::{
+        DataActor,
+        indicators::{ActorIndicator, SharedActorIndicator},
+    },
     config::{ConfigError, ConfigErrorCollector, ConfigResult},
     messages::data::DataResponseEnvelope,
     timer::TimeEvent,
@@ -57,46 +55,36 @@ use crate::strategy::{
     warmup::Warmup,
 };
 
-/// The take profit of each trade, in basis points of the close of the bar
-/// it was decided on, in the trade's favor.
 const TAKE_PROFIT_BPS: Decimal = Decimal::from_parts(100, 0, 0, false, 0);
 
-/// The stop loss of each trade, in basis points of the close of the bar it
-/// was decided on, against the trade.
 const STOP_LOSS_BPS: Decimal = Decimal::from_parts(50, 0, 0, false, 0);
 
-/// How long a trade is held after its send, unless its take profit or stop
-/// loss ends it first.
 const HOLD: SignedDuration = SignedDuration::from_hours(4);
 
-/// Config of the EMA crossover strategy, loaded from TOML: the standard
-/// tables, its EMAs in `[indicators]`, and no fields of its own
-/// (`EmaParams`).
+/// The config of the EMA crossover strategy.
+///
+/// Its part, `EmaParams`, has no fields of its own.
 pub type EmaCrossConfig = StandardConfig<EmaParams>;
 
-/// The crossover's part: no fields of its own. It reads two Nautilus
-/// `ExponentialMovingAverage`s, `[indicators.fast]` and
-/// `[indicators.slow]`, the fast one of the shorter period; it trades one
-/// instrument, the one of `[trade]`, on its one bars series of `[data]`,
-/// the only series it reads. Its exits are its code's (`TAKE_PROFIT_BPS`,
-/// `STOP_LOSS_BPS`, `HOLD`).
+/// The part of the EMA crossover config.
+///
+/// It has two `ExponentialMovingAverage`s, `[indicators.fast]` and `[indicators.slow]`. The fast
+/// one has the shorter period. Exits are fixed in code.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmaParams {}
 
-/// The fast EMA, `[indicators.fast]`.
 const FAST: Declared<EmaArgs> = Declared::new("fast");
-/// The slow EMA, `[indicators.slow]`.
 const SLOW: Declared<EmaArgs> = Declared::new("slow");
 
 impl Part for EmaParams {
     const INSTRUMENTS: usize = 1;
     const INDICATORS: &'static [&'static dyn Declaration] = &[&FAST, &SLOW];
 
-    /// The strategy's id alone, `EMA_CROSS-001`: Nautilus tags its orders
-    /// with the id's tag. `oms_type` is left unset: Nautilus keeps the
-    /// strategy's positions as the execution client of the venue does,
-    /// netting or hedging, in a backtest as live.
+    /// Sets only the strategy id, which Nautilus tags orders with.
+    ///
+    /// Leaves `oms_type` unset. Nautilus keeps positions as the venue's execution client does, in
+    /// a backtest as in live.
     fn default_base() -> StrategyConfig {
         StrategyConfig {
             strategy_id: Some(StrategyId::from("EMA_CROSS-001")),
@@ -104,13 +92,12 @@ impl Part for EmaParams {
         }
     }
 
-    /// The bars series of the traded instrument, the first `[data]` lists:
-    /// the crossover reads these bars alone (`trade_bar_type`).
+    /// Returns the bars series of the traded instrument.
     ///
     /// # Errors
     ///
-    /// Returns an error if `[data]` lists no bars series of the traded
-    /// instrument, under the instrument's field.
+    /// Returns an error if `[data]` lists no bars series of the traded instrument. The error is
+    /// reported under the instrument's field.
     fn reads(config: &EmaCrossConfig) -> ConfigResult<Vec<Series>> {
         let id = config.trade_instrument_id();
         config
@@ -127,7 +114,6 @@ impl Part for EmaParams {
             })
     }
 
-    /// The fast period not below the slow one.
     fn validate(config: &EmaCrossConfig, errors: &mut ConfigErrorCollector) {
         let args = |declared| config.indicators.args(declared);
         if let (Some(fast), Some(slow)) = (args(FAST), args(SLOW)) {
@@ -149,35 +135,31 @@ impl EmaCrossConfig {
         self.trade.instruments[0].instrument_id
     }
 
-    /// The fast EMA, `[indicators.fast]`, built.
+    /// The fast EMA.
     ///
     /// # Panics
     ///
-    /// Panics if it is missing or of arguments it or Nautilus refuses,
-    /// which `validate` refuses.
+    /// Panics if the EMA is missing or its arguments are refused. `validate` rules this out.
     #[must_use]
     pub fn fast_ema(&self) -> ExponentialMovingAverage {
         self.indicators.build(FAST)
     }
 
-    /// The slow EMA, `[indicators.slow]`, built.
+    /// The slow EMA.
     ///
     /// # Panics
     ///
-    /// Panics if it is missing or of arguments it or Nautilus refuses (see
-    /// `fast_ema`).
+    /// Panics if the EMA is missing or its arguments are refused. `validate` rules this out.
     #[must_use]
     pub fn slow_ema(&self) -> ExponentialMovingAverage {
         self.indicators.build(SLOW)
     }
 
-    /// The bars the crossover reads, its part's answer
-    /// (`EmaParams::reads`).
+    /// Returns the bars the crossover reads (`EmaParams::reads`).
     ///
     /// # Panics
     ///
-    /// Panics if the traded instrument has no bars series, which
-    /// `validate` refuses.
+    /// Panics if the traded instrument has no bars series. `validate` refuses such a config.
     #[must_use]
     pub fn trade_bar_type(&self) -> BarType {
         match EmaParams::reads(self).as_deref() {
@@ -191,20 +173,16 @@ impl EmaCrossConfig {
 pub struct EmaCross {
     core: StrategyCore,
     config: EmaCrossConfig,
-    /// The crossover, registered with Nautilus as the strategy's indicator.
+    /// The warmup feeds it bars. It is not registered with Nautilus (Temporary, helix-trader#16
+    /// and helix-trader#46).
     signal: Rc<Signal>,
-    /// Its warmup, which feeds the signal.
     warmup: Rc<Warmup>,
-    /// Its subscriptions to its bars and to the ticks and the custom
-    /// series of its data requirements: the quotes of each
-    /// conversion pair read as quotes (`venues::rate_series`) among the
-    /// ticks.
     subscriptions: Subscriptions,
 }
 
 impl EmaCross {
-    /// The strategy as a backtest runs it: it requests no warmup, and its
-    /// indicators warm on the data replayed.
+    /// Creates the strategy as a backtest runs it. It requests no warmup, and the indicators
+    /// warm on the replay.
     ///
     /// # Errors
     ///
@@ -213,9 +191,7 @@ impl EmaCross {
         Self::built(config, Warmup::replayed)
     }
 
-    /// The strategy as a live node runs it: it requests its warmup
-    /// (`DataConfig::warmup`) at start, which hydrates its indicators, and
-    /// its subscriptions are a live node's (`Subscriptions::live`).
+    /// Creates the strategy as a live node runs it. It requests its warmup at start.
     ///
     /// # Errors
     ///
@@ -228,9 +204,6 @@ impl EmaCross {
         })
     }
 
-    /// The strategy of `config`, its warmup `warmup` of its data
-    /// requirements, set to feed the signal, and its subscriptions to their
-    /// bars, ticks and custom series.
     fn built(
         config: EmaCrossConfig,
         warmup: fn(&DataRequirements) -> Warmup,
@@ -238,7 +211,14 @@ impl EmaCross {
         config.validate()?;
         let signal = Rc::new(Signal::new(&config));
         let requirements = config.data_requirements();
-        let warmup = warmup(&requirements).feeding(Rc::clone(&signal) as SharedActorIndicator);
+        let read: Vec<BarType> = requirements
+            .bar_types
+            .iter()
+            .filter(|bar_type| bar_type.instrument_id() == config.trade_instrument_id())
+            .copied()
+            .collect();
+        let warmup =
+            warmup(&requirements).feeding(&read, Rc::clone(&signal) as SharedActorIndicator);
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
             signal,
@@ -252,17 +232,16 @@ impl EmaCross {
         })
     }
 
-    /// Its warmup: a live node sizes its cache from it.
+    /// Returns the warmup. A live node sizes its cache from it.
     #[must_use]
     pub fn warmup(&self) -> Rc<Warmup> {
         Rc::clone(&self.warmup)
     }
 
-    /// The trade on `side` decided on `bar`, of the traded instrument, set
-    /// from the bar's close: its take profit and stop loss at their
-    /// distances from the close, each on the instrument's nearest tick, a
-    /// tie away from the close (`orders::nearest_tick`), held `HOLD`, its
-    /// one R the distance from the close to the stop loss.
+    /// Builds the trade on `side` for `bar`.
+    ///
+    /// Exits land on the nearest tick, and a tie goes away from the close. One R is the distance
+    /// from the close to the stop loss.
     fn trade(&self, bar: &Bar, side: OrderSide) -> anyhow::Result<Trade> {
         let instrument_id = self.config.trade_instrument_id();
         let instrument = self
@@ -290,9 +269,6 @@ impl EmaCross {
     }
 }
 
-/// The take profit and the stop loss, unrounded, of a trade on `side`
-/// decided on a bar closing at `close`: `TAKE_PROFIT_BPS` of it in the
-/// trade's favor, `STOP_LOSS_BPS` against it.
 fn exit_prices(close: Decimal, side: OrderSide) -> (Decimal, Decimal) {
     let favor = match side {
         OrderSide::Sell => -Decimal::ONE,
@@ -305,8 +281,7 @@ fn exit_prices(close: Decimal, side: OrderSide) -> (Decimal, Decimal) {
     )
 }
 
-/// Hands the strategy to `visitor`, as one trading on no model
-/// (`strategy::Visitor`): the command line runs it by this folder's name.
+/// Hands the strategy to `visitor` as a plain strategy (`strategy::Visitor`).
 pub fn visit<V: Visitor>(visitor: V) -> V::Output {
     visitor.plain::<EmaCross>()
 }
@@ -328,42 +303,31 @@ impl PlainStrategy for EmaCross {
 }
 
 nautilus_strategy!(EmaCross, {
-    /// The instruments it trades, which its config claims (see
-    /// `StandardConfig`): the live node registers them as it adds it.
+    /// The instruments the config claims, which the live node registers.
     fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
         self.config().external_order_instrument_ids.clone()
     }
 });
 
 impl DataActor for EmaCross {
-    /// Refuses the traded instrument if a stake cannot size a trade on it
-    /// (`orders::refuse_inverse`), sets the time of each trade still open
-    /// again, as after a restart (`orders::arm_open_trades`), registers the
-    /// signal for the traded instrument's bars, then, live after requesting
-    /// the warmup, subscribes to the bars, to the conversion pairs' quotes
-    /// and to the custom series from where the warmup ends.
+    /// Refuses an instrument that a stake cannot size and re-arms open trades. Live, it then
+    /// requests the warmup and subscribes.
     fn on_start(&mut self) -> anyhow::Result<()> {
         orders::refuse_inverse(self, self.config.trade_instrument_id())?;
         orders::arm_open_trades(self)?;
-        let bar_type = self.config.trade_bar_type();
-        let signal = Rc::clone(&self.signal) as SharedActorIndicator;
-        self.core_mut()
-            .register_indicator_for_bars(bar_type, signal);
         let now = Rc::clone(&self.warmup).start(self)?;
         self.subscriptions.clone().start(self, now);
         Ok(())
     }
 
-    /// The warmup's bars reach only the cache: the warmup hands them to
-    /// the signal, and logs its end; Nautilus logs a failed one as an error.
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
         self.warmup.on_data_response(self, response)
     }
 
-    /// Nautilus has fed the bar to the signal; the strategy decides on it
-    /// once its indicators are initialized.
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
-        if !self.core().indicators_initialized()? {
+        // Temporary: live bars through the warmup, helix-trader#16 and helix-trader#46
+        self.warmup.on_bar(bar)?;
+        if self.warmup.is_warming() || !self.signal.initialized()? {
             return Ok(());
         }
         match self.signal.cross(bar) {
@@ -375,7 +339,6 @@ impl DataActor for EmaCross {
         }
     }
 
-    /// A trade's time closes it; the strategy has no other timer.
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         orders::on_time_event(self, event)?;
         Ok(())

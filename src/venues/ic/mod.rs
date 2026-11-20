@@ -1,23 +1,21 @@
-//! IC Markets, over Spotware's cTrader Open API through the cTrader
-//! adapter (`ctrader`): IC's forex and metals and their quotes for the
-//! catalog, which fill-catalog fills through the node, and the live node's
-//! clients on a hedging account, both the routing table's through `BROKER`,
-//! one of its cTrader brokers (`super`). IC's instruments are on venue
-//! `ICMARKETS` (`XAUUSD.ICMARKETS`), its clients named `ICMARKETS`. See
-//! `README.md`.
+//! Connects to IC Markets over Spotware's cTrader Open API, through the cTrader adapter
+//! (`ctrader`).
 //!
-//! The adapter names no broker and the credential is the cTrader login's:
-//! this module names IC's venue and the variables of its account.
+//! It serves forex and metals quotes on a hedging account, for the catalog and the live node's
+//! clients, both through `BROKER` (see `super`). Instruments are on venue `ICMARKETS`
+//! (`XAUUSD.ICMARKETS`), and the clients are named `ICMARKETS` too. See `README.md`.
+//!
+//! The adapter names no broker and the credential belongs to the cTrader login, so this module
+//! names only the venue and the account variables.
 
 use ctrader::{CTraderAccountVars, CTraderConnection};
 
 use super::CTraderBroker;
 
-/// The venue of IC's instruments, and the name of its clients.
+/// The venue of IC's instruments and the name of its clients.
 pub const VENUE: &str = "ICMARKETS";
 
-/// IC as the routing table takes it: its venue and the variables of its
-/// account.
+/// IC as the routing table takes it: its venue and account variables.
 pub(super) const BROKER: CTraderBroker = CTraderBroker {
     venue: VENUE,
     account: CTraderAccountVars {
@@ -26,8 +24,9 @@ pub(super) const BROKER: CTraderBroker = CTraderBroker {
     },
 };
 
-/// IC's connection, from the process' environment (or `.env`, once read):
-/// see `CTraderConnection::from_vars`.
+/// Returns the IC connection, built from the process' environment.
+///
+/// See `CTraderConnection::from_vars`.
 ///
 /// # Errors
 ///

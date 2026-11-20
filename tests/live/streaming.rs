@@ -1,21 +1,22 @@
-//! The live node streaming what it receives into the catalog, with no
-//! venue: a node in a child process (this binary, run on
-//! `streamed_node`) holds a stub data client on `SIM` that loads AUD/USD
-//! at connect, as the venues' clients do, then sends a quote, a trade and
-//! a depth snapshot every `TICK`, each numbered in sequence (the quote's
-//! bid size less one, the trade's id, the depth's sequence); an actor
-//! subscribes to them and to 1-second bars Nautilus builds from the
-//! trades. The node is built as `Live` builds it (`live::node::build`), on
-//! the stub alone, its cache in memory, and streams as `Recording`
-//! configures it, into a temp-dir catalog, but promoting every
-//! `PROMOTION_MS` rather than daily, so that a test sees several
-//! promotions in seconds. The test, another process,
-//! reads the catalog while the node runs and after it stops, backtests
-//! over it with the binary, a third, and builds a dataset over it in a
-//! child of this binary (`streamed_dataset`).
+//! Tests that the live node streams what it receives into the catalog, with no venue.
 //!
-//! Hermetic and ungated: no node runs in the test's own process, so it
-//! claims none (`main.rs`). Run it with:
+//! A node runs in a child process (this binary, run on `streamed_node`). It holds a stub data
+//! client on `SIM`, which loads AUD/USD at connect, as the venues' clients do. Every `TICK`, the
+//! client sends a quote (0.80000 / 0.80010), a trade and a depth snapshot. Each is numbered in
+//! sequence: the quote's bid size less one, the trade's id, the depth's sequence. An actor
+//! subscribes to them, and to 1-second bars Nautilus builds from the trades.
+//!
+//! The node is built as `Live` builds it (`live::node::build`), on the stub alone, with its cache
+//! in memory. It streams as `Recording` configures it into a temp-dir catalog, but promotes every
+//! `PROMOTION_MS` rather than daily, so a test sees several promotions in seconds.
+//!
+//! The test runs in another process. It reads the catalog while the node runs and after it stops,
+//! backtests over it with the binary, and builds a dataset over it in a child of this binary
+//! (`streamed_dataset`). A crash is a kill of the child, and a restart numbers its ticks from
+//! 1,000,000, so a reader tells the runs apart.
+//!
+//! The module is hermetic and ungated: no node runs in the test's own process, so it claims none
+//! (`main.rs`). Run it with:
 //!
 //! ```sh
 //! cargo test --test live streaming::
@@ -62,7 +63,7 @@ use nautilus_model::{
         Bar, BarType, Data, NautilusDataType, OrderBookDepth, QuoteTick, TradeTick,
         stubs::stub_depth10,
     },
-    enums::{AggressorSide, BookType, OmsType},
+    enums::{AggressorSide, BookType},
     identifiers::{ClientId, InstrumentId, TradeId, TraderId, Venue},
     instruments::{Instrument, InstrumentAny, stubs::audusd_sim},
     types::{Price, Quantity},
@@ -73,40 +74,34 @@ use nautilus_persistence::{
 use rstest::rstest;
 
 const INSTRUMENT_ID: &str = "AUD/USD.SIM";
-/// The bars the actor subscribes to, which Nautilus builds from the trades.
+
 const BUILT_BARS: &str = "AUD/USD.SIM-1-SECOND-LAST-INTERNAL";
-/// The same bars as the catalog stores them.
+
+/// `BUILT_BARS` as the catalog stores them.
 const STORED_BARS: &str = "AUD/USD.SIM-1-SECOND-LAST-EXTERNAL";
 const TRADER_ID: &str = "HELIXTEST-301";
 const TICK: Duration = Duration::from_millis(20);
 
-/// The directory of the child's catalog and staging directory; set only
-/// in the child.
+/// The child's catalog and staging directory, set only in the child.
 const ROOT: &str = "HELIX_STREAMING_ROOT";
-/// The child's promotion interval, in milliseconds, set on the streaming
-/// config `Recording` gives in place of its daily one.
+
+/// The child's promotion interval in milliseconds.
 const PROMOTION_MS: &str = "HELIX_STREAMING_PROMOTION_MS";
-/// When the child's node stops itself, in milliseconds after it starts;
-/// unset, it runs until interrupted (`interrupt`) or killed.
-const STOP_MS: &str = "HELIX_STREAMING_STOP_MS";
-/// The number of the child's first tick.
+
 const FIRST_SEQ: &str = "HELIX_STREAMING_FIRST_SEQ";
-/// Set, the child writes a venue's answer back over what the catalog lacks
-/// before its node runs, as a warmup does at the strategy's start.
+
+/// When set, the child writes a venue's answer back over what the catalog lacks before its node
+/// runs, as a warmup does.
 const WRITE_BACK: &str = "HELIX_STREAMING_WRITE_BACK";
-/// The span of the dataset build of `streamed_dataset`: its start and its
-/// end, a space between.
+
 const DATASET_SPAN: &str = "HELIX_STREAMING_DATASET_SPAN";
 
-/// How long a child gets to do what the test waits for.
 const PATIENCE: Duration = Duration::from_secs(60);
 
-/// The reader reads until the catalog has grown under it and holds a few
-/// bars, then the node is interrupted.
 #[rstest]
 fn a_reader_sees_a_clean_prefix_of_the_streamed_data_while_the_node_runs() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
     let mut prefixes_while_running: Vec<Read> = Vec::new();
     let deadline = Instant::now() + PATIENCE;
     loop {
@@ -140,8 +135,9 @@ fn a_reader_sees_a_clean_prefix_of_the_streamed_data_while_the_node_runs() {
 #[rstest]
 fn the_bars_the_node_builds_are_stored_under_the_external_source() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(4_000), 0);
-    assert!(node.wait().unwrap().success());
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
+
+    assert!(interrupt_once_promoted(dir.path(), &mut node, 2).success());
     let mut catalog = catalog(dir.path());
     let built: Vec<Bar> = catalog
         .query(
@@ -161,9 +157,10 @@ fn the_bars_the_node_builds_are_stored_under_the_external_source() {
 #[rstest]
 fn a_clean_stop_promotes_everything_and_leaves_no_staging_file() {
     let dir = tempfile::tempdir().unwrap();
-    // No promotion before the stop: the stop promotes all.
-    let mut node = spawn_node(dir.path(), Duration::from_secs(3_600), Some(3_000), 0);
-    assert!(node.wait().unwrap().success());
+
+    // No promotion before the stop, so the stop promotes all
+    let mut node = spawn_node(dir.path(), Duration::from_secs(3_600), 0);
+    assert!(interrupt_once_staged(dir.path(), &mut node, "bars").success());
     let read = Read::of(dir.path());
     assert!(read.quotes > 0 && read.trades > 0 && read.depths > 0 && read.bars > 0);
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
@@ -172,9 +169,9 @@ fn a_clean_stop_promotes_everything_and_leaves_no_staging_file() {
 #[rstest]
 fn the_instruments_the_clients_load_are_in_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(2_000), 0);
-    assert!(node.wait().unwrap().success());
-    // As a backtest node looks its instruments up.
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
+    assert!(interrupt_once_promoted(dir.path(), &mut node, 1).success());
+
     let instruments = catalog(dir.path())
         .instruments(Some(&[INSTRUMENT_ID.to_string()]), None, None)
         .unwrap();
@@ -185,18 +182,13 @@ fn the_instruments_the_clients_load_are_in_the_catalog() {
 #[rstest]
 fn a_restart_after_a_crash_promotes_what_the_crashed_run_staged() {
     let dir = tempfile::tempdir().unwrap();
-    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
+    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), 0);
     wait_for_staged_quotes(dir.path(), &mut crashed);
     crashed.kill().unwrap();
     crashed.wait().unwrap();
     assert_eq!(Read::of(dir.path()).quotes, 0, "promoted before the crash");
-    let mut restarted = spawn_node(
-        dir.path(),
-        Duration::from_secs(3_600),
-        Some(2_000),
-        1_000_000,
-    );
-    assert!(restarted.wait().unwrap().success());
+    let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), 1_000_000);
+    assert!(interrupt_once_promoted_from(dir.path(), &mut restarted, 1_000_000).success());
     let seqs = quote_seqs(dir.path());
     let (first_run, second_run): (Vec<u64>, Vec<u64>) =
         seqs.into_iter().partition(|&seq| seq < 1_000_000);
@@ -207,29 +199,23 @@ fn a_restart_after_a_crash_promotes_what_the_crashed_run_staged() {
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
 }
 
-/// The restart's warmup writes the venue's answer back over what the
-/// catalog lacks up to now: the crashed run's staged rows are in the
-/// catalog by then, so the answer lands after them, not over them.
+/// The restart's warmup writes the venue's answer over what the catalog lacks, after the crashed
+/// run's staged rows.
 #[rstest]
 fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back() {
     let dir = tempfile::tempdir().unwrap();
-    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
+    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), 0);
     wait_for_staged_quotes(dir.path(), &mut crashed);
     crashed.kill().unwrap();
     crashed.wait().unwrap();
     let mut restarted = NodeProcess(
-        node_command(
-            dir.path(),
-            Duration::from_secs(3_600),
-            Some(2_000),
-            1_000_000,
-        )
-        .env(WRITE_BACK, "1")
-        .spawn()
-        .unwrap(),
+        node_command(dir.path(), Duration::from_secs(1), 1_000_000)
+            .env(WRITE_BACK, "1")
+            .spawn()
+            .unwrap(),
     );
 
-    assert!(restarted.wait().unwrap().success());
+    assert!(interrupt_once_promoted_from(dir.path(), &mut restarted, 1_000_000).success());
 
     let seqs = quote_seqs(dir.path());
     let crashed_run: Vec<u64> = seqs.iter().copied().filter(|&s| s < 1_000_000).collect();
@@ -244,18 +230,16 @@ fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back(
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
 }
 
-/// No check of ours stands before a backtest: one across a crash runs on
-/// what the catalog stores, the gap the crash left replayed as a quiet
-/// period.
+/// The backtest reads what the catalog stores, and replays the gap as a quiet period.
 #[rstest]
 fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
     let dir = tempfile::tempdir().unwrap();
-    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
+    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), 0);
     wait_for_staged_quotes(dir.path(), &mut crashed);
     crashed.kill().unwrap();
     crashed.wait().unwrap();
-    let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), Some(3_000), 1_000_000);
-    assert!(restarted.wait().unwrap().success());
+    let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), 1_000_000);
+    assert!(interrupt_once_promoted_from(dir.path(), &mut restarted, 1_000_000).success());
     let quotes: Vec<QuoteTick> = catalog(dir.path())
         .query(None, None, None, None, None, true)
         .unwrap();
@@ -269,13 +253,11 @@ fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
     assert!(backtest.status.success(), "{}", backtest_output(&backtest));
 }
 
-/// A backtest over the streamed data runs through the gaps between the
-/// files Nautilus promoted, which stay in the catalog: it reads the rows,
-/// not the catalog's intervals.
+/// The gaps stay in the catalog: the backtest reads the rows, not the catalog's intervals.
 #[rstest]
 fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
     assert!(interrupt_once_promoted(dir.path(), &mut node, 2).success());
     let (first, last) = streamed_span(dir.path());
 
@@ -293,13 +275,11 @@ fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() 
     assert!(!missing.is_empty(), "no gap between promotions");
 }
 
-/// A dataset build, a model backtest's before its run or a retrain's
-/// replay, over the streamed data runs through the gaps between the files
-/// Nautilus promoted, as a backtest does.
+/// The build is that of a model backtest before its run, and of a retrain's replay.
 #[rstest]
 fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
     assert!(interrupt_once_promoted(dir.path(), &mut node, 2).success());
     let (first, last) = streamed_span(dir.path());
 
@@ -310,11 +290,8 @@ fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotio
     assert!(stdout.contains("built "), "{stdout}");
 }
 
-/// Not a test: the dataset build the test above runs in a child process,
-/// over the days of `DATASET_SPAN` of the catalog of `ROOT`, as a model
-/// backtest builds before its run and a retrain replays: a dataset run of
-/// the strategy, a Nautilus node, here the one of its process. Passes at
-/// once outside one.
+/// Not a test: runs the dataset build of the test above in a child process, over the days of
+/// `DATASET_SPAN` in the catalog of `ROOT`. Passes at once outside one.
 #[rstest]
 fn streamed_dataset() {
     let (Ok(root), Ok(span)) = (std::env::var(ROOT), std::env::var(DATASET_SPAN)) else {
@@ -344,7 +321,6 @@ fn streamed_dataset() {
                 latency: venue.latency,
                 pairs: vec![],
                 balance: venue.balance,
-                venue_oms: |_| OmsType::Hedging,
                 logging: LoggerConfig::default(),
             }
             .run_dataset(ModelEma::new(config.clone(), mode)?)?;
@@ -356,8 +332,7 @@ fn streamed_dataset() {
     println!("built {} days of the dataset", built.len());
 }
 
-/// Not a test: the node the tests above run in a child process. Passes at
-/// once outside one.
+/// Not a test: runs the node the tests above use, in a child process. Passes at once outside one.
 #[rstest]
 fn streamed_node() {
     let Ok(root) = std::env::var(ROOT) else {
@@ -366,28 +341,19 @@ fn streamed_node() {
     let number = |name: &str| std::env::var(name).ok().map(|v| v.parse::<u64>().unwrap());
     let root = PathBuf::from(root);
     let promotion_interval = Duration::from_millis(number(PROMOTION_MS).unwrap());
-    let stop_after = number(STOP_MS).map(Duration::from_millis);
     let first_seq = number(FIRST_SEQ).unwrap();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(run_node(&root, promotion_interval, stop_after, first_seq))
+        .block_on(run_node(&root, promotion_interval, first_seq))
         .unwrap();
 }
 
-/// Runs the node of `root`, built as `Live` builds it on the stub's data
-/// client and no cache database, streaming as `Recording` configures it,
-/// but promoting every `promotion_interval`, until `stop_after`, or until
-/// interrupted or killed.
-async fn run_node(
-    root: &Path,
-    promotion_interval: Duration,
-    stop_after: Option<Duration>,
-    first_seq: u64,
-) -> anyhow::Result<()> {
+async fn run_node(root: &Path, promotion_interval: Duration, first_seq: u64) -> anyhow::Result<()> {
     let trader_id = TraderId::from(TRADER_ID);
-    // Created first, as `Live` creates it.
+
+    // Created first, as `Live` creates it
     std::fs::create_dir_all(root.join("catalog"))?;
     let catalog = DataCatalogConfig::new(
         root.join("catalog").to_str().unwrap().to_string(),
@@ -422,25 +388,16 @@ async fn run_node(
     node.add_actor(Subscriber {
         core: DataActorCore::new(DataActorConfig::default()),
     })?;
-    if let Some(stop_after) = stop_after {
-        let handle = node.handle();
-        get_runtime().spawn(async move {
-            tokio::time::sleep(stop_after).await;
-            handle.stop();
-        });
-    }
     let result = node.run().await;
     node.dispose();
     result
 }
 
-/// The number the quote a venue answers a warmup with carries: none the
-/// stub sends.
+/// The number carried by the quote a venue answers a warmup with. The stub sends no quote with it.
 const WRITTEN_BACK: u64 = 2_000_000;
 
-/// Writes back what a venue answers a warmup asking for the quotes the
-/// catalog of `root` lacks up to now, as IC's history is (`update_catalog`):
-/// one quote, at now, filed over the last missing window.
+/// Writes back a venue's answer to a warmup (`update_catalog`): one quote, at now, filed over the
+/// last window the catalog of `root` lacks.
 fn write_back(root: &Path) -> anyhow::Result<()> {
     let catalog = catalog(root);
     let now = get_atomic_clock_realtime().get_time_ns();
@@ -469,9 +426,6 @@ fn write_back(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// What a reader finds in the catalog: the number of quotes, trades,
-/// depth snapshots and stored bars, each checked to be a clean prefix of
-/// what the node streamed.
 #[derive(Debug)]
 struct Read {
     quotes: u64,
@@ -485,8 +439,10 @@ impl Read {
     ///
     /// # Panics
     ///
-    /// Panics if a series has a gap or a duplicate, or does not start at
-    /// the first tick, or a bar is not a second after the one before.
+    /// Panics if:
+    /// - A series has a gap or a duplicate.
+    /// - A series does not start at the first tick.
+    /// - A bar is not a second after the one before.
     fn of(root: &Path) -> Self {
         let quotes = quote_seqs(root);
         assert_contiguous("quotes", &quotes, 0);
@@ -514,8 +470,7 @@ impl Read {
     }
 }
 
-/// Asserts that `seqs`, in the order read, are `first`, `first + 1`, and
-/// so on: no gap, no duplicate.
+/// Asserts that `seqs` are `first`, `first + 1`, and so on: no gap, no duplicate.
 fn assert_contiguous(what: &str, seqs: &[u64], first: u64) {
     let expected: Vec<u64> = (first..first + seqs.len() as u64).collect();
     assert_eq!(seqs, expected, "{what} are not a clean prefix");
@@ -525,7 +480,6 @@ fn catalog(root: &Path) -> ParquetDataCatalog {
     ParquetDataCatalog::new(&root.join("catalog"), None, None, None, None)
 }
 
-/// The numbers of the quotes in the catalog of `root`, in order.
 fn quote_seqs(root: &Path) -> Vec<u64> {
     let quotes: Vec<QuoteTick> = catalog(root)
         .query(None, None, None, None, None, true)
@@ -536,7 +490,6 @@ fn quote_seqs(root: &Path) -> Vec<u64> {
         .collect()
 }
 
-/// The second each stored bar closes on, in order.
 fn bar_seconds(root: &Path) -> Vec<u64> {
     let bars: Vec<Bar> = catalog(root)
         .query(
@@ -553,8 +506,6 @@ fn bar_seconds(root: &Path) -> Vec<u64> {
         .collect()
 }
 
-/// When the quotes, trades and depth of the catalog of `root` all start,
-/// and when they all end.
 fn streamed_span(root: &Path) -> (Timestamp, Timestamp) {
     let mut catalog = catalog(root);
     let quotes: Vec<QuoteTick> = catalog.query(None, None, None, None, None, true).unwrap();
@@ -580,8 +531,7 @@ fn streamed_span(root: &Path) -> (Timestamp, Timestamp) {
     (first.into(), last.into())
 }
 
-/// The EMA crossover on the stub's AUD/USD: 1-second bars of its quotes.
-/// Too slow to trade in a few seconds.
+/// The EMA crossover on the stub's AUD/USD, too slow to trade in a few seconds.
 const EMA_CONFIG: &str = r#"
     [data]
     series = [
@@ -598,8 +548,6 @@ const EMA_CONFIG: &str = r#"
     risk = "0.5%"
 "#;
 
-/// The binary's backtest of the EMA crossover (`EMA_CONFIG`) over
-/// `[start, end]` of the catalog of `root`, in a process of its own.
 fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
     let config = root.join("ema.toml");
     std::fs::write(&config, EMA_CONFIG).unwrap();
@@ -614,10 +562,8 @@ fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
         .unwrap()
 }
 
-/// The `model_ema` strategy on the stub's AUD/USD: a decision every two
-/// seconds on its averages of 10 and 30 of its 1-second bars, each target
-/// held a second, closed before the next, its unit measured in the ATR of
-/// one bar of two seconds, the warmup's.
+/// The `model_ema` strategy on the stub's AUD/USD, which decides every two seconds, holds each
+/// target a second and measures its unit in the ATR of one two-second bar.
 const MODEL_EMA_CONFIG: &str = r#"
     [data]
     series = [
@@ -641,16 +587,12 @@ const MODEL_EMA_CONFIG: &str = r#"
     target = { limit = "1s", atr = { period = 1 } }
     retrain = "24h"
     window = "46h"
-    holdout = "12h"
+    calibration = "12h"
     margins = { long = "0R", short = "0R" }
-    min_expectancy = "0R"
-    min_trades = 1
+    min_rows = 1
     learner = { kind = "fake" }
 "#;
 
-/// The build of the dataset of the `model_ema` strategy
-/// (`MODEL_EMA_CONFIG`) over the days of `[start, end]` of the catalog of
-/// `root`, in a child process (`streamed_dataset`).
 fn dataset(root: &Path, start: Timestamp, end: Timestamp) -> Output {
     Command::new(std::env::current_exe().unwrap())
         .args(["streaming::streamed_dataset", "--exact", "--nocapture"])
@@ -668,7 +610,6 @@ fn backtest_output(output: &Output) -> String {
     )
 }
 
-/// The Feather files left in the staging directory of `root`.
 fn staged_files(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut dirs = vec![root.join("staging")];
@@ -685,8 +626,8 @@ fn staged_files(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Waits until the staged quotes of `root` grow after their first write,
-/// a batch flushed past the file's header.
+/// Waits until the staged quotes of `root` grow after their first write, a batch flushed past the
+/// file's header.
 fn wait_for_staged_quotes(root: &Path, node: &mut Child) {
     let size = || -> u64 {
         if !root.join("staging").exists() {
@@ -713,8 +654,7 @@ fn wait_for_staged_quotes(root: &Path, node: &mut Child) {
     }
 }
 
-/// Stops `node` as Ctrl-C would, its signal handler stopping it cleanly:
-/// how it exited.
+/// Stops `node` as Ctrl-C would.
 fn interrupt(node: &mut Child) -> ExitStatus {
     let status = Command::new("kill")
         .args(["-INT", &node.id().to_string()])
@@ -731,8 +671,8 @@ fn interrupt(node: &mut Child) -> ExitStatus {
     }
 }
 
-/// Interrupts `node` (`interrupt`) once it has promoted `files` files of
-/// quotes into the catalog of `root`: how it exited.
+/// Interrupts `node` once it has promoted `files` files of quotes into `root`'s catalog, and
+/// returns how it exited.
 fn interrupt_once_promoted(root: &Path, node: &mut Child, files: usize) -> ExitStatus {
     let deadline = Instant::now() + PATIENCE;
     loop {
@@ -748,28 +688,54 @@ fn interrupt_once_promoted(root: &Path, node: &mut Child, files: usize) -> ExitS
     }
 }
 
-/// Spawns the node of `root` in a child process (`streamed_node`). Its
-/// catalog is created first, so that the test reads it from the start.
-fn spawn_node(
-    root: &Path,
-    promotion_interval: Duration,
-    stop_ms: Option<u64>,
-    first_seq: u64,
-) -> NodeProcess {
+/// Interrupts `node` once the catalog of `root` holds a quote of its run, numbered `first_seq` or
+/// more and not the one written back (`WRITTEN_BACK`), and returns how it exited.
+fn interrupt_once_promoted_from(root: &Path, node: &mut Child, first_seq: u64) -> ExitStatus {
+    let deadline = Instant::now() + PATIENCE;
+
+    loop {
+        if quote_seqs(root)
+            .iter()
+            .any(|seq| (first_seq..WRITTEN_BACK).contains(seq))
+        {
+            return interrupt(node);
+        }
+        assert!(Instant::now() < deadline, "no quote of the run promoted");
+        assert!(node.try_wait().unwrap().is_none(), "the node stopped");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Interrupts `node` once it has staged a file of `series` (`bars_…`, `quotes_…`), and returns how
+/// it exited.
+fn interrupt_once_staged(root: &Path, node: &mut Child, series: &str) -> ExitStatus {
+    let deadline = Instant::now() + PATIENCE;
+
+    loop {
+        let staged = root.join("staging").exists()
+            && staged_files(root).iter().any(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(series))
+            });
+
+        if staged {
+            return interrupt(node);
+        }
+        assert!(Instant::now() < deadline, "no {series} staged");
+        assert!(node.try_wait().unwrap().is_none(), "the node stopped");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn spawn_node(root: &Path, promotion_interval: Duration, first_seq: u64) -> NodeProcess {
     NodeProcess(
-        node_command(root, promotion_interval, stop_ms, first_seq)
+        node_command(root, promotion_interval, first_seq)
             .spawn()
             .unwrap(),
     )
 }
 
-/// The command of the child process of `spawn_node`.
-fn node_command(
-    root: &Path,
-    promotion_interval: Duration,
-    stop_ms: Option<u64>,
-    first_seq: u64,
-) -> Command {
+fn node_command(root: &Path, promotion_interval: Duration, first_seq: u64) -> Command {
     std::fs::create_dir_all(root.join("catalog")).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
@@ -777,16 +743,11 @@ fn node_command(
         .env(ROOT, root)
         .env(PROMOTION_MS, promotion_interval.as_millis().to_string())
         .env(FIRST_SEQ, first_seq.to_string())
-        .env_remove(STOP_MS)
         .env_remove(WRITE_BACK);
-    if let Some(stop_ms) = stop_ms {
-        command.env(STOP_MS, stop_ms.to_string());
-    }
     command
 }
 
-/// A node's child process, killed if the test ends before it does, so that
-/// a failing test leaves no node running.
+/// A node's child process, killed if the test ends before it does.
 struct NodeProcess(Child);
 
 impl Deref for NodeProcess {
@@ -812,8 +773,6 @@ impl Drop for NodeProcess {
     }
 }
 
-/// Subscribes to the stub's quotes, trades and depth, and to the bars
-/// Nautilus builds from the trades, as a strategy would.
 #[derive(Debug)]
 struct Subscriber {
     core: DataActorCore,
@@ -879,8 +838,6 @@ impl DataClientFactory for StubFactory {
     }
 }
 
-/// A data client on `SIM`: loads AUD/USD at connect, then sends a
-/// numbered quote, trade and depth snapshot every `TICK`.
 #[derive(Debug)]
 struct Stub {
     id: ClientId,
@@ -928,8 +885,8 @@ impl DataClient for Stub {
     }
 
     async fn connect(&mut self) -> anyhow::Result<()> {
-        // Stamped when loaded, as the venues' clients stamp theirs: a restart
-        // streams a definition of its own.
+        // Stamped when loaded, as the venues' clients stamp theirs, so a restart streams its own
+        // definition.
         let mut definition = audusd_sim();
         let loaded = get_atomic_clock_realtime().get_time_ns();
         definition.ts_event = loaded;
@@ -966,8 +923,9 @@ impl DataClient for Stub {
                 );
                 let mut depth = stub_depth10();
                 depth.instrument_id = instrument_id;
-                // AUD/USD's prices, a backtest replaying them as stored: the
-                // quote's bid and ask, then a pip further a level.
+
+                // So a backtest replays them as stored: the quote's bid and ask, then a pip
+                // further each level.
                 for (level, order) in (0_u32..).zip(depth.bids.iter_mut()) {
                     order.price = Price::new(0.8 - f64::from(level) * 0.000_01, 5);
                 }

@@ -1,9 +1,9 @@
-//! A backtest on two venues: the data of one, CME gold's book on GLBX
-//! (`common::glbx`), the trades on the other, IC's gold (`common::ic`). A
-//! strategy reading gold's book buys 10 oz of XAUUSD on IC's first hour
-//! bar: each venue is simulated, keeping positions as the real one does
-//! (`venues::oms_type`), each with the backtest's balance, and the report
-//! shows each venue's account. One node per thread, so one run per test.
+//! Tests a backtest on two venues.
+//!
+//! CME gold's book on GLBX (`common::glbx`) is the data. IC's gold (`common::ic`) is what trades.
+//! A strategy reading gold's book buys 10 oz of XAUUSD on IC's first hour bar. Each venue is
+//! simulated with the backtest's balance and keeps positions as the real one does
+//! (`venues::oms_type`). The report shows each venue's account.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
@@ -24,15 +24,12 @@ use rstest::rstest;
 
 use crate::common::{glbx, ic};
 
-/// What the strategy got: the times of gold's snapshots, and whether it
-/// bought.
 #[derive(Debug, Default)]
 struct Record {
     snapshots: Vec<UnixNanos>,
     bought: bool,
 }
 
-/// Reads gold's book, buys XAUUSD on IC's first hour bar.
 #[derive(Debug)]
 struct BookReader {
     core: StrategyCore,
@@ -107,8 +104,9 @@ fn golds_book_from_glbx_and_a_trade_on_ic_each_venue_with_its_account() {
     let result = &outcome.result;
     assert_eq!(result.total_orders, 1);
     assert_eq!(result.total_positions, 1);
-    // Bought at the ask of the last quote of the 10:00 bar, 4006.10: 10 oz
-    // of 40,061.00 USD, IC's commission of 30 USD per million on it, 1.20.
+
+    // 10 oz at the ask of the 10:00 bar's last quote, 4006.10, cost 40,061.00 USD, and IC's
+    // commission of 30 USD per million on that is 1.20
     let summary = &result.summary;
     assert_eq!(summary["venues.total"], "2");
     assert_eq!(

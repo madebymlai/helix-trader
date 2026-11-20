@@ -1,0 +1,477 @@
+//! The `model_ema` strategy (`strategy::model_ema`) is trained by the binary's `train` and
+//! backtested by its `backtest` on the store `train` filled. A backtest trains nothing.
+//!
+//! The fixture catalog is IC's gold with an edge (`ic::edge_quotes`). It rises 4.00 over each even
+//! hour and falls back over each odd one, so a short at the top of an odd hour wins and one at the
+//! bottom of an even hour loses. The fake learner predicts the fast average, which is near the top
+//! at odd hours' decisions, so the calibrated short wins at odd hours alone, and each train with
+//! rows to fit and calibrate on publishes.
+//!
+//! The catalog starts at 21:00 of 18 October 2026, a Sunday. The train at midnight of the 19th has
+//! no row before its calibration slice to fit on, and fails. The trains from the 20th on publish.
+
+use std::{
+    path::{Path, PathBuf},
+    process::{Command, Output},
+};
+
+use jiff::{SignedDuration, Timestamp};
+use rstest::rstest;
+use tempfile::TempDir;
+
+use crate::common::ic;
+
+const CONFIG: &str = r#"
+    [data]
+    series = [
+        { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },
+    ]
+    warmup = "1h"
+
+    [indicators.fast]
+    period = 10
+
+    [indicators.slow]
+    period = 30
+
+    [trade]
+    instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]
+    risk = "0.5%"
+
+    [model]
+    decision = { every = "1h" }
+    target = { limit = "30m", atr = { period = 1 } }
+    retrain = "24h"
+    window = "46h"
+    calibration = "12h"
+    margins = { short = "0R" }
+    min_rows = 1
+    learner = { kind = "fake" }
+    dataset = { commission = { rate = "0.00003" }, balance = "10000000 USD" }
+"#;
+
+fn day(day: i64) -> Timestamp {
+    ic::at("00:00:00") + SignedDuration::from_hours(24 * (day - 21))
+}
+
+/// Builds the edge's quotes from 21:00 of the 18th to 01:00 after midnight of the `last`th.
+fn catalog(last: i64) -> TempDir {
+    let (from, to) = (
+        day(18) + SignedDuration::from_hours(21),
+        day(last) + SignedDuration::from_hours(1),
+    );
+    ic::catalog_of(ic::edge_quotes(from, to), from, to)
+}
+
+struct Files {
+    dir: TempDir,
+    config: PathBuf,
+    models: PathBuf,
+}
+
+fn files() -> Files {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    std::fs::write(&config, CONFIG).unwrap();
+    Files {
+        dir,
+        config,
+        models,
+    }
+}
+
+fn run(subcommand: &str, files: &Files, catalog: &Path, args: &[String]) -> (bool, String, String) {
+    let Output {
+        status,
+        stdout,
+        stderr,
+    } = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
+        .args([subcommand, "model_ema", "--config"])
+        .arg(&files.config)
+        .arg("--catalog")
+        .arg(catalog)
+        .arg("--models")
+        .arg(&files.models)
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        status.success(),
+        String::from_utf8(stdout).unwrap(),
+        String::from_utf8(stderr).unwrap(),
+    )
+}
+
+fn train_over(
+    files: &Files,
+    catalog: &Path,
+    (from, to): (Timestamp, Timestamp),
+) -> (bool, String, String) {
+    let args = [
+        "--from".to_string(),
+        from.to_string(),
+        "--to".to_string(),
+        to.to_string(),
+    ];
+    run("train", files, catalog, &args)
+}
+
+fn train_at(files: &Files, catalog: &Path, at: Timestamp) {
+    let (succeeded, stdout, stderr) = run(
+        "train",
+        files,
+        catalog,
+        &["--at".to_string(), at.to_string()],
+    );
+    assert!(succeeded, "{stdout}\n{stderr}");
+}
+
+fn backtest(
+    files: &Files,
+    catalog: &Path,
+    (start, end): (Timestamp, Timestamp),
+) -> (bool, String, String) {
+    let args = [
+        "--start",
+        &start.to_string(),
+        "--end",
+        &end.to_string(),
+        "--commission-rate",
+        "0.00003",
+        "--balance",
+        "10000000 USD",
+    ]
+    .map(String::from);
+    run("backtest", files, catalog, &args)
+}
+
+fn train_line(text: &str, at: Timestamp) -> &str {
+    let named = format!("the train at {at}: ");
+    text.lines()
+        .find(|line| line.starts_with(&named))
+        .unwrap_or_else(|| panic!("no {named:?}: {text}"))
+}
+
+fn report(text: &str, at: Timestamp) -> Vec<&str> {
+    let first = train_line(text, at);
+    let rest = &text[train_line_at(text, at) + first.len()..];
+    std::iter::once(first)
+        .chain(
+            rest.lines()
+                .skip(1)
+                .take_while(|line| line.starts_with("  ")),
+        )
+        .collect()
+}
+
+fn published(text: &str, at: Timestamp) -> bool {
+    let line = train_line(text, at);
+    line.contains("published the model set ") && line.ends_with(&format!("/{at}"))
+}
+
+fn train_line_at(text: &str, at: Timestamp) -> usize {
+    text.find(train_line(text, at)).unwrap()
+}
+
+/// A span from the 21st to the 23rd holds the retrain times of the 21st and 22nd. A second train
+/// over it publishes nothing. One from the 20th trains the 20th alone, which the store lacked.
+#[rstest]
+fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_store_lacks() {
+    let catalog = catalog(23);
+    let files = files();
+    let (twentieth, span) = (day(20), (day(21), day(23)));
+
+    let (succeeded, first, stderr) = train_over(&files, catalog.path(), span);
+
+    assert!(succeeded, "{first}\n{stderr}");
+
+    for at in [day(21), day(22)] {
+        assert!(published(&first, at), "{first}");
+    }
+    assert!(train_line_at(&first, day(21)) < train_line_at(&first, day(22)));
+    assert!(
+        !first.contains(&format!("the train at {}", day(23))),
+        "{first}"
+    );
+
+    let (succeeded, again, stderr) = train_over(&files, catalog.path(), span);
+
+    assert!(succeeded, "{again}\n{stderr}");
+    assert!(!again.contains("published the model set"), "{again}");
+    for at in [day(21), day(22)] {
+        assert!(
+            train_line(&again, at).contains("already published"),
+            "{again}"
+        );
+    }
+
+    let (succeeded, earlier, stderr) = train_over(&files, catalog.path(), (twentieth, span.1));
+
+    assert!(succeeded, "{earlier}\n{stderr}");
+    assert!(published(&earlier, twentieth), "{earlier}");
+    assert_eq!(
+        earlier.matches("published the model set").count(),
+        1,
+        "{earlier}"
+    );
+
+    for at in [day(21), day(22)] {
+        assert!(
+            train_line(&earlier, at).contains("already published"),
+            "{earlier}"
+        );
+    }
+}
+
+/// The command lists the failed train of the 19th alone, with its reason.
+#[rstest]
+fn a_train_over_a_span_goes_on_past_a_failed_retrain_time_and_fails_listing_it() {
+    let catalog = catalog(22);
+    let files = files();
+
+    let (succeeded, stdout, stderr) = train_over(&files, catalog.path(), (day(19), day(22)));
+
+    assert!(!succeeded, "{stdout}\n{stderr}");
+
+    for at in [day(20), day(21)] {
+        assert!(published(&stdout, at), "{stdout}");
+    }
+    assert!(train_line_at(&stdout, day(19)) < train_line_at(&stdout, day(20)));
+    let report = report(&stdout, day(19));
+    assert!(
+        report[0].contains("failed: 0 rows in the fit slice"),
+        "{report:#?}"
+    );
+
+    for line in [
+        "  Dataset days: 2 built, 0 cached",
+        "  Rows of the sides: 0 fit, 2 calibration, min_rows 1",
+    ] {
+        assert!(report.contains(&line), "{line}: {report:#?}");
+    }
+
+    for figure in ["Wall time", "CPU time", "Peak memory"] {
+        let named = format!("  {figure}: ");
+        assert!(
+            report.iter().any(|line| line.starts_with(&named)),
+            "{report:#?}"
+        );
+    }
+    let failed = stderr
+        .lines()
+        .find(|line| line.contains(&day(19).to_string()))
+        .unwrap_or_else(|| panic!("no 19th: {stderr}"));
+    assert!(failed.contains("failed"), "{stderr}");
+    assert!(!stderr.contains(&day(20).to_string()), "{stderr}");
+    assert!(!stderr.contains(&day(21).to_string()), "{stderr}");
+}
+
+fn never_retrained() -> String {
+    let daily = "    retrain = \"24h\"\n";
+    assert!(CONFIG.contains(daily));
+    CONFIG.replace(daily, "")
+}
+
+/// A strategy that is never retrained has no retrain times to train over a span.
+#[rstest]
+fn a_train_over_a_span_of_a_strategy_never_retrained_is_refused_before_any_replay() {
+    let catalog = catalog(23);
+    let files = files();
+    std::fs::write(&files.config, never_retrained()).unwrap();
+
+    let (succeeded, stdout, stderr) = train_over(&files, catalog.path(), (day(21), day(23)));
+
+    assert!(!succeeded, "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("never retrained") && stderr.contains("--at"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("BacktestEngine"), "{stdout}");
+}
+
+fn trained_at(files: &Files, catalog: &Path, at: Timestamp) -> String {
+    let (succeeded, stdout, stderr) = run(
+        "train",
+        files,
+        catalog,
+        &["--at".to_string(), at.to_string()],
+    );
+    assert!(succeeded, "{stdout}\n{stderr}");
+    stdout
+}
+
+/// With the 21st's model set stored, `train --at` the 22nd publishes one valid from the 22nd, and a
+/// repeat reports it already published. A backtest of the 21st still trades on the 21st's set.
+#[rstest]
+fn never_retrained_a_train_publishes_at_its_time_beside_an_older_model_set_which_decides_before_it()
+{
+    let catalog = catalog(23);
+    let files = files();
+    std::fs::write(&files.config, never_retrained()).unwrap();
+    let older = trained_at(&files, catalog.path(), day(21));
+    assert!(published(&older, day(21)), "{older}");
+
+    let newer = trained_at(&files, catalog.path(), day(22));
+    let again = trained_at(&files, catalog.path(), day(22));
+
+    assert!(published(&newer, day(22)), "{newer}");
+    assert!(
+        train_line(&again, day(22)).contains("already published"),
+        "{again}"
+    );
+    let (succeeded, stdout, stderr) = backtest(&files, catalog.path(), (day(21), day(22)));
+    assert!(succeeded, "{stdout}\n{stderr}");
+    assert!(stdout.contains("Orders: 24\nPositions: 12\n"), "{stdout}");
+    assert_day_decided_by(section(&stdout, day(21), day(22)), day(21));
+}
+
+/// The refusal names the retrain time at the backtest's start and the train commands that fill the
+/// store.
+#[rstest]
+fn a_backtest_on_an_empty_store_is_refused_naming_its_retrain_time_and_the_train_to_run() {
+    let catalog = catalog(23);
+    let files = files();
+    let start = day(22) + SignedDuration::from_hours(6);
+
+    let (succeeded, stdout, stderr) = backtest(&files, catalog.path(), (start, day(23)));
+
+    assert!(!succeeded, "{stdout}\n{stderr}");
+    let command = format!(
+        "train model_ema --config {} --catalog {} --models {}",
+        files.config.display(),
+        catalog.path().display(),
+        files.models.display()
+    );
+
+    for named in [
+        format!("{command} --at {}", day(22)),
+        format!("{command} --from {start} --to {}", day(23)),
+    ] {
+        assert!(stderr.contains(&named), "{named}: {stderr}");
+    }
+    assert!(!stdout.contains("BacktestEngine"), "{stdout}");
+    assert!(!stdout.contains("days of the dataset"), "{stdout}");
+    assert!(!files.dir.path().join("models").exists());
+}
+
+fn section(stdout: &str, from: Timestamp, to: Timestamp) -> &str {
+    let heading = format!("Short model scores, out of sample, from {from} to {to}\n");
+    let (_, rest) = stdout
+        .split_once(&heading)
+        .unwrap_or_else(|| panic!("no {heading:?}: {stdout}"));
+    rest.split("\n\n").next().unwrap()
+}
+
+/// Asserts that the section reads a day decided by the model valid from `valid_from`.
+fn assert_day_decided_by(section: &str, valid_from: Timestamp) {
+    for line in [
+        format!("  Model valid from: {valid_from}"),
+        "  Rows: 24".to_string(),
+        "  Trades taken: 12".to_string(),
+        "  Every trade: 24".to_string(),
+    ] {
+        assert!(section.lines().any(|l| l == line), "{line}: {section}");
+    }
+}
+
+/// It builds the days the trains left unwritten for its scores. Each day is scored with its own
+/// model.
+#[rstest]
+fn a_backtest_on_a_store_train_filled_over_its_span_trains_nothing_and_scores_each_period() {
+    let catalog = catalog(23);
+    let files = files();
+    let span = (day(21), day(23));
+    let (succeeded, stdout, stderr) = train_over(&files, catalog.path(), span);
+    assert!(succeeded, "{stdout}\n{stderr}");
+
+    let (succeeded, stdout, stderr) = backtest(&files, catalog.path(), span);
+
+    assert!(succeeded, "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("built 2 days of the dataset, 2026-10-21 to 2026-10-22"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("published"), "{stdout}");
+    assert!(stdout.contains("Orders: 48\nPositions: 24\n"), "{stdout}");
+    assert_day_decided_by(section(&stdout, day(21), day(22)), day(21));
+    assert_day_decided_by(section(&stdout, day(22), day(23)), day(22));
+}
+
+/// With models trained at the 21st and 23rd alone, a backtest from the 21st to the 24th runs over
+/// the hole: the 21st's model decides the 22nd too, as live would.
+#[rstest]
+fn a_backtest_over_a_missing_retrain_time_runs_the_previous_model_deciding_through_it() {
+    let catalog = catalog(24);
+    let files = files();
+    for at in [day(21), day(23)] {
+        train_at(&files, catalog.path(), at);
+    }
+
+    let (succeeded, stdout, stderr) = backtest(&files, catalog.path(), (day(21), day(24)));
+
+    assert!(succeeded, "{stdout}\n{stderr}");
+    assert!(stdout.contains("Orders: 72\nPositions: 36\n"), "{stdout}");
+    assert_day_decided_by(section(&stdout, day(21), day(22)), day(21));
+    assert_day_decided_by(section(&stdout, day(22), day(23)), day(21));
+    assert_day_decided_by(section(&stdout, day(23), day(24)), day(23));
+}
+
+/// Returns the config with a fake-learner meta, margin -1000R.
+fn with_meta() -> String {
+    format!(
+        "{CONFIG}
+    [model.meta]
+    window = \"24h\"
+    calibration = \"12h\"
+    margin = \"-1000R\"
+    min_rows = 1
+    learner = {{ kind = \"fake\" }}
+"
+    )
+}
+
+/// The short of the 21st's out-of-fold pair is fitted as of the 20th. It picks the shorts of the
+/// 20th's odd hours, which are the meta's rows.
+#[rstest]
+fn a_periodic_strategy_with_a_meta_publishes_it_from_its_first_train_and_trades_from_that_retrain_time()
+ {
+    let catalog = catalog(23);
+    let files = files();
+    std::fs::write(&files.config, with_meta()).unwrap();
+    let span = (day(21), day(23));
+
+    let (succeeded, trained, stderr) = train_over(&files, catalog.path(), span);
+
+    assert!(succeeded, "{trained}\n{stderr}");
+
+    for at in [day(21), day(22)] {
+        assert!(published(&trained, at), "{trained}");
+        assert!(
+            report(&trained, at)
+                .iter()
+                .any(|line| line.starts_with("  Rows of the meta: ")),
+            "{trained}"
+        );
+    }
+
+    let (succeeded, stdout, stderr) = backtest(&files, catalog.path(), span);
+
+    assert!(succeeded, "{stdout}\n{stderr}");
+    assert!(stdout.contains("Orders: 48\nPositions: 24\n"), "{stdout}");
+    assert_day_decided_by(section(&stdout, day(21), day(22)), day(21));
+    assert_day_decided_by(section(&stdout, day(22), day(23)), day(22));
+    for (from, to) in [(day(21), day(22)), (day(22), day(23))] {
+        let heading = format!("Meta model scores, out of sample, from {from} to {to}\n");
+        let (_, rest) = stdout
+            .split_once(&heading)
+            .unwrap_or_else(|| panic!("no {heading:?}: {stdout}"));
+        let meta = rest.split("\n\n").next().unwrap();
+        for line in [
+            format!("  Model valid from: {from}"),
+            "  Rows: 12".to_string(),
+            "  Trades taken: 12".to_string(),
+        ] {
+            assert!(meta.lines().any(|l| l == line), "{line}: {meta}");
+        }
+    }
+}

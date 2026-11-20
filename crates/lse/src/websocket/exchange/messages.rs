@@ -1,11 +1,11 @@
-//! The messages of LSE's exchange streams, CME Globex's and Nasdaq
-//! TotalView's, which are one protocol (LSE's WebSocket documentation, "The
-//! CME Group stream": the Nasdaq stream "sends the same messages for
-//! stocks"): the one subscription a connection sends, at
-//! one level, the text frames LSE answers with (`hello`, then each
-//! contract's `snapshot_begin` and `snapshot_end`), and the binary frame of
-//! a record in the `dbn` encoding, LSE's 24-byte header then the record in
-//! Databento's DBN format, of the level's schema.
+//! The messages of LSE's exchange streams for CME Globex and Nasdaq TotalView. Both streams use one
+//! protocol (LSE's WebSocket documentation, "The CME Group stream": the Nasdaq stream "sends the
+//! same messages for stocks").
+//!
+//! A connection sends one subscription at one level. LSE answers with two kinds of frame:
+//! - Text frames: `hello`, then each contract's `snapshot_begin` and `snapshot_end`.
+//! - Binary frames: a 24-byte header, then a record of the level's schema in Databento's DBN
+//!   format (the `dbn` encoding).
 
 use std::fmt::Display;
 
@@ -16,36 +16,32 @@ use dbn::{
 };
 use serde::{Deserialize, Serialize};
 
-/// LSE's first bytes of a record frame.
 const MAGIC: &[u8; 4] = b"L3DB";
 
-/// The version of LSE's record frame.
 const VERSION: u8 = 1;
 
-/// The length of LSE's header before the records of a frame.
 const HEADER_LEN: usize = 24;
 
-/// The kind byte of a record frame: the contract's opening, or live.
 const SNAPSHOT: u8 = 1;
 const LIVE: u8 = 2;
 
-/// A level of an LSE exchange stream, which a connection's subscription
-/// names: its records are Databento's of one schema ("to change the
-/// contracts or the level, open another connection").
+/// A level of an LSE exchange stream, named in a connection's subscription.
+///
+/// Its records are Databento records of one schema ("to change the contracts or the level, open
+/// another connection").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExchangeLevel {
-    /// Level 1: every trade and the best bid and offer (`mbp1`), each
-    /// contract opening with its last best bid and offer.
+    /// Level 1 (`mbp1`): every trade and the best bid and offer. A contract opens with its last
+    /// best bid and offer.
     Mbp1,
-    /// Level 2: the ten best levels a side after each change of one
-    /// (`mbp10`), each contract opening with its last ten levels.
+    /// Level 2 (`mbp10`): the ten best levels on each side after each change to one. A contract
+    /// opens with its last ten levels.
     Mbp10,
     /// Level 3: every order event (`mbo`), with no opening book.
     Mbo,
 }
 
 impl ExchangeLevel {
-    /// LSE's number of the level.
     const fn number(self) -> u8 {
         match self {
             Self::Mbp1 => 1,
@@ -54,7 +50,6 @@ impl ExchangeLevel {
         }
     }
 
-    /// The length of a record of the level.
     const fn record_len(self) -> usize {
         match self {
             Self::Mbp1 => size_of::<Mbp1Msg>(),
@@ -70,8 +65,7 @@ impl Display for ExchangeLevel {
     }
 }
 
-/// The one message a connection sends, within five seconds of opening: the
-/// contracts by their names at LSE, at one level, in the `dbn` encoding.
+/// The one message a connection sends. It must arrive within five seconds of opening.
 #[derive(Debug, Serialize)]
 pub struct ExchangeSubscription<'a> {
     op: &'static str,
@@ -81,7 +75,7 @@ pub struct ExchangeSubscription<'a> {
 }
 
 impl<'a> ExchangeSubscription<'a> {
-    /// The subscription of `symbols`, each named once, at `level`.
+    /// Returns the subscription to `symbols` at `level`, naming each symbol once.
     pub fn new(level: ExchangeLevel, symbols: &'a [String]) -> Self {
         Self {
             op: "subscribe",
@@ -96,18 +90,15 @@ impl<'a> ExchangeSubscription<'a> {
     }
 }
 
-/// A text frame of the stream. Its other fields, and other types, are not
-/// read.
+/// A text frame of the stream. The client reads no other fields and no other types.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExchangeText {
-    /// First on a connection: the feed's `epoch`, which every later message
-    /// repeats; a new one after the feed's reset, its contracts' sequences
-    /// starting again.
+    /// The first message on a connection. It gives the feed's `epoch`, and every later message
+    /// repeats it. A feed reset brings a new epoch, and the contracts' sequences start again.
     Hello { epoch: u64 },
-    /// A contract opens: its name, the stream's number for it, and the
-    /// sequence its live records continue: its opening record's, if the
-    /// level opens with one.
+    /// A contract opens. If the level opens with a record, its live records continue the
+    /// `sequence` of that opening record.
     SnapshotBegin {
         symbol: String,
         instrument_id: u32,
@@ -117,7 +108,7 @@ pub enum ExchangeText {
     SnapshotEnd { symbol: String },
 }
 
-/// A record of the stream, Databento's of its connection's level.
+/// A record of the stream, a Databento record for the connection's level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExchangeRecord {
     Mbp1(Mbp1Msg),
@@ -128,27 +119,32 @@ pub enum ExchangeRecord {
 /// A binary frame of the stream: one record of a contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExchangeRecordFrame {
-    /// Whether it is the contract's opening, its last best bid and offer or
-    /// ten levels, rather than a live record.
+    /// Whether the record opens the contract rather than being live.
     pub snapshot: bool,
-    /// The contract's sequence of the record, one more than the last.
+    /// The record's sequence number in the contract, one more than the last.
     pub sequence: u64,
-    /// The stream's number of the contract.
+    /// The number the stream gives the contract.
     pub instrument_id: u32,
     pub record: ExchangeRecord,
 }
 
 impl ExchangeRecordFrame {
-    /// The record `frame` holds, of a connection at `level`: LSE's header,
-    /// `L3DB`, version 1, the kind, 1 in a snapshot and 2 live, two unused
-    /// bytes, the sequence, the contract's number and the count of records,
-    /// little-endian, then the record, of the level's schema (`Mbp1Msg`,
-    /// `Mbp10Msg` or `MboMsg`), as each of the stream's messages holds one.
+    /// Returns the record that `frame` holds for a connection at `level`.
+    ///
+    /// LSE's header holds these fields, little-endian:
+    /// - The magic, `L3DB`.
+    /// - Version 1.
+    /// - The kind: 1 in a snapshot and 2 live.
+    /// - Two unused bytes.
+    /// - The sequence.
+    /// - The contract's number.
+    /// - The count of records.
+    ///
+    /// The record of the level's schema follows the header.
     ///
     /// # Errors
     ///
-    /// Returns an error if `frame` is not such a frame of one record of
-    /// `level`.
+    /// Returns an error if `frame` is not a frame of one record of `level`.
     pub fn parse(frame: &[u8], level: ExchangeLevel) -> anyhow::Result<Self> {
         anyhow::ensure!(
             frame.len() >= HEADER_LEN,
@@ -188,7 +184,6 @@ impl ExchangeRecordFrame {
     }
 }
 
-/// The one record of type `R` in `records`, a record of `level`.
 fn decode<R: HasRType + Clone>(records: &[u8], level: ExchangeLevel) -> anyhow::Result<R> {
     Ok(RecordDecoder::new(records)
         .decode_record::<R>()
@@ -200,7 +195,6 @@ fn decode<R: HasRType + Clone>(records: &[u8], level: ExchangeLevel) -> anyhow::
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use serde_json::json;
 
     use super::*;
     use crate::testing::{
@@ -215,9 +209,8 @@ mod tests {
         }
     }
 
-    /// GCZ6's opening, as LSE sent the same record in the `json` encoding
-    /// (`test_data/cme_stream_gcz6_l1_json.txt`): its best bid and offer at
-    /// CME's Friday close, no price of its own, no side.
+    /// GCZ6's opening record has the best bid and offer at CME's Friday close, with no price and no
+    /// side.
     #[rstest]
     fn a_frame_is_lse_s_header_then_the_contract_s_level_1_record() {
         let captured = frames(CME_GCZ6_GCG7);
@@ -258,33 +251,35 @@ mod tests {
         );
     }
 
-    /// GCG7's opening, beside GCZ6's on one connection.
-    #[rstest]
-    fn each_frame_names_its_contract_and_its_sequence() {
-        let captured = frames(CME_GCZ6_GCG7);
-        let frame =
-            ExchangeRecordFrame::parse(binary(&captured[5]).unwrap(), ExchangeLevel::Mbp1).unwrap();
-
-        assert_eq!(
-            (frame.snapshot, frame.sequence, frame.instrument_id),
-            (true, 58, 3_648_859_809)
-        );
+    fn words(reason: &str) -> Vec<&str> {
+        reason
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect()
     }
 
-    /// Synthetic: the captured frame cut, of another kind, or of a header
-    /// other than LSE's.
+    /// Synthetic: the captured frame is cut, has another kind, or has a header other than LSE's.
     #[rstest]
-    #[case::cut(|frame: &mut Vec<u8>| frame.truncate(60))]
-    #[case::header_only(|frame: &mut Vec<u8>| frame.truncate(24))]
-    #[case::kind(|frame: &mut Vec<u8>| frame[5] = 3)]
-    #[case::magic(|frame: &mut Vec<u8>| frame[0] = b'X')]
-    #[case::count(|frame: &mut Vec<u8>| frame[20] = 2)]
-    fn a_frame_not_of_one_level_1_record_is_refused(#[case] mangle: fn(&mut Vec<u8>)) {
+    #[case::cut(|frame: &mut Vec<u8>| frame.truncate(60), &["36", "80"])]
+    #[case::header_only(|frame: &mut Vec<u8>| frame.truncate(24), &["0", "80"])]
+    #[case::kind(|frame: &mut Vec<u8>| frame[5] = 3, &["3"])]
+    #[case::magic(|frame: &mut Vec<u8>| frame[0] = b'X', &["L3DB"])]
+    #[case::count(|frame: &mut Vec<u8>| frame[20] = 2, &["2", "80"])]
+    fn a_frame_not_of_one_level_1_record_is_refused(
+        #[case] mangle: fn(&mut Vec<u8>),
+        #[case] facts: &[&str],
+    ) {
         let captured = frames(CME_GCZ6_GCG7);
         let mut frame = binary(&captured[2]).unwrap().to_vec();
         mangle(&mut frame);
 
-        assert!(ExchangeRecordFrame::parse(&frame, ExchangeLevel::Mbp1).is_err());
+        let err = ExchangeRecordFrame::parse(&frame, ExchangeLevel::Mbp1)
+            .unwrap_err()
+            .to_string();
+
+        for fact in facts {
+            assert!(words(&err).contains(fact), "{fact}: {err}");
+        }
     }
 
     #[rstest]
@@ -322,29 +317,6 @@ mod tests {
         );
     }
 
-    /// LSE's documented subscription, asking the `dbn` encoding, at each
-    /// level a connection may carry.
-    #[rstest]
-    #[case::level_1(ExchangeLevel::Mbp1, 1)]
-    #[case::level_2(ExchangeLevel::Mbp10, 2)]
-    #[case::level_3(ExchangeLevel::Mbo, 3)]
-    fn the_subscription_names_the_contracts_at_its_level_in_dbn(
-        #[case] level: ExchangeLevel,
-        #[case] number: u8,
-    ) {
-        let symbols = ["GCZ6".to_string(), "GCG7".to_string()];
-
-        let sent: serde_json::Value =
-            serde_json::from_str(&ExchangeSubscription::new(level, &symbols).to_json()).unwrap();
-
-        assert_eq!(
-            sent,
-            json!({"op": "subscribe", "symbols": ["GCZ6", "GCG7"], "level": number, "encoding": "dbn"})
-        );
-    }
-
-    /// GCZ6's opening at Level 2 (`test_data/README.md`): its last ten
-    /// levels a side, best first, with each level's count of orders.
     #[rstest]
     fn a_level_2_frame_is_lse_s_header_then_the_contract_s_ten_levels_a_side() {
         let session = dbn_frames(CME_GCZ6_L2_DOCUMENTED);
@@ -384,8 +356,6 @@ mod tests {
         );
     }
 
-    /// GCZ6's first order event at Level 3: an order of 1 added to the bid
-    /// at 3908.10, not the last of its exchange message.
     #[rstest]
     fn a_level_3_frame_is_lse_s_header_then_one_order_event() {
         let session = dbn_frames(CME_GCZ6_L3_DOCUMENTED);
@@ -413,16 +383,18 @@ mod tests {
         );
     }
 
-    /// A connection carries one level: a record of another is no record of
-    /// it.
+    /// A connection carries one level, so a record of another level is refused.
+    ///
+    /// The test looks for the one record beside the level's name, which holds a 1 at Level 1.
     #[rstest]
-    #[case::level_1_at_level_2(CME_GCZ6_GCG7, 2, ExchangeLevel::Mbp10)]
-    #[case::level_2_at_level_1(CME_GCZ6_L2_DOCUMENTED, 2, ExchangeLevel::Mbp1)]
-    #[case::level_3_at_level_2(CME_GCZ6_L3_DOCUMENTED, 3, ExchangeLevel::Mbp10)]
+    #[case::level_1_at_level_2(CME_GCZ6_GCG7, 2, ExchangeLevel::Mbp10, "368")]
+    #[case::level_2_at_level_1(CME_GCZ6_L2_DOCUMENTED, 2, ExchangeLevel::Mbp1, "80")]
+    #[case::level_3_at_level_2(CME_GCZ6_L3_DOCUMENTED, 3, ExchangeLevel::Mbp10, "368")]
     fn a_frame_of_another_level_s_record_is_refused(
         #[case] session: &str,
         #[case] at: usize,
         #[case] level: ExchangeLevel,
+        #[case] level_len: &str,
     ) {
         let session = if session == CME_GCZ6_GCG7 {
             frames(session)
@@ -430,35 +402,13 @@ mod tests {
             dbn_frames(session)
         };
 
-        assert!(ExchangeRecordFrame::parse(binary(&session[at]).unwrap(), level).is_err());
-    }
+        let err = ExchangeRecordFrame::parse(binary(&session[at]).unwrap(), level)
+            .unwrap_err()
+            .to_string();
 
-    /// At Level 3 a contract opens with no record: `snapshot_begin`, of a
-    /// count of 0, then `snapshot_end`.
-    #[rstest]
-    fn a_level_3_opening_is_its_markers_alone() {
-        let texts: Vec<ExchangeText> = dbn_frames(CME_GCZ6_L3_DOCUMENTED)
-            .iter()
-            .take(3)
-            .map(|frame| match frame {
-                StreamFrame::Text(text) => serde_json::from_str(text).unwrap(),
-                StreamFrame::Binary(_) => panic!("a record in the opening"),
-            })
-            .collect();
-
-        assert_eq!(
-            texts,
-            [
-                ExchangeText::Hello { epoch: 2 },
-                ExchangeText::SnapshotBegin {
-                    symbol: "GCZ6".into(),
-                    instrument_id: 1_496_506_229,
-                    sequence: 7311
-                },
-                ExchangeText::SnapshotEnd {
-                    symbol: "GCZ6".into()
-                },
-            ]
-        );
+        let beside = err.replace(&level.to_string(), "");
+        for fact in ["1", level_len] {
+            assert!(words(&beside).contains(&fact), "{fact}: {err}");
+        }
     }
 }

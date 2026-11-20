@@ -1,46 +1,39 @@
-//! The model harness: what a strategy trading on a learned model shares
-//! with every other, in backtest, live and the training table alike.
+//! The model harness. It holds what a strategy trading on a learned model shares with every other
+//! such strategy, in backtest, live and the training table alike.
 //!
-//! `features` is the strategy's feature set, Nautilus indicators fed by
-//! Nautilus; `decide` is when the strategy decides and the feature row it
-//! publishes at each decision; `targets` is the outcome of each decision,
-//! read from real orders on the simulated venue of a dataset run;
-//! `dataset` is the settled rows of a strategy stored by day in the
-//! catalog, its coverage the cache of the days built;
-//! `learner` is the model port, its learners fitting and loading the
-//! models that predict; `calibration` turns a pair's predictions of R into
-//! each side's expected R, and a meta's into its expected R; `payoff` is the
-//! side a decision trades on its expected R;
-//! `config` is the model section of a strategy's config; `blueprint` is
-//! what its config alone determines about its model, validated, the dataset,
-//! the stores, the training, the walk-forward and the handle built of it;
-//! `train` trains
-//! at a time, fitting a model of each side traded on a window of the
-//! dataset and publishing them together in the `store` if their `holdout`,
-//! each side's `score` and what the decision would have earned there, meets
-//! the minimums;
-//! `deciding` is the decision itself, the side picked among the models
-//! valid at a time and the meta's margin; `handle` is
-//! what the strategy holds and decides through, trading on the sides'
-//! latest pair and the meta's latest model valid at each decision, or
-//! opening the decision's target in a dataset run; `schedule` is when a
-//! model is retrained, on a fixed UTC grid, or that it never is, and what
-//! each train does to each model; `launcher`
-//! starts a live strategy's retrains, one
-//! at a time, in a child process; `walk` is a backtest retraining on the
-//! schedule before its run and scoring its models out of sample after.
-//! `meta` is meta-labeling: a meta model deciding whether to take the
-//! trade of the side picked on the net R it expects of it, trained on the
-//! out-of-sample predictions of the strategy's side models.
+//! The modules:
+//! - `features`: Nautilus indicators fed by Nautilus.
+//! - `decide`: when the strategy decides, and the feature row it publishes at each decision.
+//! - `targets`: the outcome of each decision, read from real orders on the simulated venue of a
+//!   dataset run.
+//! - `dataset`: the settled rows of a strategy, stored by day in the catalog. Its coverage is the
+//!   cache of the days built.
+//! - `learner`: the model port.
+//! - `calibration`: maps a pair's predictions of R to each side's expected R, and a meta's
+//!   predictions to its expected R.
+//! - `payoff`: the side a decision trades, picked by its expected R.
+//! - `config`: the model section of a strategy's config.
+//! - `blueprint`: what the config alone determines about the model, validated.
+//! - `train`: fits a model for each side on a window of the dataset less the calibration slice.
+//!   Calibrates the models together on that slice, and publishes them with the meta's model as one
+//!   model set in the `store`. It judges none of their figures.
+//! - `earnings` and `score`: what a decision took and earned on rows, and how its expected R met
+//!   the R realized.
+//! - `deciding`: the side picked among the models valid at a time, and the meta's margin.
+//! - `handle`: what the strategy decides through. It is the latest model set valid at each
+//!   decision, or the decision's target in a dataset run.
+//! - `schedule`: when a model is retrained, on a fixed UTC grid, or never.
+//! - `launcher`: starts a live strategy's retrains, one at a time, in a child process.
+//! - `walk`: a backtest on the models `train` stored. It is refused before its run if there is no
+//!   model to trade on at its start, and it scores its models out of sample after.
+//! - `meta`: meta-labeling.
 //!
-//! `ModelStrategy` is what a strategy trading on a model gives the
-//! harness: the binary's backtest, live, train and dataset runs are
-//! generic over it. Its part of its config builds its features
-//! (`ModelPart`), and the harness answers from them what it reads
-//! (`reads`), which the load checks `[data]` against; its model's
-//! blueprint (`ModelStrategy::blueprint`) is built of them and of its
-//! config, once for each strategy built, and handed to the strategy,
-//! whose model handle is built of it (`ModelStrategy::with_blueprint`).
+//! `ModelStrategy` is what a strategy trading on a model gives the harness. The binary's backtest,
+//! live, train and dataset runs are generic over it. The strategy's part of the config builds its
+//! features (`ModelPart`). From those, the harness answers what the strategy reads (`reads`), and
+//! the load checks `[data]` against that. The blueprint (`ModelStrategy::blueprint`) is built once
+//! for each strategy and handed to the strategy (`ModelStrategy::with_blueprint`), which builds
+//! its model handle from it.
 
 pub mod blueprint;
 pub mod calibration;
@@ -48,13 +41,14 @@ pub mod config;
 pub mod dataset;
 pub mod decide;
 pub mod deciding;
+pub mod earnings;
 pub mod features;
 pub mod handle;
-pub mod holdout;
 pub mod launcher;
 pub mod learner;
 pub mod meta;
 pub mod payoff;
+pub mod report;
 pub mod schedule;
 pub mod score;
 pub mod store;
@@ -73,40 +67,35 @@ use self::{
 };
 use crate::strategy::{Part, Series, StandardConfig, requirements::catalog_keys, warmup::Warmup};
 
-/// The part of a strategy trading on a model (`Part::TAKES_MODEL`): the
-/// features its model decides on, built of its config. The load and every
-/// run build them here, so the features checked against `[data]` are the
-/// features run: its answer of what the strategy reads is the harness'
-/// (`reads`), and its strategy decides on them (`ModelStrategy`).
+/// The part of a strategy trading on a model (`Part::TAKES_MODEL`) that builds the features its
+/// model decides on.
+///
+/// The load and every run build the features here, so the features checked against `[data]` are
+/// the features that run.
 pub trait ModelPart: Part {
-    /// The features its model decides on, as its code builds them of
-    /// `config`: each of an indicator it declares (`Part::INDICATORS`),
-    /// built of its table in `config.indicators`
-    /// (`features::FeatureSetBuilder`), or a raw feature of custom data.
-    /// The load asks once those tables build.
+    /// Builds the features its model decides on from `config`.
+    ///
+    /// It builds one feature for each indicator it declares (`Part::INDICATORS`), from that
+    /// indicator's table in `config.indicators`, or a raw feature of custom data. The load calls
+    /// it once those tables build.
     ///
     /// # Errors
     ///
-    /// Returns an error if the strategy cannot build them of `config`: its
-    /// own errors, each under its field.
+    /// Returns an error if the strategy cannot build them from `config`, reporting its own errors
+    /// each under its field.
     fn features(config: &StandardConfig<Self>) -> ConfigResult<Rc<FeatureSet>>;
 }
 
-/// What a strategy trading on a model reads (`Part::reads`, its part's
-/// answer): the series its features read (`ModelPart::features`), their
-/// bar types (`FeatureSet::bar_types`), their tick series
-/// (`FeatureSet::ticks`) and their custom series (`FeatureSet::custom`),
-/// each whole, as the cache keys its points, then each series `[data]`
-/// lists that the target's ATR, if it has one, reads, its bars or the
-/// ticks they are built from (`catalog_keys`). The ATR is built of what
-/// the strategy reads of the traded instrument (`TargetConfig::atr_bars`),
-/// so it reads a series of `[data]` if one serves it, and needs none
-/// listed.
+/// Returns what a strategy trading on a model reads (`Part::reads`).
+///
+/// That is the series its features read, each whole, as the cache keys its points. After them come
+/// the `[data]` series that the target's ATR reads (`catalog_keys`). The ATR is built from what the
+/// strategy reads of the traded instrument (`TargetConfig::atr_bars`), so a `[data]` series serves
+/// it if one does, and none need be listed.
 ///
 /// # Errors
 ///
-/// Returns an error if the part fails to build the features
-/// (`ModelPart::features`).
+/// Returns an error if the part fails to build the features (`ModelPart::features`).
 pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Series>> {
     let features = P::features(config)?;
     let mut read: Vec<Series> = features
@@ -117,7 +106,8 @@ pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Serie
         .chain(features.custom().into_iter().map(Series::Custom))
         .collect();
     let model = config.model();
-    // An ATR without bars is the target's violation (`ModelConfig::validate`).
+
+    // An ATR without bars is the target's violation (`ModelConfig::validate`)
     if let Ok(Some(atr)) = model
         .target
         .atr_bars(model.decision, &config.data_requirements())
@@ -140,40 +130,36 @@ pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Serie
     Ok(read)
 }
 
-/// A strategy trading on a model, as the binary runs it: built of its
-/// config in a `Mode`, deciding on the features its part builds of that
-/// config (`ModelPart::features`), its model handle, its dataset, its
-/// training and its walk forward built of its model's blueprint
-/// (`blueprint`). A Nautilus strategy, as a node runs it.
+/// A strategy trading on a model, as the binary runs it.
+///
+/// Its model handle, dataset, training and walk forward are built from its model's blueprint
+/// (`blueprint`).
 pub trait ModelStrategy:
     Strategy + StrategyNative + DataActorNative + Component + Debug + Sized + 'static
 {
-    /// Its own part of its config, which trades on a model and builds its
-    /// features.
+    /// The part of the config that trades on a model.
     type Params: ModelPart;
 
-    /// The strategy of `config`, deciding on the model `blueprint`
-    /// describes, that of `config` (`ModelStrategy::blueprint`), its model
-    /// handle built of it in `mode` (`ModelHandle::new`).
+    /// Returns the strategy for `config`, deciding on the model that `blueprint` describes.
+    ///
+    /// The strategy's model handle is built in `mode` (`ModelHandle::new`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the handle cannot be built in `mode`, or if
-    /// Nautilus refuses the base.
+    /// Returns an error if the handle cannot be built in `mode`, or if Nautilus refuses the base.
     fn with_blueprint(
         config: StandardConfig<Self::Params>,
         blueprint: ModelBlueprint,
         mode: Mode,
     ) -> anyhow::Result<Self>;
 
-    /// Its warmup, its model handle's: a live node sizes its cache from
-    /// it.
+    /// Returns the warmup of the model handle. A live node sizes its cache from it.
     fn warmup(&self) -> Rc<Warmup>;
 
-    /// The strategy of `config`, deciding on the model of its blueprint,
-    /// built once of `config` (`blueprint`), its model handle in `mode`.
-    /// Each call builds a blueprint of its own, and so features of its own,
-    /// which the strategy's handle feeds.
+    /// Returns the strategy for `config`, deciding on a blueprint built from it.
+    ///
+    /// Each call builds its own blueprint, and so its own features. The strategy's handle feeds
+    /// those features.
     ///
     /// # Errors
     ///
@@ -183,15 +169,13 @@ pub trait ModelStrategy:
         Self::with_blueprint(config, blueprint, mode)
     }
 
-    /// The blueprint of the model of the strategy `config` describes: its
-    /// id, the features its part builds of `config`
-    /// (`ModelPart::features`), the config's model (`StandardConfig::model`)
-    /// and its data requirements.
+    /// Returns the blueprint for the model of the strategy `config`.
+    ///
+    /// It is built from the strategy's features, model config and data requirements.
     ///
     /// # Errors
     ///
-    /// Returns an error if `ModelPart::features` or `ModelBlueprint::new`
-    /// fails.
+    /// Returns an error if `ModelPart::features` or `ModelBlueprint::new` fails.
     fn blueprint(config: &StandardConfig<Self::Params>) -> anyhow::Result<ModelBlueprint> {
         let features = Self::Params::features(config)?;
         ModelBlueprint::new(
@@ -202,8 +186,9 @@ pub trait ModelStrategy:
         )
     }
 
-    /// The dataset of the strategy `config` describes, in the catalog at
-    /// `catalog`; its replay runs the strategy in `Mode::Dataset`.
+    /// Returns the dataset that the strategy `config` describes, in the catalog at `catalog`.
+    ///
+    /// Its replay runs the strategy in `Mode::Dataset`.
     ///
     /// # Errors
     ///
@@ -212,9 +197,9 @@ pub trait ModelStrategy:
         Self::blueprint(config)?.dataset(catalog)
     }
 
-    /// The training of the model of the strategy `config` describes, on
-    /// its dataset in the catalog at `catalog`, and its models in the store
-    /// under `models`.
+    /// Returns the training for the model of the strategy `config`.
+    ///
+    /// It trains on the dataset at `catalog` and stores the models under `models`.
     ///
     /// # Errors
     ///
@@ -227,14 +212,13 @@ pub trait ModelStrategy:
         Self::blueprint(config)?.training(catalog, models)
     }
 
-    /// The backtests of the model of the strategy `config` describes, on
-    /// its dataset in the catalog at `catalog`, and its models in the store
-    /// under `models`: their retrains and their scores.
+    /// Returns the backtests for the model of the strategy `config`.
+    ///
+    /// They run on the dataset at `catalog` and the models under `models`.
     ///
     /// # Errors
     ///
-    /// Returns an error if `blueprint` or `ModelBlueprint::walk_forward`
-    /// fails.
+    /// Returns an error if `blueprint` or `ModelBlueprint::walk_forward` fails.
     fn walk_forward(
         config: &StandardConfig<Self::Params>,
         catalog: &Path,
@@ -246,6 +230,8 @@ pub trait ModelStrategy:
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use jiff::SignedDuration;
     use nautilus_common::config::ConfigError;
     use nautilus_indicators::indicator::Indicator;
@@ -260,8 +246,6 @@ mod tests {
         strategy::{Declaration, Declared, EmaArgs, IndicatorArgs},
     };
 
-    /// A custom indicator of the probe over a span of time: its value the
-    /// span in seconds, initialized from the start.
     struct Span(SignedDuration);
 
     impl Indicator for Span {
@@ -286,8 +270,6 @@ mod tests {
         }
     }
 
-    /// The arguments of `Span`: a positive duration, written as `[data]
-    /// warmup` is.
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct SpanArgs {
@@ -303,16 +285,10 @@ mod tests {
         }
     }
 
-    /// The probe's feature on each series it lists, `[indicators.span]`.
     const SPAN: Declared<SpanArgs> = Declared::new("span");
-    /// An EMA the probe declares for its own logic, which its strategy
-    /// would build itself (`config.indicators.build(FILTER)`), not as a
-    /// feature, `[indicators.filter]`.
+    /// An EMA that the probe's own logic would build, `[indicators.filter]`. It is not a feature.
     const FILTER: Declared<EmaArgs> = Declared::new("filter");
 
-    /// The part of a strategy trading on a model whose features read the
-    /// series its own `features` lists, its span on each, a custom
-    /// series' last value; its filter is its own logic's.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ProbeParams {
@@ -342,13 +318,10 @@ mod tests {
             let builder = config.own.features.iter().enumerate().try_fold(
                 FeatureSet::builder(),
                 |builder, (i, series)| match series {
-                    Series::Bars(bar_type) => Ok(builder.bars(*bar_type, SPAN, tables)),
+                    Series::Bars(_) => Ok(builder.feature(slice::from_ref(series), SPAN, tables)),
                     Series::Ticks(ticks) => match &ticks.data {
-                        NautilusDataType::QuoteTick => {
-                            Ok(builder.quotes(ticks.instrument_id, SPAN, tables))
-                        }
-                        NautilusDataType::TradeTick => {
-                            Ok(builder.trades(ticks.instrument_id, SPAN, tables))
+                        NautilusDataType::QuoteTick | NautilusDataType::TradeTick => {
+                            Ok(builder.feature(slice::from_ref(series), SPAN, tables))
                         }
                         data => Err(ConfigError::invalid_value(
                             "features",
@@ -366,8 +339,12 @@ mod tests {
 
     const GOLD_BARS: &str = r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } }"#;
     const GC_TRADES: &str = r#"{ data = "trades", instrument_id = "GC.GLBX" }"#;
+    /// The GC root's MID bars, which Nautilus never builds. It builds a root's bars from the
+    /// trades of its contracts.
+    const GC_ROOT_BARS: &str = r#"{ data = "bars", instrument_id = "GC.GLBX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#;
+    const GOLD_HOURS: &str = r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#;
+    const GOLD_QUOTES: &str = r#"{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }"#;
 
-    /// The probe's tables: a span of 15 minutes, a filter of 5.
     const TABLES: &str = r#"
         [indicators.span]
         span = "15m"
@@ -376,9 +353,6 @@ mod tests {
         period = 5
     "#;
 
-    /// The probe trading gold, its features reading `features`, its
-    /// `[data]` listing `series`, deciding hourly on the `target`, of
-    /// `TABLES`, loaded.
     fn load(
         features: &[&str],
         series: &[&str],
@@ -387,9 +361,7 @@ mod tests {
         load_of(features, series, target, TABLES)
     }
 
-    /// The probe as `load` has it, its `[indicators]` `tables`, loaded
-    /// after registering the custom data types helix compiles, as the
-    /// process does at its start.
+    /// Registers the custom data types as the process does at start, then calls `load`.
     fn load_of(
         features: &[&str],
         series: &[&str],
@@ -400,7 +372,6 @@ mod tests {
         StandardConfig::load(&toml_of(features, series, target, tables))
     }
 
-    /// The TOML of the probe as `load_of` has it.
     fn toml_of(features: &[&str], series: &[&str], target: &str, tables: &str) -> String {
         format!(
             r#"
@@ -422,10 +393,9 @@ mod tests {
             target = {target}
             retrain = "24h"
             window = "48h"
-            holdout = "12h"
+            calibration = "12h"
             margins = {{ long = "0.5R", short = "0.5R" }}
-            min_expectancy = "0.5R"
-            min_trades = 30
+            min_rows = 30
             learner = {{ kind = "baseline" }}
             "#,
             features.join(", "),
@@ -433,23 +403,17 @@ mod tests {
         )
     }
 
-    /// A time-only target, its unit measured in Nautilus' ATR of 14 hourly
-    /// bars of gold.
     const TIME_ONLY: &str = r#"{ limit = "30m", atr = { period = 14 } }"#;
-    /// A bracket in ATRs: Nautilus' ATR of 14 hourly bars of gold.
     const BRACKET: &str =
         r#"{ bracket = { take_profit = { atr = 2 }, stop = { atr = 1 } }, limit = "45m" }"#;
     /// A bracket in basis points, which has no ATR.
     const IN_BPS: &str =
         r#"{ bracket = { take_profit = { bps = 20 }, stop = { bps = 10 } }, limit = "45m" }"#;
 
-    /// Each config error refusing the probe's config of `features`,
-    /// `series` and `target` (see `load`): its field and its message.
     fn refusals(features: &[&str], series: &[&str], target: &str) -> Vec<(String, String)> {
         refusals_of(&load(features, series, target).unwrap_err())
     }
 
-    /// Each config error of `err`: its field and its message.
     fn refusals_of(err: &anyhow::Error) -> Vec<(String, String)> {
         let errors = match err.downcast_ref::<ConfigError>() {
             Some(ConfigError::Multiple { errors }) => errors.clone(),
@@ -468,35 +432,86 @@ mod tests {
     }
 
     #[rstest]
-    fn features_reading_every_series_of_data_and_no_other_load() {
-        load(&[GOLD_BARS, GC_TRADES], &[GC_TRADES, GOLD_BARS], TIME_ONLY).unwrap();
+    #[case::of_bars_and_trades(&[GOLD_BARS, GC_TRADES], &[GC_TRADES, GOLD_BARS])]
+    #[case::of_a_custom_series(&[GOLD_BARS, US10Y], &[GOLD_BARS, US10Y])]
+    fn features_reading_every_series_of_data_and_no_other_load(
+        #[case] features: &[&str],
+        #[case] series: &[&str],
+    ) {
+        load(features, series, TIME_ONLY).unwrap();
     }
 
+    /// Nautilus builds a root's bars from the trades of its contracts, so the GC root's MID bars
+    /// never come.
     #[rstest]
-    fn a_series_of_data_no_feature_reads_is_refused_under_its_field_naming_it() {
-        let [(field, message)] = &refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], TIME_ONLY)[..]
-        else {
-            panic!("not one refusal");
-        };
+    #[case::listed_and_read_by_no_feature(
+        &[GOLD_BARS],
+        &[GOLD_BARS, GC_TRADES],
+        TIME_ONLY,
+        "data.series[1]",
+        "TradeTick of GC.GLBX",
+        None
+    )]
+    #[case::listed_and_read_by_neither_a_feature_nor_the_target_atr(
+        &[GOLD_BARS],
+        &[GOLD_BARS, GC_TRADES],
+        BRACKET,
+        "data.series[1]",
+        "TradeTick of GC.GLBX",
+        None
+    )]
+    #[case::read_and_not_listed(
+        &[GOLD_BARS, GC_TRADES],
+        &[GOLD_BARS],
+        TIME_ONLY,
+        "data.series",
+        "TradeTick of GC.GLBX",
+        None
+    )]
+    #[case::bars_on_a_root_not_built_from_its_trades(
+        &[GC_ROOT_BARS],
+        &[GC_ROOT_BARS],
+        TIME_ONLY,
+        "data.series[0]",
+        "GC.GLBX-1-HOUR-MID-INTERNAL",
+        None
+    )]
+    #[case::a_custom_series_read_and_not_listed(
+        &[GOLD_BARS, US10Y, US2Y],
+        &[GOLD_BARS, US10Y],
+        TIME_ONLY,
+        "data.series",
+        "TREASURY-2Y",
+        Some("TREASURY-10Y")
+    )]
+    #[case::a_custom_series_listed_and_read_by_no_feature(
+        &[GOLD_BARS, US10Y],
+        &[GOLD_BARS, US2Y, US10Y],
+        TIME_ONLY,
+        "data.series[1]",
+        "TREASURY-2Y",
+        None
+    )]
+    fn a_series_of_data_no_feature_reads_is_refused_under_its_field_naming_it(
+        #[case] features: &[&str],
+        #[case] series: &[&str],
+        #[case] target: &str,
+        #[case] field: &str,
+        #[case] named: &str,
+        #[case] unnamed: Option<&str>,
+    ) {
+        let refusals = refusals(features, series, target);
 
-        assert_eq!(field, "data.series[1]");
-        assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
+        let [(refused, message)] = &refusals[..] else {
+            panic!("not one refusal: {refusals:?}");
+        };
+        assert_eq!(refused, field);
+        assert!(message.contains(named), "{message}");
+        if let Some(unnamed) = unnamed {
+            assert!(!message.contains(unnamed), "{message}");
+        }
     }
 
-    #[rstest]
-    fn a_series_the_features_read_that_data_does_not_list_is_refused_naming_it() {
-        let [(field, message)] = &refusals(&[GOLD_BARS, GC_TRADES], &[GOLD_BARS], TIME_ONLY)[..]
-        else {
-            panic!("not one refusal");
-        };
-
-        assert_eq!(field, "data.series");
-        assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
-    }
-
-    /// Hourly bars of silver the features read and `[data]` does not list,
-    /// the trades of GC `[data]` lists and no feature reads: each refused
-    /// under its field, naming it.
     #[rstest]
     fn both_mismatches_are_refused_at_once() {
         let silver_bars = GOLD_BARS
@@ -524,83 +539,28 @@ mod tests {
         assert!(of_unread.contains("TradeTick of GC.GLBX"), "{of_unread}");
     }
 
-    /// Features on the MID bars of the GC root, listed: Nautilus builds a
-    /// root's bars from its contracts' trades, so these would never come,
-    /// refused under their series, naming them.
     #[rstest]
-    fn bars_on_a_root_not_built_from_its_trades_are_refused_under_their_series() {
-        let root_bars = r#"{ data = "bars", instrument_id = "GC.GLBX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#;
-
-        let refusals = refusals(&[root_bars], &[root_bars], TIME_ONLY);
-
-        let [(field, message)] = &refusals[..] else {
-            panic!("not one refusal: {refusals:?}");
-        };
-        assert_eq!(field, "data.series[0]");
-        assert!(message.contains("GC.GLBX-1-HOUR-MID-INTERNAL"), "{message}");
-    }
-
-    /// The features read GC's trades alone; the target's ATR, a bracket's
-    /// or a time-only target's, is built of the quotes of the gold traded,
-    /// which `[data]` lists for it; a bracket in basis points has no ATR to
-    /// read them.
-    #[rstest]
-    fn ticks_the_target_atr_reads_alone_are_read() {
-        let gold_quotes = r#"{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }"#;
-
-        load(&[GC_TRADES], &[GC_TRADES, gold_quotes], BRACKET).unwrap();
-        load(&[GC_TRADES], &[GC_TRADES, gold_quotes], TIME_ONLY).unwrap();
-        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, gold_quotes], IN_BPS);
+    #[case::ticks(GOLD_QUOTES, "QuoteTick of XAUUSD.ICMARKETS")]
+    #[case::bars(GOLD_HOURS, "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")]
+    fn ticks_the_target_atr_reads_alone_are_read(#[case] read: &str, #[case] named: &str) {
+        load(&[GC_TRADES], &[GC_TRADES, read], BRACKET).unwrap();
+        load(&[GC_TRADES], &[GC_TRADES, read], TIME_ONLY).unwrap();
+        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, read], IN_BPS);
         let [(field, message)] = &refusals[..] else {
             panic!("not one refusal: {refusals:?}");
         };
         assert_eq!(field, "data.series[1]");
-        assert!(
-            message.contains("QuoteTick of XAUUSD.ICMARKETS"),
-            "{message}"
-        );
+        assert!(message.contains(named), "{message}");
     }
 
-    /// Deciding hourly, the target's ATR, a bracket's or a time-only
-    /// target's, runs on gold's hourly bars of mids, which `[data]` lists and
-    /// no feature reads; a bracket in basis points has no ATR to read them.
     #[rstest]
-    fn bars_the_target_atr_runs_on_alone_are_read() {
-        let gold_hours = GOLD_BARS.replace("MINUTE", "HOUR");
-
-        load(&[GC_TRADES], &[GC_TRADES, &gold_hours], BRACKET).unwrap();
-        load(&[GC_TRADES], &[GC_TRADES, &gold_hours], TIME_ONLY).unwrap();
-        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, &gold_hours], IN_BPS);
-        let [(field, message)] = &refusals[..] else {
-            panic!("not one refusal: {refusals:?}");
-        };
-        assert_eq!(field, "data.series[1]");
-        assert!(
-            message.contains("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"),
-            "{message}"
-        );
-    }
-
-    /// The target's ATR reads what it is built from, and nothing more:
-    /// its bars of gold's quotes leave the trades of GC unread.
-    #[rstest]
-    fn a_series_neither_the_features_nor_the_target_atr_read_is_refused() {
-        let refusals = refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], BRACKET);
-        let [(field, message)] = &refusals[..] else {
-            panic!("not one refusal: {refusals:?}");
-        };
-        assert_eq!(field, "data.series[1]");
-        assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
-    }
-
-    /// An unread series and a limit of an hour decided every hour are
-    /// both reported, each under its field.
-    #[rstest]
-    fn the_series_refusals_are_reported_with_the_other_violations() {
+    #[case::unread(&[GOLD_BARS, GC_TRADES])]
+    #[case::listed_twice(&[GOLD_BARS, GOLD_BARS])]
+    fn the_series_refusals_are_reported_with_the_other_violations(#[case] series: &[&str]) {
         let mut fields: Vec<String> = refusals(
             &[GOLD_BARS],
-            &[GOLD_BARS, GC_TRADES],
-            r#"{ limit = "1h", atr = { period = 14 } }"#,
+            series,
+            r#"{ limit = "0s", atr = { period = 14 } }"#,
         )
         .into_iter()
         .map(|(field, _)| field)
@@ -610,8 +570,6 @@ mod tests {
         assert_eq!(fields, ["data.series[1]", "model.target.limit"]);
     }
 
-    /// The features read GC's trades once, and `[data]` lists them again:
-    /// refused under their second listing, naming them.
     #[rstest]
     fn a_tick_series_listed_twice_is_refused_under_its_second_listing() {
         let err = load(
@@ -632,25 +590,6 @@ mod tests {
         assert!(value.contains("TradeTick of GC.GLBX"), "{value}");
     }
 
-    /// A series listed twice and a limit of an hour decided every hour
-    /// are both reported, each under its field.
-    #[rstest]
-    fn a_series_listed_twice_is_reported_with_the_other_violations() {
-        let mut fields: Vec<String> = refusals(
-            &[GOLD_BARS],
-            &[GOLD_BARS, GOLD_BARS],
-            r#"{ limit = "1h", atr = { period = 14 } }"#,
-        )
-        .into_iter()
-        .map(|(field, _)| field)
-        .collect();
-        fields.sort();
-
-        assert_eq!(fields, ["data.series[1]", "model.target.limit"]);
-    }
-
-    /// The part's own error building the features is the answer: no
-    /// series is then refused for it.
     #[rstest]
     fn the_parts_error_building_the_features_is_reported_under_its_field() {
         let refusals = refusals(&[], &[GOLD_BARS], TIME_ONLY);
@@ -658,52 +597,10 @@ mod tests {
         assert_eq!(fields, ["features"]);
     }
 
-    /// LSE's daily 10-year US yield, under the identifier `TREASURY-10Y`.
     const US10Y: &str = r#"{ data = "Custom:LseRow", identifier = "TREASURY-10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#;
-    /// LSE's daily 2-year US yield, under the identifier `TREASURY-2Y`.
     const US2Y: &str = r#"{ data = "Custom:LseRow", identifier = "TREASURY-2Y", metadata = { source = "bond_yields", symbol = "US2Y" } }"#;
 
-    /// Features on gold's bars and the 10-year yields, which `[data]`
-    /// lists beside the bars.
-    #[rstest]
-    fn features_reading_a_custom_series_data_lists_load() {
-        load(&[GOLD_BARS, US10Y], &[GOLD_BARS, US10Y], TIME_ONLY).unwrap();
-    }
-
-    /// The features read the 2-year yields, which `[data]` does not list
-    /// beside the 10-year: refused, naming them by their identifier.
-    #[rstest]
-    fn a_custom_series_the_features_read_that_data_does_not_list_is_refused_naming_it() {
-        let [(field, message)] =
-            &refusals(&[GOLD_BARS, US10Y, US2Y], &[GOLD_BARS, US10Y], TIME_ONLY)[..]
-        else {
-            panic!("not one refusal");
-        };
-
-        assert_eq!(field, "data.series");
-        assert!(message.contains("TREASURY-2Y"), "{message}");
-        assert!(!message.contains("TREASURY-10Y"), "{message}");
-    }
-
-    /// The 2-year yields `[data]` lists beside the 10-year the features
-    /// read: refused as any series read by none, a strategy reading custom
-    /// data in its `on_data` declaring it in what it reads.
-    #[rstest]
-    fn a_custom_series_data_lists_that_no_feature_reads_is_refused_naming_it() {
-        let [(field, message)] =
-            &refusals(&[GOLD_BARS, US10Y], &[GOLD_BARS, US2Y, US10Y], TIME_ONLY)[..]
-        else {
-            panic!("not one refusal");
-        };
-
-        assert_eq!(field, "data.series[1]");
-        assert!(message.contains("TREASURY-2Y"), "{message}");
-    }
-
-    /// The 2-year yields listed under the 10-year's identifier are another
-    /// data type than the 10-year's the features read there: the cache keys
-    /// a point by its whole data type, so each is refused, the one listed
-    /// as read by no feature, the one read as not listed.
+    /// The cache keys a point by its whole data type.
     #[rstest]
     fn a_custom_series_listed_under_its_identifier_with_other_metadata_is_refused_both_ways() {
         let under_10y = US2Y.replace("TREASURY-2Y", "TREASURY-10Y");
@@ -717,21 +614,16 @@ mod tests {
         assert_eq!(fields, ["data.series[1]", "data.series"]);
     }
 
-    /// The probe's features on gold's bars, of the tables `tables`, as its
-    /// part builds them of the loaded config.
     fn features_of(tables: &str) -> Rc<FeatureSet> {
         ProbeParams::features(&load_of(&[GOLD_BARS], &[GOLD_BARS], TIME_ONLY, tables).unwrap())
             .unwrap()
     }
 
-    /// The span of 15 minutes, 900 s, is its feature's value.
     #[rstest]
     fn a_feature_is_built_of_its_table() {
         assert_eq!(features_of(TABLES).values(), Some(vec![900.0]));
     }
 
-    /// Rows and models of a span of 15 minutes are not those of one of
-    /// 30, with no code of the part's own.
     #[rstest]
     fn a_features_changed_argument_changes_the_fingerprint() {
         let changed = TABLES.replace(r#""15m""#, r#""30m""#);
@@ -742,10 +634,14 @@ mod tests {
         );
     }
 
-    /// 15 minutes written as 900 seconds is the same span.
     #[rstest]
-    fn a_features_argument_written_otherwise_keeps_the_fingerprint() {
-        let otherwise = TABLES.replace(r#""15m""#, r#""900s""#);
+    #[case::an_argument_written_otherwise(r#""15m""#, r#""900s""#)]
+    #[case::an_indicator_of_the_parts_own_logic("period = 5", "period = 6")]
+    fn a_features_argument_written_otherwise_keeps_the_fingerprint(
+        #[case] written: &str,
+        #[case] otherwise: &str,
+    ) {
+        let otherwise = TABLES.replace(written, otherwise);
 
         assert_eq!(
             features_of(&otherwise).fingerprint(),
@@ -753,21 +649,6 @@ mod tests {
         );
     }
 
-    /// The rows do not depend on the filter, which the part declares for
-    /// its own logic and never hands to its features.
-    #[rstest]
-    fn an_indicator_of_the_parts_own_logic_is_not_in_the_fingerprint() {
-        let changed = TABLES.replace("period = 5", "period = 6");
-
-        assert_eq!(
-            features_of(&changed).fingerprint(),
-            features_of(TABLES).fingerprint()
-        );
-    }
-
-    /// A span its arguments refuse and the filter's table missing are
-    /// reported, each under its table, with the model's violation; the
-    /// features, which need the span, are not built.
     #[rstest]
     fn the_tables_refusals_are_reported_with_the_other_violations() {
         let tables = TABLES
@@ -777,7 +658,7 @@ mod tests {
         let err = load_of(
             &[GOLD_BARS],
             &[GOLD_BARS],
-            r#"{ limit = "1h", atr = { period = 14 } }"#,
+            r#"{ limit = "0s", atr = { period = 14 } }"#,
             &tables,
         )
         .unwrap_err();

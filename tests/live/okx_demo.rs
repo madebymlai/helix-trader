@@ -1,16 +1,18 @@
-//! End to end on OKX's demo trading (EEA region): a live run on the BTC
-//! X-Perp checks the real demo account (the credentials set, net position
-//! mode) and is refused for a catalog defining it at a leverage no account
-//! has, a margin of 1 / 1000, naming the account's, before any node is
-//! built. It needs the demo key (`OKX_API_KEY`,
-//! `OKX_API_SECRET`, `OKX_API_PASSPHRASE`) and `OKX_ENVIRONMENT=demo` from
-//! the environment or `.env` (any other environment fails the test before
-//! any request): another failing check would fail the test with its own
-//! message.
+//! Tests end to end on OKX's demo trading (EEA region). A live run of the EMA crossover on the BTC
+//! X-Perp does two things:
 //!
-//! Gated as `ib_gateway.rs` is: the test returns at once, saying it was
-//! skipped, unless `NAUTILUS_OKX_RUN=1` is set in the shell. It only reads
-//! the account and places no order. Run it with:
+//! - It checks the real demo account: the credentials are set and the position mode is net.
+//! - It is refused for a catalog that defines the X-Perp at a leverage no account has, a margin of
+//!   1 / 1000, above OKX's highest leverage, 125. The refusal names the X-Perp, the catalog's
+//!   leverage and the account's, and comes before any node is built. The staging then holds only
+//!   the trader's instance id, which is kept before the clients are set up.
+//!
+//! The test needs the demo key (`OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`) and
+//! `OKX_ENVIRONMENT=demo` from the environment or `.env`. Any other environment fails the test
+//! before any request.
+//!
+//! The test is gated like `ib_gateway.rs`, by `NAUTILUS_OKX_RUN=1` in the shell. It only reads the
+//! account. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_OKX_RUN=1 cargo test --test live okx_demo:: -- --nocapture
@@ -29,9 +31,8 @@ use nautilus_model::{
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
-/// Whether the run is opted in: from the shell, before `.env` is read, so
-/// that the file cannot opt in.
-/// An opted-in run claims the process for this module (`claim_process`).
+/// Returns whether the run is opted in by the shell, which `.env` cannot do, and claims the process
+/// if so (`claim_process`).
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_OKX_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -42,9 +43,10 @@ fn opted_in(test: &str) -> bool {
     run
 }
 
-/// The EMA crossover on the BTC X-Perp the EEA demo lists (the real
-/// account's is BTC-USD_UM_XPERP-310404), on hour bars of its 1-minute
-/// candles, without hyphens in its order ids, which OKX refuses.
+/// The EMA crossover on the BTC X-Perp the EEA demo lists.
+///
+/// The real account's X-Perp is BTC-USD_UM_XPERP-310404. Order ids leave hyphens out, which OKX
+/// refuses.
 fn x_perp_ema_cross() -> EmaCrossConfig {
     EmaCrossConfig::load(
         r#"
@@ -83,9 +85,7 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
     );
     let config = x_perp_ema_cross();
     let requirements = config.data_requirements();
-    // A catalog of its own defining the X-Perp at a margin of 1 / 1000,
-    // above OKX's highest leverage, 125: the run is refused before any node
-    // is built, so nothing else reads it.
+
     let catalog = tempfile::tempdir().unwrap();
     let mut xperp = crypto_future_btcusdt(2, 6, Price::from("0.01"), Quantity::from("0.000001"));
     xperp.id = InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX");
@@ -95,7 +95,8 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
     ParquetDataCatalog::new(catalog.path(), None, None, None, None)
         .write_instruments(vec![InstrumentAny::CryptoFuture(xperp)])
         .unwrap();
-    // Outside the catalog, as `Live` requires.
+
+    // Outside the catalog, as `Live` requires
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-001"),
@@ -111,6 +112,22 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("catalog defines it at leverage 1000"), "{err}");
-    assert!(err.contains("BTC-USD_UM_XPERP-310328"), "{err}");
+    let numbers: Vec<f64> = err
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .filter_map(|number| number.trim_matches('.').parse().ok())
+        .collect();
+    assert!(err.contains("BTC-USD_UM_XPERP-310328.OKX"), "{err}");
+    assert!(numbers.contains(&1000.0), "{err}");
+    assert!(
+        numbers
+            .iter()
+            .any(|leverage| (1.0..=125.0).contains(leverage)),
+        "{err}"
+    );
+
+    let staged: Vec<String> = std::fs::read_dir(staging.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(staged, ["HELIXTEST-001.instance-id"]);
 }

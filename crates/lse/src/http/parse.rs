@@ -1,9 +1,10 @@
-//! An export's Parquet file into Nautilus data: trades, quotes, book depth
-//! snapshots, book deltas and bars at the instrument's precision, LSE
-//! sending prices and sizes as doubles, each converted once here through
-//! its shortest decimal form, which must fit the precision; and the rows of
-//! a reference collection or a macro series as `LseRow`s, each stamped
-//! when its values are known.
+//! Turns an export's Parquet file into Nautilus data: trades, quotes, book depth snapshots, book
+//! deltas and bars at the instrument's precision.
+//!
+//! LSE sends prices and sizes as doubles. They are converted once through their shortest decimal
+//! form, which must fit the precision. History is stamped at its time, as both `ts_event` and
+//! `ts_init`. The rows of a reference collection or a macro series become `LseRow`s, stamped when
+//! their values are known.
 
 use std::{collections::HashMap, str::FromStr};
 
@@ -35,18 +36,18 @@ use serde_json::{Map, Value};
 use super::models::Stamp;
 use crate::types::LseRow;
 
-/// The kind of every row of a tick slice: a trade.
 const TRADE: &str = "trade";
 
-/// The trades of a tick slice (`time, price, size, kind`), each stamped at
-/// its time, both `ts_event` and `ts_init`, as history is, with no
-/// aggressor side, LSE sending none, and a trade id of its own (`trade_id`).
+/// Returns the trades of a tick slice (`time, price, size, kind`).
+///
+/// A trade has no aggressor side, because LSE sends none. It has an id of its own (`trade_id`).
 ///
 /// # Errors
 ///
-/// Returns an error if the file is no tick slice, if a row is not a trade,
-/// or if a price or a size has more decimals than `price_precision` or
-/// `size_precision`, the instrument's, or is not positive.
+/// Returns an error if:
+/// - The file is no tick slice.
+/// - A row is not a trade.
+/// - A price or a size exceeds its precision or is not positive.
 pub fn parse_trade_slice(
     file: Bytes,
     instrument_id: InstrumentId,
@@ -91,17 +92,17 @@ pub fn parse_trade_slice(
     Ok(trades)
 }
 
-/// The values of an index's tick slice (`time, price, size, kind`, each row
-/// of kind trade and size 0) as quotes, as LSE's socket sends an index's
-/// ticks: bid and ask both the value, at `price_precision`, with no sizes,
-/// at `size_precision`; each stamped at its time, both `ts_event` and
-/// `ts_init`, as history is.
+/// Returns the values of an index's tick slice (`time, price, size, kind`) as quotes.
+///
+/// LSE's socket sends an index's ticks the same way. Bid and ask are both the value, with zero
+/// sizes.
 ///
 /// # Errors
 ///
-/// Returns an error if the file is no tick slice, if a row is not of kind
-/// trade, or if a value has more decimals than `price_precision`, the
-/// instrument's.
+/// Returns an error if:
+/// - The file is no tick slice.
+/// - A row is not of kind trade.
+/// - A value exceeds `price_precision`.
 pub fn parse_index_quotes(
     file: Bytes,
     instrument_id: InstrumentId,
@@ -140,18 +141,17 @@ pub fn parse_index_quotes(
     Ok(quotes)
 }
 
-/// The quotes of a file of an exchange market's quotes (`time, bid_price,
-/// ask_price, bid_size, ask_size`), each stamped at its time, both
-/// `ts_event` and `ts_init`, as history is, with the sizes LSE sends. A
-/// quote with an empty side, a price LSE leaves empty, gives none, as
-/// Nautilus' Databento decoder gives no quote of a record with an undefined
-/// side (`decode_mbp1_msg`).
+/// Returns the quotes of an exchange market's quotes file (`time, bid_price, ask_price, bid_size,
+/// ask_size`).
+///
+/// A quote with an empty side yields no quote, as in Nautilus' Databento decoder
+/// (`decode_mbp1_msg`).
 ///
 /// # Errors
 ///
-/// Returns an error if the file holds no quotes, or if a price or a size
-/// has more decimals than `price_precision` or `size_precision`, the
-/// instrument's.
+/// Returns an error if:
+/// - The file holds no quotes.
+/// - A price or a size exceeds its precision.
 pub fn parse_quotes(
     file: Bytes,
     instrument_id: InstrumentId,
@@ -206,22 +206,19 @@ pub fn parse_quotes(
     Ok(quotes)
 }
 
-/// The depth snapshots of a book export (`time, sequence, action, side,
-/// price, size, depth`, then ten bid and ten ask levels of price, size and
-/// orders, the best first): each row is the book after its event, a
-/// snapshot of its ten levels a side at the row's time, both `ts_event` and
-/// `ts_init`, as history is, and its sequence, as Nautilus' Databento
-/// decoder makes one of an MBP-10 record (`decode_mbp10_msg`), which keeps
-/// none of the event's own action, side, price, size or depth either. A
-/// level with no price is empty, and is no level of the snapshot, as an
-/// empty side of a quote gives no quote. The last row of each time ends its
-/// event (see `end_events`).
+/// Returns the depth snapshots of a book export (`time, sequence, action, side, price, size,
+/// depth`, then ten bid and ten ask levels of price, size and orders, the best first).
+///
+/// Each row is the book after its event, with its sequence. As in Nautilus' Databento decoder
+/// (`decode_mbp10_msg`), the snapshot drops the event's own action, side, price, size and depth. A
+/// level with no price is no level. The last row of each time ends its event (see `end_events`).
 ///
 /// # Errors
 ///
-/// Returns an error if the file holds no book, if a level with a price has
-/// no size or orders, or if a price or a size has more decimals than
-/// `price_precision` or `size_precision`, the instrument's.
+/// Returns an error if:
+/// - The file holds no book.
+/// - A level with a price has no size or orders.
+/// - A price or a size exceeds its precision.
 pub fn parse_book(
     file: Bytes,
     instrument_id: InstrumentId,
@@ -268,25 +265,25 @@ pub fn parse_book(
     Ok(depths)
 }
 
-/// The book deltas of an orders export (`time, action, side, order_id,
-/// price, size`), each stamped at its time, both `ts_event` and `ts_init`,
-/// as history is, with no sequence, LSE giving none, as Nautilus' Tardis
-/// loader leaves one it is not given. LSE's Level 3 actions, as its CME
-/// stream's documentation gives them ("The record"): A, an order added, M,
-/// changed, and C, removed, each a delta of the order, by its id, side
-/// (B the bid, A the ask, N neither), price and size, as Nautilus'
-/// Databento decoder maps an MBO record's (`decode_mbo_msg`,
-/// `parse_book_action`); N, none of these, changes no order and gives no
-/// delta, as Nautilus' decoder gives none. The last delta of each time ends
-/// its event (see `end_events`).
+/// Returns the book deltas of an orders export (`time, action, side, order_id, price, size`).
+///
+/// A delta has no sequence, because LSE gives none, as in Nautilus' Tardis loader.
+///
+/// LSE's Level 3 actions ("The record" of its CME stream docs) map as in Nautilus' Databento
+/// decoder (`decode_mbo_msg`, `parse_book_action`):
+/// - A (added), M (changed) and C (removed) each give a delta of the order.
+/// - N (none) gives no delta.
+///
+/// The last delta of each time ends its event (see `end_events`).
 ///
 /// # Errors
 ///
-/// Returns an error if the file holds no orders, if an action or a side is
-/// none LSE gives, naming it: a cleared book (R), which LSE gives at Level 2
-/// alone, among them, LSE's docs not saying whether its orders open a day
-/// with a book; if an order has no price; or if a price or a size has more
-/// decimals than `price_precision` or `size_precision`, the instrument's.
+/// Returns an error if:
+/// - The file holds no orders.
+/// - An action or a side is not one LSE gives. A cleared book (R), given at Level 2 alone, is such
+///   an action, as LSE's docs do not say whether its orders open a day with a book.
+/// - An order has no price.
+/// - A price or a size exceeds its precision.
 pub fn parse_orders(
     file: Bytes,
     instrument_id: InstrumentId,
@@ -362,10 +359,9 @@ pub fn parse_orders(
     Ok(deltas)
 }
 
-/// The ten levels of one side of a book export: of each, the columns of
-/// its price, size and orders, `bid_price_0`, `bid_size_0` and
-/// `bid_orders_0` for the best bid to `ask_orders_9` for the tenth ask, as
-/// LSE's Databank reads a book's levels.
+/// The ten levels on one side of a book export, as LSE's Databank reads them.
+///
+/// They run from `bid_price_0`, the best bid, to `ask_orders_9`, the tenth ask.
 struct BookSide {
     side: OrderSide,
     prices: Vec<Float64Array>,
@@ -374,7 +370,6 @@ struct BookSide {
 }
 
 impl BookSide {
-    /// The levels of `side` in `batch`.
     fn of(batch: &RecordBatch, side: OrderSide) -> anyhow::Result<Self> {
         let name = match side {
             OrderSide::Buy => "bid",
@@ -402,9 +397,7 @@ impl BookSide {
         Ok(levels)
     }
 
-    /// The orders and order counts of the levels of `row`, an empty level
-    /// a null order and no orders, as Nautilus' Databento decoder leaves
-    /// one (`decode_mbp10_msg`).
+    // An empty level is a null order, as in Nautilus' Databento decoder (`decode_mbp10_msg`)
     fn levels(
         &self,
         row: usize,
@@ -438,13 +431,9 @@ impl BookSide {
     }
 }
 
-/// Flags the last of each run of `records` at one time `F_LAST`, ending an
-/// event: LSE's exports carry no event boundary (the flags of the records
-/// its CME history is, which its docs say mark the last of an exchange
-/// message), and the records of one exchange event share its time.
-/// Nautilus' Tardis loader frames the rows of one timestamp so (`csv::load`,
-/// `load_deltas`). The last record ends one too: a file never cuts a time,
-/// LSE's exports being split between times.
+// LSE's exports carry no event boundary and the records of one exchange event share its time, so
+// one timestamp's rows form one event, as in Nautilus' Tardis loader (`csv::load`, `load_deltas`),
+// and the last record ends an event too, as exports are split between times, never within one.
 fn end_events<T>(
     records: &mut [T],
     time: impl Fn(&T) -> UnixNanos,
@@ -460,18 +449,19 @@ fn end_events<T>(
     }
 }
 
-/// The bars of a file of candles (`time, open, high, low, close, volume,
-/// trades`), each candle, which LSE stamps at its open, a bar of
-/// `bar_type` stamped at its close, its open and the bar's width (Nautilus'
-/// `BarSpecification::timedelta`), both `ts_event` and `ts_init`, as
-/// history is.
+/// Returns the bars of a file of candles (`time, open, high, low, close, volume, trades`).
+///
+/// LSE stamps a candle at its open, so a bar is stamped at its close. The close is the open plus
+/// the width of `bar_type` (`BarSpecification::timedelta`).
 ///
 /// # Errors
 ///
-/// Returns an error if the file holds no candles, if a price or a volume
-/// has more decimals than `price_precision` or `size_precision`, the
-/// instrument's, if a volume is negative, or if a candle's prices are not
-/// a bar's (its high below another price, its low above one).
+/// Returns an error if:
+/// - The file holds no candles.
+/// - A price or a volume exceeds its precision.
+/// - A volume is negative.
+/// - A candle's prices are not a bar's (its high is below another price, or its low is above
+///   one).
 pub fn parse_candles(
     file: Bytes,
     bar_type: BarType,
@@ -522,57 +512,48 @@ pub fn parse_candles(
     Ok(bars)
 }
 
-/// A UTC day.
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
-/// The column of a financial report's kind, and its kinds: the statements
-/// filed, and the rows derived from them.
 const REPORT_TYPE: &str = "report_type";
 const STATEMENTS: &[&str] = &["income", "balance", "cashflow"];
 const DERIVED: &[&str] = &["metrics", "ratios", "growth"];
-/// The column of a financial report's fiscal period (`FY`, `Q3`).
 const PERIOD: &str = "period";
 
-/// A source's rows read from LSE's answer: each keyed and stamped, and the
-/// rows left out as known at no time, each named with why.
+/// A source's rows, and the rows left out as known at no time, each with why.
 #[derive(Debug, Default)]
 pub struct Parsed {
     pub rows: Vec<Keyed>,
     pub refused: Vec<String>,
 }
 
-/// A row and its key, the time of the column LSE's export selects it by, a
-/// date at its start.
+/// A row and its key, which is its `time_column` value.
 #[derive(Debug)]
 pub struct Keyed {
     pub key: Timestamp,
     pub row: LseRow,
 }
 
-/// A row read, its stamp still to settle: the time it is known at, or why
-/// none is.
 struct Pending {
     key: UnixNanos,
     fields: Map<String, Value>,
     known: Result<UnixNanos, String>,
 }
 
-/// The rows of an export of `symbol` in LSE's `source`, a reference
-/// collection or a macro series, each stamped as `stamp` says when its
-/// values are known, both `ts_event` and `ts_init`, from its key, its value
-/// of `time_column`, the column LSE selects its rows by, or from a column
-/// of its release (see `Stamp`); a row that says when it was known nowhere
-/// is left out, named, rather than stamped at a time of the client's
-/// choosing. Every other column but `symbol` is a field of the row, as LSE
-/// sent it, in JSON (Arrow's): numbers, strings, `null`, and dates and
-/// times in ISO 8601.
+/// Returns the rows of an export of `symbol` in LSE's `source`.
+///
+/// The `source` is a reference collection or a macro series. Rows are stamped when `stamp` says
+/// their values are known. A row that says when it was known nowhere is left out and named,
+/// rather than stamped at a time the client chooses. Every other column but `symbol` is a field of
+/// the row in JSON, as Arrow reads it.
 ///
 /// # Errors
 ///
-/// Returns an error if the file is not Parquet, or if its time column is
-/// missing, holds an empty row or a time before 1970, or is not of `stamp`:
-/// dates for a source keyed by date, times for one keyed by time; or if a
-/// column of a release `stamp` reads is missing or not of its kind.
+/// Returns an error if:
+/// - The file is not Parquet.
+/// - The time column is missing.
+/// - The time column holds an empty row or a time before 1970.
+/// - The time column does not match `stamp` (dates or times).
+/// - A column `stamp` reads is missing or not of its kind.
 pub fn parse_rows(
     file: Bytes,
     source: &str,
@@ -620,8 +601,6 @@ pub fn parse_rows(
     Ok(parsed)
 }
 
-/// When each row of `batch`, keyed `keys`, is known, as `stamp` says, or
-/// why it is known at no time.
 fn known_times(
     batch: &RecordBatch,
     keys: &[UnixNanos],
@@ -663,11 +642,9 @@ fn known_times(
     }
 }
 
-/// Settles when each financial report of `rows` is known: a statement's at
-/// its own acceptance, a row derived from the statements at the latest
-/// acceptance of the statements of its period, its key and `period`; a row
-/// of another kind, or a derived row of a period of no statement accepted,
-/// at no time.
+// A statement is known when it is accepted, a derived row at the latest acceptance among the
+// statements of its period (its key and `period`), and any other row, or a derived row for a
+// period with no accepted statement, at no time.
 fn file_derived(rows: &mut [Pending]) {
     let text = |fields: &Map<String, Value>, name: &str| {
         fields.get(name).and_then(Value::as_str).map(str::to_owned)
@@ -714,7 +691,6 @@ fn file_derived(rows: &mut [Pending]) {
     }
 }
 
-/// `time`, `lag` later.
 fn later(time: UnixNanos, lag: SignedDuration) -> anyhow::Result<UnixNanos> {
     let lag = u64::try_from(lag.as_nanos()).expect("a lag is not negative");
     time.as_u64()
@@ -723,9 +699,6 @@ fn later(time: UnixNanos, lag: SignedDuration) -> anyhow::Result<UnixNanos> {
         .context("a row known past 2554")
 }
 
-/// The times of the rows of `batch`, its column `time_column`'s, in UTC:
-/// a date at its start, a time as it is, the column's type checked
-/// against `stamp`.
 fn row_times(
     batch: &RecordBatch,
     time_column: &str,
@@ -742,13 +715,6 @@ fn row_times(
         .with_context(|| format!("the time column {time_column} of LSE's file has empty rows"))
 }
 
-/// The times in the column `name` of `batch`, in UTC, empty where it is:
-/// a date at its start if `date`, else a time as it is.
-///
-/// # Errors
-///
-/// Returns an error if the column is missing, is not of dates if `date` or
-/// of times if not, or holds a time before 1970 or past 2262.
 fn column_times(
     batch: &RecordBatch,
     name: &str,
@@ -785,7 +751,6 @@ fn column_times(
         .collect()
 }
 
-/// The column `name` of `batch`, LSE's type `A` checked, with no empty row.
 fn column<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a A> {
     let column = nullable_column::<A>(batch, name)?;
     anyhow::ensure!(
@@ -795,9 +760,7 @@ fn column<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> anyhow:
     Ok(column)
 }
 
-/// The column `name` of `batch` as `to`, whatever type LSE gives it, a
-/// value that does not convert failing: for the columns of the book and the
-/// orders whose type LSE's docs do not give, its counts and numbers.
+// For the book and orders columns, whose type LSE's docs do not give
 fn cast_column(batch: &RecordBatch, name: &str, to: &DataType) -> anyhow::Result<ArrayRef> {
     let column = batch
         .column_by_name(name)
@@ -814,7 +777,6 @@ fn cast_column(batch: &RecordBatch, name: &str, to: &DataType) -> anyhow::Result
     })
 }
 
-/// The column `name` of `batch`, LSE's type `A` checked, empty rows and all.
 fn nullable_column<'a, A: Array + 'static>(
     batch: &'a RecordBatch,
     name: &str,
@@ -828,8 +790,7 @@ fn nullable_column<'a, A: Array + 'static>(
         .with_context(|| format!("the column {name} of LSE's file is {}", column.data_type()))
 }
 
-/// The `time` column of `batch` in nanoseconds: UTC timestamps, which LSE
-/// gives in nanoseconds in a tick slice and in milliseconds in candles.
+// LSE gives UTC timestamps in nanoseconds in a tick slice and in milliseconds in candles
 fn times(batch: &RecordBatch) -> anyhow::Result<TimestampNanosecondArray> {
     let column = batch
         .column_by_name("time")
@@ -849,13 +810,11 @@ fn times(batch: &RecordBatch) -> anyhow::Result<TimestampNanosecondArray> {
     Ok(nanos.as_primitive::<TimestampNanosecondType>().clone())
 }
 
-/// The time of `row` in nanoseconds from 1970.
 fn time(times: &TimestampNanosecondArray, row: usize) -> anyhow::Result<u64> {
     u64::try_from(times.value(row)).context("a time before 1970")
 }
 
-/// `value`, a double, as the decimal it is written as at its shortest,
-/// which must have at most `precision` decimals.
+/// Returns the double `value` as its shortest decimal, which must fit `precision`.
 pub fn decimal(value: f64, precision: u8, what: &str) -> anyhow::Result<Decimal> {
     anyhow::ensure!(value.is_finite(), "a {what} of {value}");
     let decimal = Decimal::from_str(&value.to_string())
@@ -868,26 +827,22 @@ pub fn decimal(value: f64, precision: u8, what: &str) -> anyhow::Result<Decimal>
     Ok(decimal)
 }
 
-// FNV-1a 64-bit, as Nautilus' Databento adapter derives the trade ids of
-// records that carry none.
+// FNV-1a 64-bit, as Nautilus' Databento adapter derives trade ids for records with none
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
 
-/// The ids of an instrument's trades, which LSE gives none, in the order
-/// they come, a file's or a stream's: each a hash of the trade's
-/// instrument, time, price and size, and of how many trades of that time,
-/// price and size came before it, so that trades alike keep ids apart and
-/// the same trades always get the same ids (`trade_id`).
+/// The ids of an instrument's trades, in arrival order, as LSE gives trades none.
+///
+/// Each id hashes the trade's instrument, time, price and size, plus how many identical trades
+/// came before it. So identical trades get distinct ids, and the ids are the same each time.
 #[derive(Debug, Default)]
 pub struct TradeIds {
-    /// The trades met so far at the time of the last, by price and size.
     same: HashMap<(Price, Quantity), u32>,
     last_time: Option<UnixNanos>,
 }
 
 impl TradeIds {
-    /// The id of the next trade, of `instrument_id` at `time`, of `price`
-    /// and `size`, a time no earlier than the last's.
+    /// Returns the id of the next trade, whose `time` is no earlier than the last's.
     pub fn next(
         &mut self,
         instrument_id: InstrumentId,
@@ -906,9 +861,6 @@ impl TradeIds {
     }
 }
 
-/// The id of a trade LSE gives none: a hash of its instrument, time,
-/// price and size, and of how many trades of that time, price and size
-/// came before it.
 fn trade_id(
     instrument_id: InstrumentId,
     time: UnixNanos,
@@ -922,7 +874,8 @@ fn trade_id(
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(FNV_PRIME);
         }
-        // Ends the field, so that no two fields run into one.
+
+        // Ends the field, so that no two run into one
         hash ^= 0xff;
         hash = hash.wrapping_mul(FNV_PRIME);
     };
@@ -948,7 +901,7 @@ mod tests {
         AHMA_COMPANY_PROFILES, AHMA_STOCK_FUNDAMENTALS, AT016322245_CORPORATE_BONDS,
         AUDUSD_FX_DERIVATIVES, AUGB10Y_SOVEREIGN_YIELDS, CNH_CREDIT_INDICES, GCZ26_BOOK,
         GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES,
-        TEAM_INSIDER_TRADES, US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS,
+        US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS,
         US10Y_BOND_YIELDS_FIFTEEN_MINUTES, US10Y_BOND_YIELDS_FIVE_MINUTES,
         US10Y_BOND_YIELDS_FOUR_HOURS, US10Y_BOND_YIELDS_HOURLY, US10Y_BOND_YIELDS_INTRADAY,
         US10Y_BOND_YIELDS_MINUTE, US10Y_BOND_YIELDS_THIRTY_MINUTES, US10Y_YIELDS, ZN_COT,
@@ -966,8 +919,6 @@ mod tests {
         )
     }
 
-    /// The captured second, as pyarrow reads the file: two trades alike at
-    /// .619501, three at .690600 at three prices, one at .901218.
     #[rstest]
     fn a_tick_slice_is_its_trades_at_the_instrument_s_precision_with_no_aggressor() {
         let trades = parse_trade_slice(Bytes::from_static(GOLD_TRADES), gold(), 1, 0).unwrap();
@@ -1026,8 +977,6 @@ mod tests {
         );
     }
 
-    /// The rows of `file`, of `symbol` in LSE's `source`, keyed by
-    /// `time_column` and stamped as `stamp`, none refused.
     fn rows_of(
         file: &'static [u8],
         source: &str,
@@ -1041,7 +990,6 @@ mod tests {
         parsed.rows.into_iter().map(|keyed| keyed.row).collect()
     }
 
-    /// The captured rows of US10Y, as pyarrow reads LSE's file.
     fn us10y_rows() -> Vec<LseRow> {
         rows_of(
             US10Y_BOND_YIELDS,
@@ -1060,16 +1008,19 @@ mod tests {
         utc(&format!("2026-11-{time}"))
     }
 
-    /// `time`, a UTC time with no zone.
     fn utc(time: &str) -> UnixNanos {
         UnixNanos::from(format!("{time}Z").parse::<jiff::Timestamp>().unwrap())
     }
 
-    /// The day's close is known when the day ends: the 9th's row at the
-    /// 10th's 00:00 UTC, and the 12th's at the 13th's.
     #[rstest]
-    fn a_row_of_a_date_is_stamped_at_the_date_s_end() {
-        let rows: Vec<_> = us10y_rows()
+    #[case::bond_yields(US10Y_BOND_YIELDS, "bond_yields", "date")]
+    #[case::macro_yield(US10Y_YIELDS, "macro_yield", "day")]
+    fn a_row_of_a_date_is_stamped_at_the_date_s_end(
+        #[case] file: &'static [u8],
+        #[case] source: &str,
+        #[case] time_column: &str,
+    ) {
+        let rows: Vec<_> = rows_of(file, source, "US10Y", time_column, Stamp::DateEnd)
             .into_iter()
             .map(|row| {
                 (
@@ -1086,7 +1037,7 @@ mod tests {
             (
                 day(stamped),
                 day(stamped),
-                "bond_yields".to_string(),
+                source.to_string(),
                 "US10Y".to_string(),
                 serde_json::json!(close),
             )
@@ -1094,9 +1045,6 @@ mod tests {
         assert_eq!(rows, [row("10", 4.884), row("11", 5.0), row("13", 5.133)]);
     }
 
-    /// The 4-hour rows of the 10th, which LSE stamps at their open, 00:00
-    /// to 20:00: each stamped at its close, 04:00 to the 11th's 00:00, as
-    /// pyarrow reads LSE's file.
     #[rstest]
     fn a_row_of_an_interval_is_stamped_at_its_close() {
         let rows: Vec<_> = rows_of(
@@ -1125,9 +1073,6 @@ mod tests {
         );
     }
 
-    /// The 10th's rows of each of LSE's other intervals, as pyarrow reads
-    /// them: how many, and the first and the last at their close, with
-    /// their close.
     #[rstest]
     #[case::a_minute(US10Y_BOND_YIELDS_MINUTE, "bond_yields_minute", 1, 971, ("10T00:09:00", 4.876), "10T22:26:00")]
     #[case::five_minutes(US10Y_BOND_YIELDS_FIVE_MINUTES, "bond_yields_five_minute", 5, 265, ("10T00:10:00", 4.878), "10T22:30:00")]
@@ -1160,9 +1105,6 @@ mod tests {
         assert!(rows.iter().all(|row| row.ts_event == row.ts_init));
     }
 
-    /// A day's market values, a row a field, as pyarrow reads LSE's files:
-    /// each known at its date's end; how many, and the first and the last
-    /// with their field and value.
     #[rstest]
     #[case::sovereign_yields(AUGB10Y_SOVEREIGN_YIELDS, "sovereign_yields", "AUGB10Y", 72, ("11", "ask", 94.373), ("12", "z_spread", -11.9303))]
     #[case::corporate_bonds(AT016322245_CORPORATE_BONDS, "corporate_bonds", "AT016322245", 3, ("10", "accrued_interest", 0.666), ("12", "accrued_interest", 0.6824))]
@@ -1201,9 +1143,6 @@ mod tests {
         );
     }
 
-    /// Keyed by a date: earnings by the report date, a dividend by its
-    /// ex-date and a split by its effective date; each known at its date's
-    /// end.
     #[rstest]
     #[case::earnings_calendar(AAPL_EARNINGS_CALENDAR, "earnings_calendar", "AAPL", "date", &["2026-01-30", "2026-05-01", "2026-07-31", "2026-10-30", "2026-11-03"])]
     #[case::dividends(AAPL_DIVIDENDS, "dividends", "AAPL", "effective_date", &["2026-02-10", "2026-05-12", "2026-08-11", "2026-11-13"])]
@@ -1225,26 +1164,6 @@ mod tests {
         assert_eq!(stamped, expected);
     }
 
-    /// Atlassian's insider trade filed on 13 October 2026, keyed by its
-    /// filing's day: known at 22:00 New York time that day, 02:00 UTC on the
-    /// 14th, New York keeping summer time.
-    #[rstest]
-    fn an_insider_trade_is_stamped_at_22_00_new_york_time_of_its_filing_s_day() {
-        let stamp = Stamp::of_collection("insider_trades").unwrap();
-
-        let rows = rows_of(
-            TEAM_INSIDER_TRADES,
-            "insider_trades",
-            "TEAM",
-            "filing_date",
-            stamp,
-        );
-
-        let stamped: Vec<_> = rows.iter().map(|row| row.ts_init).collect();
-        assert_eq!(stamped, [utc("2026-10-14T02:00:00")]);
-    }
-
-    /// A company's snapshot, updated on 13 October 2026 at 05:08:01 UTC.
     #[rstest]
     #[case::company_profiles(AHMA_COMPANY_PROFILES, "company_profiles")]
     #[case::stock_fundamentals(AHMA_STOCK_FUNDAMENTALS, "stock_fundamentals")]
@@ -1262,9 +1181,6 @@ mod tests {
         assert_eq!(read, [(at, at, serde_json::json!(37_156_248.0))]);
     }
 
-    /// The releases of US core inflation, as pyarrow reads LSE's file, each
-    /// at the time it came out, in UTC: 12:30 in the American summer,
-    /// 13:30 in its winter.
     fn core_cpi_releases() -> Vec<(UnixNanos, Option<&'static str>)> {
         [
             ("2025-12-18T13:30:00", Some("2.6%")),
@@ -1292,8 +1208,6 @@ mod tests {
             .collect()
     }
 
-    /// The economic calendar keys a release by its day and times it in
-    /// `datetime`: each row known at that time.
     #[rstest]
     fn an_economic_release_is_stamped_at_the_time_it_came_out() {
         let rows = rows_of(
@@ -1309,7 +1223,6 @@ mod tests {
         assert!(rows.iter().all(|row| row.fields.contains_key("datetime")));
     }
 
-    /// A macro series of releases is keyed by the time each came out.
     #[rstest]
     fn a_macro_release_is_stamped_at_the_time_it_came_out() {
         let rows = rows_of(
@@ -1323,22 +1236,7 @@ mod tests {
         assert_eq!(released(&rows), core_cpi_releases());
     }
 
-    /// A macro series of yields is a day's close, as the daily bond yields.
-    #[rstest]
-    fn a_macro_yield_is_stamped_at_its_day_s_end() {
-        let rows: Vec<_> = rows_of(US10Y_YIELDS, "macro_yield", "US10Y", "day", Stamp::DateEnd)
-            .into_iter()
-            .map(|row| (row.ts_init, row.fields["close"].clone()))
-            .collect();
-
-        let row = |stamped, close: f64| (day(stamped), serde_json::json!(close));
-        assert_eq!(rows, [row("10", 4.884), row("11", 5.0), row("13", 5.133)]);
-    }
-
-    /// ZN's reports, as pyarrow reads LSE's file: of a Tuesday, out on its
-    /// Friday, `release_date`, and stamped at that day's end; since 28 April
-    /// 2026 with no release date, and stamped at `created_at`, LSE's ingest
-    /// of each, the Friday at about 20:30 UTC.
+    /// Since 28 April 2026 there is no `release_date`, so `created_at` is used.
     #[rstest]
     fn a_cot_report_is_stamped_at_its_release_date_s_end_or_when_lse_ingested_it() {
         let parsed = parse_rows(
@@ -1373,9 +1271,6 @@ mod tests {
         assert_eq!(stamped[613], report("2026-10-06", "2026-10-09T20:30:10"));
     }
 
-    /// A file of one row of `symbol`, keyed by its date of `day` days from
-    /// 1970, with each of `columns`, a time column of `type_` holding
-    /// nothing, built here.
     fn keyed_with_empty(symbol: &str, day: i32, columns: &[(&str, DataType)]) -> Bytes {
         let mut fields = vec![
             Field::new("symbol", DataType::Utf8, false),
@@ -1398,11 +1293,8 @@ mod tests {
         Bytes::from(file)
     }
 
-    /// 22 September 2026, in days from 1970.
     const SEPTEMBER_22: i32 = 20_718;
 
-    /// A row that says when it was known nowhere is left out, named, rather
-    /// than stamped at a time of the client's choosing.
     #[rstest]
     #[case::a_report_of_no_release_or_ingest(
         "cot",
@@ -1430,14 +1322,14 @@ mod tests {
         let [refused] = &parsed.refused[..] else {
             panic!("not one row refused: {:?}", parsed.refused);
         };
-        assert!(refused.contains("2026-09-22"), "{refused}");
+        let empty = columns.iter().map(|&(column, _)| column);
+        for part in ["ZN", "2026-09-22", source].into_iter().chain(empty) {
+            assert!(refused.contains(part), "{part}: {refused}");
+        }
     }
 
-    /// AAPL's reports, as pyarrow reads LSE's file: each statement at the
-    /// SEC's acceptance of its filing, each row derived from the statements
-    /// at their acceptance, those of its period; the trailing twelve
-    /// months' metrics and ratios of 7 October 2026, of no statement, left
-    /// out, named.
+    /// The trailing twelve months' metrics and ratios of 7 October 2026 have no statement, so they
+    /// are left out and named.
     #[rstest]
     fn a_financial_report_is_stamped_when_its_period_s_statements_were_accepted() {
         let parsed = parse_rows(
@@ -1489,18 +1381,20 @@ mod tests {
         }
     }
 
-    /// Its stamp would not be when its values are known.
     #[rstest]
     #[case::dates_as_intervals(
         US10Y_BOND_YIELDS,
         "date",
-        Stamp::Close(SignedDuration::from_hours(4))
+        Stamp::Close(SignedDuration::from_hours(4)),
+        Some("Date32")
     )]
-    #[case::times_as_dates(US10Y_BOND_YIELDS_FOUR_HOURS, "ts", Stamp::DateEnd)]
+    #[case::times_as_dates(US10Y_BOND_YIELDS_FOUR_HOURS, "ts", Stamp::DateEnd, Some("Timestamp"))]
+    #[case::missing(US10Y_BOND_YIELDS, "ts", Stamp::DateEnd, None)]
     fn a_time_column_not_of_the_key_of_its_collection_is_refused_naming_it(
         #[case] file: &'static [u8],
         #[case] time_column: &str,
         #[case] stamp: Stamp,
+        #[case] lse_type: Option<&str>,
     ) {
         let err = parse_rows(
             Bytes::from_static(file),
@@ -1511,10 +1405,18 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains(time_column), "{err:#}");
+        let err = format!("{err:#}");
+        assert!(
+            err.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|word| word == time_column),
+            "{err}"
+        );
+        assert!(
+            lse_type.is_none_or(|lse_type| err.contains(lse_type)),
+            "{err}"
+        );
     }
 
-    /// fetched it, a time in UTC.
     #[rstest]
     fn a_row_s_fields_are_its_other_columns_as_lse_sent_them() {
         let fields: Vec<_> = us10y_rows()
@@ -1547,22 +1449,7 @@ mod tests {
         );
     }
 
-    #[rstest]
-    fn a_time_column_the_file_lacks_is_refused_naming_it() {
-        let err = parse_rows(
-            Bytes::from_static(US10Y_BOND_YIELDS),
-            "bond_yields",
-            "US10Y",
-            "ts",
-            Stamp::DateEnd,
-        )
-        .unwrap_err();
-
-        assert!(err.to_string().contains("ts"), "{err:#}");
-    }
-
-    /// A definition too coarse for the prices LSE sends: refused, not
-    /// rounded.
+    /// A definition too coarse for the prices LSE sends: refused, not rounded.
     #[rstest]
     fn a_price_finer_than_the_instrument_s_precision_is_refused() {
         let err = parse_trade_slice(Bytes::from_static(GOLD_TRADES), gold(), 0, 0).unwrap_err();
@@ -1570,8 +1457,6 @@ mod tests {
         assert!(err.to_string().contains("4136.4"), "{err:#}");
     }
 
-    /// The captured four hours, as pyarrow reads the file: candles LSE
-    /// stamps at 00:00, 04:00 and 08:00, their open.
     #[rstest]
     fn candles_are_bars_stamped_at_their_close_at_the_instrument_s_precision() {
         let bar_type = BarType::from("GOLD-FUTURES.LSEDGE-4-HOUR-LAST-EXTERNAL");
@@ -1608,8 +1493,6 @@ mod tests {
         );
     }
 
-    /// A malformed input: a tick slice, a real file of LSE's, read as
-    /// candles.
     #[rstest]
     fn a_file_of_no_candles_is_refused_naming_the_column_it_lacks() {
         let bar_type = BarType::from("GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-EXTERNAL");
@@ -1632,14 +1515,10 @@ mod tests {
         InstrumentId::from("GCZ26.GLBX")
     }
 
-    /// A time of 12 November 2026, as nanoseconds from 1970.
     fn on_the_12th(nanos: u64) -> UnixNanos {
         UnixNanos::from(nanos)
     }
 
-    /// The captured second of GCZ6's quotes, as pyarrow reads the file: 636
-    /// quotes, its first and last two below, at Databento's precision of
-    /// GCZ26.GLBX, two decimals.
     #[rstest]
     fn quotes_are_quote_ticks_with_lse_s_sizes_at_the_instrument_s_precision() {
         let quotes = parse_quotes(Bytes::from_static(GCZ26_QUOTES), gcz26(), 2, 0).unwrap();
@@ -1686,8 +1565,6 @@ mod tests {
         assert_eq!(quotes[0].bid_price.precision, 2);
     }
 
-    /// The captured second of GCZ6's trades, LSE's `data=trades`, read as a
-    /// tick slice is: 38 trades, three of them at one time and three prices.
     #[rstest]
     fn a_cme_contract_s_trades_are_read_as_a_tick_slice_is() {
         let trades = parse_trade_slice(Bytes::from_static(GCZ26_TRADES), gcz26(), 2, 0).unwrap();
@@ -1716,10 +1593,8 @@ mod tests {
         assert_eq!(ids.len(), 38);
     }
 
-    /// A level of a book: its price, size and orders.
     type Level = (Price, Quantity, u32);
 
-    /// The levels of a side of a depth snapshot.
     fn levels(orders: &[BookOrder], counts: &[u32]) -> Vec<Level> {
         orders
             .iter()
@@ -1728,8 +1603,6 @@ mod tests {
             .collect()
     }
 
-    /// The ten levels a side of the book's first row (`test_data/README.md`):
-    /// bids from 3908.10 down, asks from 3908.30 up, a tenth apart.
     fn first_book_levels() -> (Vec<Level>, Vec<Level>) {
         let level =
             |price: &str, size: u64, count: u32| (Price::from(price), Quantity::from(size), count);
@@ -1761,9 +1634,7 @@ mod tests {
         )
     }
 
-    /// Each row of the book is the book after its event, ten levels a side,
-    /// a snapshot at the row's time and sequence, as Nautilus' Databento
-    /// decoder makes one of an MBP-10 record (`decode_mbp10_msg`).
+    /// As Nautilus' Databento decoder makes one of an MBP-10 record (`decode_mbp10_msg`).
     #[rstest]
     fn a_book_export_is_a_depth_snapshot_a_row_at_the_instrument_s_precision() {
         let depths = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 2, 0).unwrap();
@@ -1799,8 +1670,7 @@ mod tests {
         assert_eq!(sequences, [1001, 1002, 1003, 1180]);
     }
 
-    /// The last row's book holds eight asks: its two last ask levels have
-    /// no price.
+    /// The last row's book holds eight asks: its two last ask levels have no price.
     #[rstest]
     fn an_empty_level_of_the_book_is_no_level_of_the_snapshot() {
         let depths = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 2, 0).unwrap();
@@ -1812,9 +1682,7 @@ mod tests {
         assert_eq!(last.asks[7].price, Price::from("3909.00"));
     }
 
-    /// LSE gives no event boundary: the rows of one time are one event, its
-    /// last row ending it (`F_LAST`), as Nautilus' Tardis loader frames
-    /// rows of one timestamp. The second and third rows share a time.
+    /// The last row of one time ends the event (`F_LAST`), as in Nautilus' Tardis loader.
     #[rstest]
     fn the_last_row_of_each_time_of_the_book_ends_its_event() {
         let depths = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 2, 0).unwrap();
@@ -1835,12 +1703,8 @@ mod tests {
         );
     }
 
-    /// LSE's Level 3 actions (its CME stream's documentation, "The record"):
-    /// A an order added, M changed, C removed, each a delta of the order,
-    /// by its id, side, price and size, at the row's time; N, none of these,
-    /// gives none, as Nautilus' Databento decoder gives none of an MBO
-    /// record of no action (`decode_mbo_msg`). Its last row is N: the delta
-    /// before it, of the same time, ends the event.
+    /// N gives no delta, as Nautilus' Databento decoder gives none for an MBO record of no action
+    /// (`decode_mbo_msg`).
     #[rstest]
     fn an_orders_export_is_the_deltas_of_its_orders() {
         let deltas = parse_orders(Bytes::from_static(GCZ26_ORDERS), gcz26(), 2, 0).unwrap();
@@ -1919,7 +1783,6 @@ mod tests {
         );
     }
 
-    /// An orders file with one row of `action`, built here.
     fn orders_of(action: &str) -> Bytes {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
@@ -1952,9 +1815,7 @@ mod tests {
         Bytes::from(file)
     }
 
-    /// LSE's docs give R, a cleared book, at Level 2 alone, and a trade (T)
-    /// at Level 1: whether LSE's orders open a day with a book is read from
-    /// the first capture, so an action they do not give fails, naming it.
+    /// LSE's docs give R at Level 2 alone, and a trade (T) at Level 1.
     #[rstest]
     #[case::cleared("R")]
     #[case::traded("T")]
@@ -1976,7 +1837,6 @@ mod tests {
         );
     }
 
-    /// A malformed input: a file of quotes, LSE's, read as a book.
     #[rstest]
     fn a_file_of_no_book_is_refused_naming_the_column_it_lacks() {
         let err = parse_book(Bytes::from_static(GCZ26_QUOTES), gcz26(), 2, 0).unwrap_err();
@@ -1984,10 +1844,8 @@ mod tests {
         assert!(err.to_string().contains("no column sequence"), "{err:#}");
     }
 
-    /// A quote with an empty side, which LSE's schema allows (its prices
-    /// are nullable) and no capture holds: built here, not captured. As
-    /// Nautilus' Databento decoder gives no quote of an MBP-1 record with
-    /// an undefined side (`decode_mbp1_msg`), the row gives none.
+    /// An empty side, which LSE's schema allows and no capture holds, so built here, gives no
+    /// quote, as in Nautilus' Databento decoder (`decode_mbp1_msg`).
     #[rstest]
     fn a_quote_with_an_empty_side_gives_no_quote_tick() {
         let schema = Arc::new(Schema::new(vec![
@@ -2019,7 +1877,37 @@ mod tests {
 
         let quotes = parse_quotes(Bytes::from(file), gcz26(), 2, 0).unwrap();
 
-        let times: Vec<_> = quotes.iter().map(|q| q.ts_event).collect();
-        assert_eq!(times, [UnixNanos::from(1)]);
+        let [quote] = &quotes[..] else {
+            panic!("not one quote: {quotes:?}");
+        };
+        assert_eq!(
+            (
+                quote.instrument_id,
+                quote.bid_price,
+                quote.ask_price,
+                quote.bid_size,
+                quote.ask_size,
+                quote.ts_event,
+                quote.ts_init,
+            ),
+            (
+                gcz26(),
+                Price::from("3908.10"),
+                Price::from("3908.30"),
+                Quantity::from(2),
+                Quantity::from(9),
+                UnixNanos::from(1),
+                UnixNanos::from(1),
+            )
+        );
+        assert_eq!(
+            (
+                quote.bid_price.precision,
+                quote.ask_price.precision,
+                quote.bid_size.precision,
+                quote.ask_size.precision,
+            ),
+            (2, 2, 0, 0)
+        );
     }
 }

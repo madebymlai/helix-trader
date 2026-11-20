@@ -1,11 +1,8 @@
-//! Command line: one subcommand per process (fill-catalog, backtest, live,
-//! train). Nautilus runs no two nodes of a process at once, so a live
-//! node's retrain is a process of its own; a backtest runs its nodes one
-//! after another, each disposed before the next. Every subcommand takes
-//! the strategy name and its TOML config: the instruments and the warmup
-//! come from the config's data requirements. A strategy trading on a
-//! model runs through `model::ModelStrategy`, each subcommand generic
-//! over it.
+//! Command line with one subcommand per process (fill-catalog, backtest, live, train).
+//!
+//! Nautilus runs no two nodes of a process at once. So the retrain of a live node is a process of
+//! its own, and a backtest runs its nodes one after another, disposing each before the next. A
+//! strategy that trades on a model runs through `model::ModelStrategy`.
 
 use std::{
     ffi::OsString,
@@ -25,6 +22,8 @@ use helix_trader::{
         ModelStrategy, dataset,
         handle::{Mode, SettledRows},
         launcher::{Launcher, RetrainActor},
+        report::{Meter, Report},
+        schedule::Retrain,
         targets::TargetRow,
         train::Trained,
     },
@@ -39,7 +38,6 @@ use nautilus_common::logging::{
 };
 use nautilus_core::{UUID4, UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_model::{
-    enums::OmsType,
     identifiers::{InstrumentId, TraderId},
     types::Money,
 };
@@ -53,24 +51,23 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Fills the Nautilus catalog with the strategy's history from OKX
-    /// (OKX instruments), LSE (LSEDGE instruments, and GLBX, XNAS and OPRA
-    /// instruments, defined by Databento), cTrader (IC Markets' and
-    /// Pepperstone's instruments) or Interactive Brokers (the others).
+    /// Fills the Nautilus catalog with the strategy's history. OKX supplies the OKX instruments.
+    /// LSE supplies the LSEDGE instruments, and the GLBX, XNAS and OPRA instruments that Databento
+    /// defines. cTrader supplies the IC Markets and Pepperstone instruments. Interactive Brokers
+    /// supplies the others.
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
-    /// Runs the strategy on a live node with Interactive Brokers, IC
-    /// Markets, Pepperstone or OKX; stops on Ctrl-C.
+    /// Runs the strategy on a live node with Interactive Brokers, IC Markets, Pepperstone or OKX.
+    /// Stops on Ctrl-C.
     Live(Box<LiveArgs>),
-    /// Trains the strategy's models at a time, those without one valid
-    /// from it, replaying the days its dataset lacks, and prints each
-    /// model published or in use, or fails with why a current one was
-    /// kept.
+    /// Trains the strategy's models at one time, or at each retrain time in a span, for those
+    /// without a model valid from that time. Replays the days its dataset lacks. Prints a report
+    /// for each train: the model set published or already published, or why the train failed, plus
+    /// its times, memory, dataset days and rows per slice. Fails if any train failed.
     Train(Box<TrainArgs>),
 }
 
-/// The arguments of a subcommand working on a window of the catalog.
 #[derive(Debug, Args)]
 struct RunArgs {
     /// The strategy whose instruments and warmup are used.
@@ -90,7 +87,6 @@ struct RunArgs {
 }
 
 impl RunArgs {
-    /// The window `[start, end]`, checked.
     fn window(&self) -> anyhow::Result<(Timestamp, Timestamp)> {
         let (start, end) = (self.start, self.end);
         anyhow::ensure!(start < end, "start {start} must be before end {end}");
@@ -102,7 +98,6 @@ impl RunArgs {
 struct FillCatalogArgs {
     #[command(flatten)]
     run: RunArgs,
-    /// The venues' flags of a fill, each venue's own.
     #[command(flatten)]
     venues: HistoryVenueArgs,
 }
@@ -113,23 +108,19 @@ struct BacktestArgs {
     run: RunArgs,
     #[command(flatten)]
     commission: CommissionArgs,
-    /// Starting balance of the simulated account, for example "10000 EUR";
-    /// a model strategy's dataset runs are at its config's
-    /// (`[model] dataset`).
+    /// Starting balance of the simulated account, for example "10000 EUR"; a model strategy's
+    /// dataset runs use its config's (`[model] dataset`).
     #[arg(long, value_parser = parse_money)]
     balance: Money,
-    /// The latency of the simulated account's venues, a duration such as
-    /// "150ms": each order command reaches a venue that long after it is
-    /// sent, and a market order fills on the first quote from then on. Left
-    /// out, none. A model strategy's dataset runs are at its config's
-    /// (`[model] dataset`).
+    /// The latency of the simulated account's venues, a duration such as "150ms". Each order
+    /// command reaches a venue that long after it is sent, and a market order fills on the first
+    /// quote from then on. Left out, there is none. A model strategy's dataset runs use its
+    /// config's (`[model] dataset`).
     #[arg(long, value_parser = Latency::from_str)]
     latency: Option<Latency>,
-    /// The model store a strategy trading on a model reads its models
-    /// from: at each decision, the latest valid then. The backtest first
-    /// trains at each retrain time of its span the models the store lacks;
-    /// never retrained, at its start alone, and refuses to run if its
-    /// sides or its meta then have no model in use there.
+    /// The model store that a strategy trading on a model reads its models from. At each
+    /// decision, it reads the latest model valid then. A backtest trains none, but `train` does.
+    /// The backtest refuses to run if the store holds no model to trade on at its start.
     #[arg(long, default_value = "models")]
     models: PathBuf,
 }
@@ -141,10 +132,19 @@ struct TrainArgs {
     /// The strategy's TOML config.
     #[arg(long)]
     config: PathBuf,
-    /// The time trained at, the model's valid-from: same format as
-    /// --start.
-    #[arg(long, value_parser = parse_time)]
-    at: Timestamp,
+    /// The one time to train at, the models' valid-from. Same format as --start. A strategy never
+    /// retrained is trained so alone.
+    #[arg(long, value_parser = parse_time, required_unless_present = "from", conflicts_with = "from")]
+    at: Option<Timestamp>,
+    /// The start of a span to train over instead. It trains at each retrain time in order, which
+    /// are the times a backtest from --from to --to trades on, starting from the last one not
+    /// after --from. Same format as --start.
+    #[arg(long, value_parser = parse_time, requires = "to")]
+    from: Option<Timestamp>,
+    /// The end of the span, in the same format. A retrain time at the end is not trained, because
+    /// a backtest ending there trades no model valid from it.
+    #[arg(long, value_parser = parse_time, requires = "from")]
+    to: Option<Timestamp>,
     /// The catalog directory: the data replayed, and the dataset.
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
@@ -153,29 +153,42 @@ struct TrainArgs {
     models: PathBuf,
 }
 
-/// The commission of a run: exactly one of the flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trains {
+    At(Timestamp),
+    Over { from: Timestamp, to: Timestamp },
+}
+
+impl TrainArgs {
+    fn trains(&self) -> anyhow::Result<Trains> {
+        match (self.at, self.from, self.to) {
+            (Some(at), None, None) => Ok(Trains::At(at)),
+            (None, Some(from), Some(to)) => {
+                anyhow::ensure!(from < to, "--from {from} must be before --to {to}");
+                Ok(Trains::Over { from, to })
+            }
+            times => unreachable!("clap requires --at or both --from and --to: {times:?}"),
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 struct CommissionArgs {
     /// Commission charged once per order, for example "3 EUR".
     #[arg(long, value_parser = Commission::per_order)]
     commission: Option<Commission>,
-    /// Commission rate on the value of each fill, with no minimum, for
-    /// example 0.0005 (0.05%).
+    /// Commission rate on the value of each fill, with no minimum, for example 0.0005 (0.05%).
     #[arg(long, value_parser = Commission::rate)]
     commission_rate: Option<Commission>,
-    /// Commission charged on each unit of the quantity of each fill, each
-    /// fill's charge rounded to the currency's precision, for example
-    /// "0.035 USD" (3.5 USD per 100 oz of gold, Pepperstone's).
+    /// Commission charged on each unit of quantity in each fill, for example "0.035 USD" (3.5 USD
+    /// per 100 oz of gold, Pepperstone's). Each fill's charge is rounded to the currency's
+    /// precision.
     #[arg(long, value_parser = Commission::per_quantity)]
     commission_per_quantity: Option<Commission>,
 }
 
 impl CommissionArgs {
-    /// The commission of the one flag given: the one source of the
-    /// simulated venue's costs, its fee model (`backtest::Commission`); a
-    /// model strategy's dataset runs are at its config's
-    /// (`[model] dataset`).
     fn commission(&self) -> Commission {
         [
             self.commission,
@@ -196,44 +209,34 @@ struct LiveArgs {
     /// The strategy's TOML config.
     #[arg(long)]
     config: PathBuf,
-    /// The venues' flags of a live node, each venue's own.
     #[command(flatten)]
     venues: LiveVenueArgs,
-    /// The node's trader: its cache in Redis is the trader's, which each run
-    /// loads. Live processes running at once each need their own, and on
-    /// one venue account their own tag, the part after the last hyphen:
-    /// Nautilus puts only the tag in client order, order list and position
-    /// ids, so `HELIX-001` and `OTHER-001` collide. Parsed by Nautilus'
-    /// checked `FromStr`, since clap would otherwise pick
-    /// `TraderId: From<&str>`, which panics.
+    /// The node's trader, whose cache in Redis each run loads. Live processes running at once
+    /// each need their own, and on one venue account their own tag, the part after the last
+    /// hyphen. Nautilus puts only the tag in client order, order list and
+    /// position ids, so `HELIX-001` and `OTHER-001` collide. Parsed by the checked `FromStr`,
+    /// since clap would otherwise pick `TraderId: From<&str>`, which panics.
     #[arg(long, default_value = "HELIX-001", value_parser = TraderId::from_str)]
     trader_id: TraderId,
-    /// The catalog directory, fill-catalog's and the backtests': the warmup
-    /// is read from it first, and a cTrader broker's history is written
-    /// back to it. A strategy trading on a model requires it to exist and
-    /// hold the instruments it trades, which its models and retrains are
-    /// built from.
+    /// The catalog directory. The warmup is read from it first, and a cTrader broker's history is
+    /// written back to it. A strategy trading on a model requires it to exist and to hold the
+    /// instruments the strategy trades.
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
-    /// The directory the node stages the data it streams into the
-    /// catalog, outside it; it also keeps each trader's instance id.
+    /// The directory outside the catalog where the node stages the data it streams. It also keeps
+    /// each trader's instance id.
     #[arg(long, default_value = "staging")]
     staging: PathBuf,
-    /// The model store a strategy trading on a model reads its models
-    /// from, at each decision the latest valid then, and its retrains
-    /// publish in: the store of its config, whose `[model] dataset` keys it.
+    /// The model store that a strategy trading on a model reads its models from. At each decision
+    /// it reads the latest model valid then, and its retrains publish in the same store. Defaults
+    /// to the store in its config, keyed by `[model] dataset`.
     #[arg(long, default_value = "models")]
     models: PathBuf,
 }
 
 impl LiveArgs {
-    /// The arguments of the `train` of the node's retrains but its `--at`,
-    /// which the launcher gives (`Launcher::process`): the node's strategy,
-    /// config, catalog and store, the train reading the commission, balance
-    /// and latency of its dataset runs from the config (`[model] dataset`). A
-    /// live node is the one node of its process while it runs, and a train
-    /// replays the dataset days it lacks through a node of its own, so each
-    /// retrain is a process.
+    /// The arguments of the node's retrain `train`, except its `--at`, which the launcher gives
+    /// (`Launcher::process`).
     fn train_args(&self) -> Vec<OsString> {
         let strategy = self
             .strategy
@@ -250,7 +253,6 @@ impl LiveArgs {
         args
     }
 
-    /// The recording of the live node: staged in `--staging`.
     fn recording(&self) -> Recording {
         Recording {
             staging: self.staging.clone(),
@@ -258,34 +260,26 @@ impl LiveArgs {
     }
 }
 
-/// Nautilus' own parser: an RFC 3339 timestamp, a date taken as midnight
-/// UTC, or Unix nanoseconds or seconds.
 fn parse_time(s: &str) -> Result<Timestamp, String> {
     s.parse::<UnixNanos>()
         .map(Timestamp::from)
         .map_err(|e| e.to_string())
 }
 
-/// An amount and a currency code, for example "3 EUR". Explicit, since
-/// clap would otherwise pick `Money: From<&str>`, which panics.
+/// Explicit, since clap would otherwise pick `Money: From<&str>`, which panics.
 fn parse_money(s: &str) -> Result<Money, String> {
     s.parse()
 }
 
-/// Reads the config of the strategy of part `P` from `path` and validates
-/// it.
 fn load_config<P: Part>(path: &Path) -> anyhow::Result<StandardConfig<P>> {
     let read = || StandardConfig::load(&fs::read_to_string(path)?);
     read().with_context(|| format!("loading the config {}", path.display()))
 }
 
-/// The data requirements of `strategy`'s config at `path`.
 fn data_requirements(strategy: StrategyName, path: &Path) -> anyhow::Result<DataRequirements> {
     strategy.visit(Requirements(path))
 }
 
-/// The visitor reading the data requirements of a strategy's config at
-/// its path.
 struct Requirements<'a>(&'a Path);
 
 impl Visitor for Requirements<'_> {
@@ -300,8 +294,6 @@ impl Visitor for Requirements<'_> {
     }
 }
 
-/// The logger config from `NAUTILUS_LOG`: the default when it is unset, an
-/// error when it is malformed.
 fn logger_config(spec: Result<String, std::env::VarError>) -> anyhow::Result<LoggerConfig> {
     match spec {
         Err(std::env::VarError::NotPresent) => Ok(LoggerConfig::default()),
@@ -311,12 +303,9 @@ fn logger_config(spec: Result<String, std::env::VarError>) -> anyhow::Result<Log
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Before parsing, since arguments fall back on the environment; a
-    // variable already set wins over the file.
+    // Before parsing, since arguments fall back on the environment
     dotenvy::dotenv().ok();
-    // Once, before any config loads, on every command: a config's custom
-    // series are checked against Nautilus' registry, and every catalog and
-    // client of custom data decodes and encodes it by its registration.
+    // Before any config loads, since its custom series are checked against Nautilus' registry
     venues::register_custom_data();
     match Cli::parse().command {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
@@ -326,17 +315,11 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Fills the catalog with the instruments and the series the strategy reads,
-/// each from its history source (`venues::fill_history`).
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = data_requirements(args.run.strategy, &args.run.config)?;
-    // A fill may run no node (one whose catalog lacks nothing runs none),
-    // so no node installs Nautilus' logger for it: install it here, as
-    // Nautilus' logging guide says for a run without a kernel (the fill's
-    // node keeps it), so the `log` output of this crate and Nautilus, and
-    // the adapters' `tracing` warnings (why a contract did not resolve),
-    // reach the console. Configured by NAUTILUS_LOG and RUST_LOG.
+    // A fill whose catalog lacks nothing runs no node, so install Nautilus' logger here, as its
+    // logging guide says for a run without a kernel.
     let _log_guard = init_logging(
         TraderId::default(),
         UUID4::new(),
@@ -350,23 +333,16 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     venues::fill_history(&requirements, start, end, &args.venues, catalog_dir).await
 }
 
-/// Builds the strategy from its config, runs it over the window of the
-/// catalog and prints the results to stdout, refusing first a balance
-/// whose currency the config's conversions do not reach a traded
-/// instrument's P&L currency from (`Backtest::refuse_balance`). A strategy
-/// trading on a model is first trained on its schedule (`model::walk`): its
-/// dataset built over the span and its models trained at each train time
-/// the store lacks one, in this process, on the backtest's catalog and
-/// store, at the commission, balance and latency of the config's `[model]
-/// dataset`; the out-of-sample scores of its models follow the results,
-/// after the costs of the run and of its models' dataset runs.
+/// Runs the strategy over the window of the catalog and prints the results.
+///
+/// A strategy trading on a model trades on the models that `train` published (`model::walk`). It
+/// builds its dataset over the span in this process and prints the out-of-sample scores of its
+/// models.
 fn run_backtest(args: &BacktestArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
-    // The node installs Nautilus' logger from its engine config: pass the
-    // NAUTILUS_LOG config through, rather than install a logger here.
+    // The node installs Nautilus' logger from its engine config
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
     let dataset_logging = logging.clone();
-    // Each simulated venue keeps positions as the real one does.
     let backtest = |requirements: DataRequirements, pairs: &[InstrumentId]| Backtest {
         catalog: args.run.catalog.clone(),
         bar_types: requirements.bar_types,
@@ -378,7 +354,6 @@ fn run_backtest(args: &BacktestArgs) -> anyhow::Result<()> {
         latency: args.latency,
         pairs: pairs.to_vec(),
         balance: args.balance,
-        venue_oms: venues::oms_type,
         logging,
     };
     args.run.strategy.visit(Backtesting {
@@ -388,10 +363,6 @@ fn run_backtest(args: &BacktestArgs) -> anyhow::Result<()> {
     })
 }
 
-/// The visitor backtesting a strategy: `backtest` builds its `Backtest`
-/// of its data requirements and the pairs of its `[trade] conversions` it
-/// does not trade; a model strategy's dataset runs log as
-/// `dataset_logging` says (`backtest_on_models`).
 struct Backtesting<'a, B> {
     args: &'a BacktestArgs,
     dataset_logging: LoggerConfig,
@@ -415,18 +386,11 @@ impl<B: FnOnce(DataRequirements, &[InstrumentId]) -> Backtest> Visitor for Backt
     }
 }
 
-/// The backtest of `args` of the model strategy `S`, its `Backtest` of
-/// its data requirements and the pairs of its `[trade] conversions` it
-/// does not trade `backtest`: retrained on its schedule first
-/// (`WalkForward::prepare`), then run, its results printed and the
-/// out-of-sample scores of its models after them. The dataset build, each
-/// train and the run are one after another in this process, a train as the
-/// `train` subcommand's (`Training::train_at`), each Nautilus node, a
-/// dataset run's (`DatasetRun`, logging as `logging` says) or the
-/// backtest's, disposed before the next starts, which Nautilus supports.
-/// The days built are printed, and each train's outcome: on standard
-/// output when it kept no model, on standard error, with its time, when
-/// it kept a current one, which does not stop the backtest.
+/// Runs the backtest of `args` for the model strategy `S` on the models in its store.
+///
+/// Refuses to run, before any replay, if the store holds no model to trade on at the start
+/// (`WalkForward::untrained`). The error names the retrain time there and the `train` that fills
+/// it. Each node is disposed before the next starts, which Nautilus supports.
 fn backtest_on_models<S: ModelStrategy>(
     args: &BacktestArgs,
     logging: LoggerConfig,
@@ -443,30 +407,30 @@ fn backtest_on_models<S: ModelStrategy>(
     };
     run.refuse_balance::<S>(&config)?;
     let walk = S::walk_forward(&config, catalog, models)?;
+    if let Some(at) = walk.untrained(start, end)? {
+        let train = format!(
+            "helix-trader train {} --config {} --catalog {} --models {}",
+            strategy_name(args.run.strategy),
+            args.run.config.display(),
+            catalog.display(),
+            models.display()
+        );
+        let span = match config.model().retrain {
+            Retrain::Every(_) => format!(", or over its span, `{train} --from {start} --to {end}`"),
+            Retrain::Never => String::new(),
+        };
+        anyhow::bail!(
+            "the store {} holds no model to trade on at the backtest's start {start}, and a \
+             backtest trains none: train at its retrain time {at} first, `{train} --at {at}`{span}",
+            models.display()
+        );
+    }
     let dataset = S::dataset(&config, catalog)?;
-    let training = S::training(&config, catalog, models)?;
-    let replay = |from, to| run.replay::<S>(&config, from, to);
-    walk.prepare(
-        start,
-        end,
-        |from, to| {
-            let (first, last) = dataset::days(from, to);
-            let built = dataset.build(first, last, replay)?;
-            if let (Some(from), Some(to)) = (built.first(), built.last()) {
-                println!("built {} days of the dataset, {from} to {to}", built.len());
-            }
-            Ok(())
-        },
-        |at| {
-            let trained = training.train_at(at, replay);
-            if trained.succeeded() {
-                println!("{trained}");
-            } else {
-                eprintln!("the retrain at {at}: {trained}");
-            }
-            Ok(())
-        },
-    )?;
+    let (first, last) = dataset::days(start, end);
+    let built = dataset.build(first, last, |from, to| run.replay::<S>(&config, from, to))?;
+    if let (Some(from), Some(to)) = (built.first(), built.last()) {
+        println!("built {} days of the dataset, {from} to {to}", built.len());
+    }
     let mode = Mode::Backtest {
         models: models.clone(),
     };
@@ -490,9 +454,6 @@ fn backtest_on_models<S: ModelStrategy>(
     Ok(())
 }
 
-/// Builds the strategy from its config and runs it live until Ctrl-C. A
-/// strategy trading on a model retrains, if ever, in a child process,
-/// this binary's `train` (see `LiveArgs::train_args`).
 async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
         trader_id: args.trader_id,
@@ -509,8 +470,6 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
         .await
 }
 
-/// The visitor running a strategy on a live node until Ctrl-C: its
-/// output, the run, is boxed, a future of each kind's own type.
 struct Running<'a> {
     args: &'a LiveArgs,
     live: &'a Live,
@@ -535,18 +494,15 @@ impl<'a> Visitor for Running<'a> {
     }
 }
 
-/// Runs the model strategy `S` of `args` on `live` until Ctrl-C, on the
-/// models of the store its config keys, beside the actor of its
-/// retrains if it is retrained (`RetrainActor`), each retrain in a child
-/// process (`LiveArgs::train_args`) on the node's catalog. Refuses first,
-/// before any node is built, a catalog without the traded instruments or
-/// the pairs of `[trade] conversions`, which its models and retrains are
-/// built from (`catalog::instruments`), and a dataset balance (`[model]
-/// dataset`) whose currency those pairs do not reach a traded instrument's
-/// P&L currency from (`backtest::refuse_balance`), as `backtest` and
-/// `train` refuse it. Warns, naming the store, when it holds no model to
-/// trade on yet (`ModelSet::trades_by`): the strategy then makes no trade
-/// until one is published there.
+/// Runs the model strategy `S` of `args` on `live` beside its retrain actor (`RetrainActor`).
+///
+/// Each retrain is a child process (`LiveArgs::train_args`).
+///
+/// Before any node is built, it refuses:
+/// - A catalog without the traded instruments or the pairs of `[trade] conversions`.
+/// - A dataset balance that the pairs do not reach.
+///
+/// It warns when the store holds no model to trade on yet (`ModelStore::trades_by`).
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
@@ -560,7 +516,7 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
     )?;
     backtest::refuse_balance(config.model().dataset.balance, &traded, &pairs)
         .context(DATASET_BALANCE)?;
-    let models = S::blueprint(&config)?.model_set(&args.models)?;
+    let models = S::blueprint(&config)?.model_store(&args.models)?;
     if !models.trades_by(Timestamp::from(get_atomic_clock_realtime().get_time_ns()))? {
         eprintln!(
             "warning: no model to trade on yet in {}: the strategy makes no trade until one is \
@@ -574,6 +530,7 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
         config.model().retrain,
         args.catalog.clone(),
         requirements.clone(),
+        models,
         Launcher::process(program, args.train_args()),
     );
     let mode = Mode::Live {
@@ -584,35 +541,32 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
         .await
 }
 
-/// What a refused dataset balance is.
 const DATASET_BALANCE: &str = "the dataset balance ([model] dataset), which a model's targets and \
                                the decisions' payoff features are sized at";
 
-/// The dataset runs of a process: the strategy over the catalog in
-/// `Mode::Dataset`, on hedging venues (`model::targets`), on the venue its
-/// config declares (`[model] dataset`): its commission the venues' and the
-/// targets', its balance the account's and the equity the targets'
-/// reference stake is of, which the runs' trades leave whole, margining
-/// nothing (`Backtest::run_dataset`), and its latency, if any, the venues';
-/// each replay a node of its own, disposed at its end.
+/// The dataset runs of a process.
+///
+/// They run the strategy over the catalog in `Mode::Dataset`, on hedging venues
+/// (`model::targets`), on the venue that its config declares (`[model] dataset`). The balance is
+/// the equity that the reference stake of the targets is based on. The trades leave it whole and
+/// margin nothing (`Backtest::run_dataset`).
 struct DatasetRun {
     catalog: PathBuf,
     logging: LoggerConfig,
 }
 
 impl DatasetRun {
-    /// Refuses the runs of the strategy `config` describes, before any,
-    /// unless the pairs of its `[trade] conversions` reach the P&L currency
-    /// of each instrument it trades from their balance's, all as their
-    /// catalog defines them (`catalog::instruments`,
-    /// `backtest::refuse_balance`, the check of a backtest's balance): a
-    /// target's trades are sized on the balance converted through them.
+    /// Refuses the runs, before any starts, unless the strategy's `[trade] conversions` reach the
+    /// P&L currency of each traded instrument from the balance currency
+    /// (`backtest::refuse_balance`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the catalog cannot be read, a traded instrument
-    /// or a pair is not in it, or the pairs do not reach a traded
-    /// instrument's P&L currency from the balance's.
+    /// Returns an error if:
+    /// - The catalog cannot be read.
+    /// - A traded instrument or a pair is not in the catalog.
+    /// - The pairs do not reach the P&L currency of a traded instrument from the balance
+    ///   currency.
     fn refuse_balance<S: ModelStrategy>(
         &self,
         config: &StandardConfig<S::Params>,
@@ -625,14 +579,14 @@ impl DatasetRun {
             .context(DATASET_BALANCE)
     }
 
-    /// The rows the model strategy `S` of `config` settles over `[start,
-    /// end]`.
+    /// Returns the rows that the model strategy `S` of `config` settles over `[start, end]`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the strategy cannot be built or the run fails,
-    /// or a target's order was denied, which fails it
-    /// (`SettledRows::take`).
+    /// Returns an error if:
+    /// - The strategy cannot be built.
+    /// - The run fails.
+    /// - A target's order was denied (`SettledRows::take`).
     fn replay<S: ModelStrategy>(
         &self,
         config: &StandardConfig<S::Params>,
@@ -654,7 +608,6 @@ impl DatasetRun {
             latency: venue.latency,
             pairs: config.trade.untraded_pairs(),
             balance: venue.balance,
-            venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),
         };
         backtest.run_dataset(S::new(config.clone(), mode)?)?;
@@ -662,79 +615,121 @@ impl DatasetRun {
     }
 }
 
-/// Prints the outcome of a train that kept no model, each model published
-/// or its current one in use; one that kept a current model, refused,
-/// failed or a meta waiting, is an error, its reason: the command fails,
-/// so that the live node that started it knows why (`model::launcher`).
+fn print_report(meter: &mut Meter, at: Timestamp, trained: &Trained) {
+    let usage = meter.lap();
+    print!("{}", Report { at, trained, usage });
+}
+
+/// Prints the report of the train at `at`.
 ///
 /// # Errors
 ///
-/// Returns an error if the train kept a current model.
-fn reported(trained: &Trained) -> anyhow::Result<()> {
-    anyhow::ensure!(trained.succeeded(), "{trained}");
-    println!("{trained}");
+/// Returns an error if the train failed, so the live node that started it knows why.
+fn reported(mut meter: Meter, at: Timestamp, trained: &Trained) -> anyhow::Result<()> {
+    print_report(&mut meter, at, trained);
+    anyhow::ensure!(trained.succeeded(), "{}", trained.outcome);
     Ok(())
 }
 
-/// Trains the strategy's model at `--at` and reports the outcome (see
-/// `reported`): the days its dataset lacks are replayed by a dataset run
-/// (`DatasetRun`).
+/// Prints the report of each of `trains` as it comes. A failed train does not stop the next.
+///
+/// # Errors
+///
+/// Returns an error if a train failed.
+fn reported_over(
+    mut meter: Meter,
+    trains: impl Iterator<Item = (Timestamp, Trained)>,
+) -> anyhow::Result<()> {
+    let (mut count, mut failed) = (0, vec![]);
+    for (at, trained) in trains {
+        count += 1;
+        print_report(&mut meter, at, &trained);
+        if !trained.succeeded() {
+            failed.push(format!("  {at}: {}", trained.outcome));
+        }
+    }
+    anyhow::ensure!(
+        failed.is_empty(),
+        "the trains at {} of the span's {count} retrain times failed:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+    Ok(())
+}
+
 fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
+    let meter = Meter::start();
+    let trains = args.trains()?;
     let run = DatasetRun {
         catalog: args.catalog.clone(),
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
-    let outcome = args.strategy.visit(Training { args, run: &run })?;
-    reported(&outcome)
+    args.strategy.visit(Training {
+        args,
+        trains,
+        run: &run,
+        meter,
+    })
 }
 
-/// The visitor training a strategy's model (`train`): a strategy trading
-/// on no model has none.
 struct Training<'a> {
     args: &'a TrainArgs,
+    trains: Trains,
     run: &'a DatasetRun,
+    meter: Meter,
 }
 
 impl Visitor for Training<'_> {
-    type Output = anyhow::Result<Trained>;
+    type Output = anyhow::Result<()>;
 
     fn plain<S: PlainStrategy>(self) -> Self::Output {
-        let name = self
-            .args
-            .strategy
-            .to_possible_value()
-            .expect("every strategy has a name");
-        anyhow::bail!("the {} strategy trades on no model", name.get_name())
+        let name = strategy_name(self.args.strategy);
+        anyhow::bail!("the {name} strategy trades on no model")
     }
 
     fn model<S: ModelStrategy>(self) -> Self::Output {
-        train::<S>(self.args, self.run)
+        train::<S>(self.args, self.trains, self.run, self.meter)
     }
 }
 
-/// Trains the model of the model strategy `S` of `args` at `--at`, the
-/// days its dataset lacks replayed by `run`, its dataset balance refused
-/// first if the pairs of `[trade] conversions` do not reach the traded
-/// instrument's P&L currency from it (`DatasetRun::refuse_balance`).
-fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result<Trained> {
+fn train<S: ModelStrategy>(
+    args: &TrainArgs,
+    trains: Trains,
+    run: &DatasetRun,
+    meter: Meter,
+) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     run.refuse_balance::<S>(&config)?;
     let training = S::training(&config, &args.catalog, &args.models)?;
-    Ok(training.train_at(args.at, |start, end| run.replay::<S>(&config, start, end)))
+    let replay = |start, end| run.replay::<S>(&config, start, end);
+    match trains {
+        Trains::At(at) => reported(meter, at, &training.train_at(at, replay)),
+        Trains::Over { from, to } => {
+            let times = training
+                .retrain_times(from, to)
+                .context("training over --from to --to; train it --at its one time")?;
+            reported_over(
+                meter,
+                times
+                    .into_iter()
+                    .map(|at| (at, training.train_at(at, replay))),
+            )
+        }
+    }
+}
+
+fn strategy_name(strategy: StrategyName) -> String {
+    strategy
+        .to_possible_value()
+        .expect("every strategy has a name")
+        .get_name()
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
 
-    use helix_trader::{
-        model::{
-            holdout::{Earnings, Holdout, Refusal},
-            schedule::Retrain,
-            score::ExpectedScore,
-            train::{Kept, Outcome},
-        },
-        strategy::{ema::EmaParams, risk::R},
-    };
+    use helix_trader::model::train::{Failure, Outcome};
     use jiff::SignedDuration;
     use rstest::rstest;
 
@@ -747,7 +742,6 @@ mod tests {
         Cli::try_parse_from(argv).map(|cli| cli.command)
     }
 
-    /// The arguments of `command`, a fill-catalog.
     fn fill_catalog_args(command: Command) -> FillCatalogArgs {
         match command {
             Command::FillCatalog(args) => args,
@@ -759,7 +753,6 @@ mod tests {
         parse_command("fill-catalog", args).map(fill_catalog_args)
     }
 
-    /// The arguments of `command`, a backtest.
     fn backtest_args(command: Command) -> BacktestArgs {
         match command {
             Command::Backtest(args) => *args,
@@ -781,14 +774,12 @@ mod tests {
         "2024-03-01T12:30:00Z",
     ];
 
-    /// `REQUIRED` and the costs a backtest requires.
     fn backtest_required() -> Vec<&'static str> {
         let mut argv = REQUIRED.to_vec();
         argv.extend(["--commission", "3 EUR", "--balance", "10000 EUR"]);
         argv
     }
 
-    /// Its IB client id is the venues' (`HistoryVenueArgs`).
     #[rstest]
     fn parses_fill_catalog_over_a_window_of_the_catalog() {
         let args = parse(&REQUIRED).unwrap();
@@ -805,22 +796,11 @@ mod tests {
         assert_eq!(args.run.catalog, PathBuf::from("catalog"));
     }
 
-    /// Fill-catalog takes IB's client id, not live's account or leverage.
     #[rstest]
-    fn fill_catalog_takes_the_ib_client_id_but_not_lives_account_or_leverage() {
+    fn fill_catalog_takes_the_ib_client_id() {
         let mut argv = REQUIRED.to_vec();
         argv.extend(["--client-id", "12"]);
         assert!(parse(&argv).is_ok());
-        for flag in [["--account", "DU1234567"], ["--leverage", "2"]] {
-            let mut argv = REQUIRED.to_vec();
-            argv.extend(flag);
-            let err = parse(&argv).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::UnknownArgument,
-                "{flag:?}: {err}"
-            );
-        }
     }
 
     #[rstest]
@@ -840,7 +820,6 @@ mod tests {
         assert_eq!(args.balance, Money::from("10000 EUR"));
     }
 
-    /// `REQUIRED`, the balance and `commission`.
     fn backtest_with<'a>(commission: &[&'a str]) -> Vec<&'a str> {
         let mut argv = REQUIRED.to_vec();
         argv.extend(["--balance", "10000 EUR"]);
@@ -849,84 +828,22 @@ mod tests {
     }
 
     #[rstest]
-    fn a_backtest_requires_the_commission_and_the_balance() {
-        assert!(parse_backtest(&REQUIRED).is_err());
-        for flag in ["--commission", "--balance"] {
-            let argv = backtest_required();
-            let at = argv.iter().position(|&arg| arg == flag).unwrap();
-            let argv = [&argv[..at], &argv[at + 2..]].concat();
-            let err = parse_backtest(&argv).unwrap_err().to_string();
-            assert!(err.contains(flag), "{err}");
-        }
+    #[case::an_amount(["--commission", "3 EUR"])]
+    #[case::a_rate(["--commission-rate", "0.0005"])]
+    #[case::an_amount_per_quantity(["--commission-per-quantity", "0.035 EUR"])]
+    fn a_backtest_takes_a_commission_of_any_of_the_three_kinds(#[case] one: [&str; 2]) {
+        assert!(parse_backtest(&backtest_with(&one)).is_ok());
     }
 
-    #[rstest]
-    fn a_backtest_takes_one_commission_of_the_three_kinds() {
-        let flags = [
-            ["--commission", "3 EUR"],
-            ["--commission-rate", "0.0005"],
-            ["--commission-per-quantity", "0.035 EUR"],
-        ];
-        for (i, one) in flags.iter().enumerate() {
-            assert!(parse_backtest(&backtest_with(one)).is_ok(), "{one:?}");
-            for other in &flags[i + 1..] {
-                let both = backtest_with(&[one[0], one[1], other[0], other[1]]);
-                let err = parse_backtest(&both).unwrap_err();
-                assert_eq!(
-                    err.kind(),
-                    clap::error::ErrorKind::ArgumentConflict,
-                    "{one:?} {other:?}: {err}"
-                );
-            }
-        }
-        let err = parse_backtest(&backtest_with(&[])).unwrap_err().to_string();
-        assert!(
-            err.contains("--commission-rate") && err.contains("--commission-per-quantity"),
-            "{err}"
-        );
-    }
-
-    /// Pepperstone's gold: 3.5 USD per 100 oz, so 0.035 USD an ounce, not
-    /// rounded to 0.04 USD.
+    /// Pepperstone's gold: 3.5 USD per 100 oz, so 0.035 USD an ounce, not rounded to 0.04 USD.
     #[rstest]
     fn a_commission_per_quantity_is_its_exact_amount_per_unit() {
         let args =
             parse_backtest(&backtest_with(&["--commission-per-quantity", "0.035 USD"])).unwrap();
         let exact = Money::from_str_exact("0.035 USD").unwrap();
-        assert_ne!(exact, Money::from("0.04 USD"));
         assert_eq!(args.commission.commission(), Commission::PerQuantity(exact));
     }
 
-    /// Each value joined to its flag, so that clap reads `-0.035 USD` as the
-    /// value, not as a flag of its own.
-    #[rstest]
-    fn rejects_a_commission_per_quantity_it_cannot_charge() {
-        for amount in ["-0.035 USD", "0.035", "USD", "0.035 XYZ"] {
-            let flag = format!("--commission-per-quantity={amount}");
-            let err = parse_backtest(&backtest_with(&[&flag])).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::ValueValidation,
-                "{amount}: {err}"
-            );
-        }
-    }
-
-    #[rstest]
-    fn rejects_malformed_money() {
-        for flag in ["--commission", "--balance"] {
-            for money in ["3", "EUR", "3 XYZ", "three EUR"] {
-                let mut argv = backtest_required();
-                let at = argv.iter().position(|&arg| arg == flag).unwrap();
-                argv[at + 1] = money;
-                let err = parse_backtest(&argv).unwrap_err().to_string();
-                assert!(err.contains(flag), "{money}: {err}");
-            }
-        }
-    }
-
-    /// 150 ms, as jiff reads a duration: each command reaches the
-    /// simulated account's venues 150 ms after it is sent.
     #[rstest]
     fn a_backtest_takes_the_latency_of_its_venues_as_a_duration() {
         let mut argv = backtest_required();
@@ -939,41 +856,11 @@ mod tests {
         assert_eq!(parse_backtest(&argv).unwrap().latency, Some(at_150ms));
     }
 
-    /// Nautilus' default: each command reaches the venue as it is sent.
     #[rstest]
     fn a_backtest_without_a_latency_has_none() {
         assert_eq!(parse_backtest(&backtest_required()).unwrap().latency, None);
     }
 
-    /// Each value joined to its flag, so that clap reads `-1s` as the
-    /// value; none is left out, not a latency of nothing.
-    #[rstest]
-    fn rejects_a_latency_that_is_no_positive_duration() {
-        for latency in ["-1s", "0s", "150", "fast"] {
-            let mut argv = backtest_required();
-            let flag = format!("--latency={latency}");
-            argv.push(&flag);
-            let err = parse_backtest(&argv).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::ValueValidation,
-                "{latency}: {err}"
-            );
-        }
-    }
-
-    /// A backtest's margins are its instruments', each holding its
-    /// account's (an OKX definition the account's leverage), so it takes no
-    /// leverage.
-    #[rstest]
-    fn a_backtest_takes_no_leverage() {
-        let mut argv = backtest_required();
-        argv.extend(["--leverage", "10"]);
-        let err = parse_backtest(&argv).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
-    }
-
-    /// The arguments of `command`, a live run.
     fn live_args(command: Command) -> LiveArgs {
         match command {
             Command::Live(args) => *args,
@@ -986,96 +873,35 @@ mod tests {
     }
 
     #[rstest]
-    fn live_runs_as_trader_helix_001_unless_given_another() {
-        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
-        assert_eq!(args.trader_id, TraderId::from("HELIX-001"));
-        let args =
-            parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX-002"]).unwrap();
-        assert_eq!(args.trader_id, TraderId::from("HELIX-002"));
-    }
-
-    #[rstest]
-    fn rejects_a_trader_id_nautilus_refuses() {
-        // Nautilus' trader id is a name and a tag joined by a hyphen.
-        assert!(parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX"]).is_err());
-    }
-
-    /// Its IB account and client id are the venues' (`LiveVenueArgs`).
-    #[rstest]
-    fn parses_live_with_its_strategy_config_and_catalog() {
-        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
+    #[case::by_default(&[], "HELIX-001", "staging", "catalog")]
+    #[case::as_another_trader(&["--trader-id", "HELIX-002"], "HELIX-002", "staging", "catalog")]
+    #[case::staging_elsewhere(&["--staging", "/data/staging"], "HELIX-001", "/data/staging", "catalog")]
+    #[case::on_another_catalog(&["--catalog", "/data/catalog"], "HELIX-001", "staging", "/data/catalog")]
+    fn parses_live_with_its_strategy_config_and_catalog(
+        #[case] given: &[&str],
+        #[case] trader_id: &str,
+        #[case] staging: &str,
+        #[case] catalog: &str,
+    ) {
+        let argv = [&["ema", "--config", "ema.toml"][..], given].concat();
+        let args = parse_live(&argv).unwrap();
         assert_eq!(args.strategy, StrategyName::Ema);
         assert_eq!(args.config, PathBuf::from("ema.toml"));
-        assert_eq!(args.catalog, PathBuf::from("catalog"));
-    }
-
-    /// Live checks each OKX account's leverage against its instruments'
-    /// definitions in the catalog, so it takes no leverage.
-    #[rstest]
-    fn live_takes_no_leverage() {
-        let err = parse_live(&["ema", "--config", "ema.toml", "--leverage", "10"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
+        assert_eq!(args.trader_id, TraderId::from(trader_id));
+        assert_eq!(args.staging, PathBuf::from(staging));
+        assert_eq!(args.catalog, PathBuf::from(catalog));
     }
 
     #[rstest]
-    fn live_stages_in_staging_unless_told_otherwise() {
-        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
-        assert_eq!(args.staging, PathBuf::from("staging"));
-        let args =
-            parse_live(&["ema", "--config", "ema.toml", "--staging", "/data/staging"]).unwrap();
-        assert_eq!(args.staging, PathBuf::from("/data/staging"));
-    }
-
-    #[rstest]
-    fn rejects_a_start_not_before_the_end() {
-        let mut argv = REQUIRED.to_vec();
-        argv[4] = "2024-03-01T12:30:00Z";
-        let err = parse(&argv).unwrap().run.window().unwrap_err().to_string();
-        assert!(err.contains("before"), "{err}");
-        assert!(parse(&REQUIRED).unwrap().run.window().is_ok());
-        let mut argv = backtest_required();
-        argv[4] = "2024-03-01T12:30:00Z";
-        let err = parse_backtest(&argv).unwrap().run.window().unwrap_err();
-        assert!(err.to_string().contains("before"), "{err}");
-    }
-
-    #[rstest]
-    fn a_config_error_names_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ema.toml");
-        std::fs::write(
-            &path,
-            r#"
-            [data]
-            series = []
-            warmup = "720h"
-
-            [trade]
-            instruments = [{ instrument_id = "ESM24.CME" }]
-            risk = "0.5%"
-            "#,
-        )
-        .unwrap();
-        let err = format!("{:#}", load_config::<EmaParams>(&path).unwrap_err());
-        assert!(
-            err.contains("ema.toml") && err.contains("data.series"),
-            "{err}"
+    fn logger_config_defaults_when_unset_and_rejects_a_spec_not_unicode() {
+        assert_eq!(
+            logger_config(Err(std::env::VarError::NotPresent)).unwrap(),
+            LoggerConfig::default()
         );
-        let missing = dir.path().join("missing.toml");
-        let err = format!("{:#}", load_config::<EmaParams>(&missing).unwrap_err());
-        assert!(err.contains("missing.toml"), "{err}");
-    }
-
-    #[rstest]
-    fn logger_config_defaults_when_unset_and_rejects_a_malformed_spec() {
-        assert!(logger_config(Err(std::env::VarError::NotPresent)).is_ok());
         let not_unicode = std::ffi::OsString::from("x");
         assert!(logger_config(Err(std::env::VarError::NotUnicode(not_unicode))).is_err());
-        assert!(logger_config(Ok("stdout=Debug".to_string())).is_ok());
-        assert!(logger_config(Ok("stdout=Loud".to_string())).is_err());
     }
 
-    /// The arguments of `command`, a train.
     fn train_args(command: Command) -> TrainArgs {
         match command {
             Command::Train(args) => *args,
@@ -1087,7 +913,6 @@ mod tests {
         parse_command("train", args).map(train_args)
     }
 
-    /// The arguments a train requires.
     const TRAIN: [&str; 5] = [
         "model_ema",
         "--config",
@@ -1102,49 +927,47 @@ mod tests {
         assert_eq!(args.strategy, StrategyName::ModelEma);
         assert_eq!(args.config, PathBuf::from("model_ema.toml"));
         assert_eq!(
-            args.at,
-            "2026-10-23T00:00:00Z".parse::<Timestamp>().unwrap()
+            args.trains().unwrap(),
+            Trains::At("2026-10-23T00:00:00Z".parse().unwrap())
         );
         assert_eq!(args.catalog, PathBuf::from("catalog"));
         assert_eq!(args.models, PathBuf::from("models"));
     }
 
-    /// A train's dataset runs margin nothing, so it takes no leverage.
-    #[rstest]
-    fn a_train_takes_no_leverage() {
-        let mut argv = TRAIN.to_vec();
-        argv.extend(["--leverage", "2"]);
-        let err = parse_train(&argv).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
-    }
-
-    /// The commission and balance of a train's dataset runs are its
-    /// config's (`[model] dataset`), so it takes none.
-    #[rstest]
-    fn a_train_takes_no_commission_or_balance() {
-        for flags in [
-            ["--commission", "3 EUR"],
-            ["--commission-rate", "0.00003"],
-            ["--commission-per-quantity", "0.035 USD"],
-            ["--balance", "10000 USD"],
-        ] {
-            let mut argv = TRAIN.to_vec();
-            argv.extend(flags);
-            let err = parse_train(&argv).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::UnknownArgument,
-                "{flags:?}: {err}"
-            );
-        }
+    fn parse_train_over(from: &str, to: &str) -> Result<TrainArgs, clap::Error> {
+        let argv = [&TRAIN[..3], &["--from", from, "--to", to]].concat();
+        parse_train(&argv)
     }
 
     #[rstest]
-    fn a_train_requires_its_time() {
-        let at = TRAIN.iter().position(|&arg| arg == "--at").unwrap();
-        let argv = [&TRAIN[..at], &TRAIN[at + 2..]].concat();
-        let err = parse_train(&argv).unwrap_err().to_string();
-        assert!(err.contains("--at"), "{err}");
+    fn parses_a_train_over_a_span() {
+        let args = parse_train_over("2026-10-21", "2026-10-23T12:00:00Z").unwrap();
+
+        assert_eq!(
+            args.trains().unwrap(),
+            Trains::Over {
+                from: "2026-10-21T00:00:00Z".parse().unwrap(),
+                to: "2026-10-23T12:00:00Z".parse().unwrap(),
+            }
+        );
+    }
+
+    /// A span ending at or before its start trains at no time, so it is refused. The error names
+    /// both ends.
+    #[rstest]
+    #[case::ending_before_it_starts("2026-10-23", "2026-10-21")]
+    #[case::ending_where_it_starts("2026-10-23", "2026-10-23")]
+    fn a_train_over_an_empty_span_is_refused(#[case] from: &str, #[case] to: &str) {
+        let err = parse_train_over(from, to)
+            .unwrap()
+            .trains()
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains(&format!("{from}T00:00:00Z")) && err.contains(&format!("{to}T00:00:00Z")),
+            "{err}"
+        );
     }
 
     #[rstest]
@@ -1164,91 +987,27 @@ mod tests {
     }
 
     #[rstest]
-    fn a_train_keeping_the_model_fails_with_the_reason() {
-        let holdout = Box::new(Holdout {
-            earnings: Earnings::default(),
-            score: ExpectedScore {
-                rows: 2,
-                skill: Some(0.1),
-                ..ExpectedScore::default()
-            },
-        });
-        let kept = Outcome::Kept(Kept::Refused {
-            why: Refusal::MinExpectancy {
-                expectancy: 0.48,
-                min_expectancy: R::new(0.55),
-            },
-            holdout: holdout.clone(),
-        });
+    fn a_failed_train_fails_with_the_reason() {
+        let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
+        let kept = Outcome::Failed(Failure::Error(
+            "34 rows in the fit slice, fewer than min_rows 35".to_string(),
+        ));
         let published = Outcome::Published {
-            valid_from: "2026-10-23T00:00:00Z".parse().unwrap(),
-            holdout,
+            model_set: PathBuf::from("models/2026-10-23T00:00:00Z"),
         };
+        let already = Outcome::AlreadyPublished;
 
-        let err = reported(&kept.clone().into()).unwrap_err().to_string();
-        let meta_kept = Trained {
-            long: Some(published.clone()),
-            short: Some(published.clone()),
-            meta: Some(kept),
-        };
+        let err = reported(Meter::start(), t, &kept.into())
+            .unwrap_err()
+            .to_string();
 
-        assert!(err.contains("0.48") && err.contains("0.55"), "{err}");
-        assert!(reported(&published.into()).is_ok());
-        let err = reported(&meta_kept).unwrap_err().to_string();
-        assert!(err.contains("meta") && err.contains("0.48"), "{err}");
+        assert!(err.contains("34") && err.contains("35"), "{err}");
+        assert!(reported(Meter::start(), t, &published.into()).is_ok());
+        assert!(reported(Meter::start(), t, &already.into()).is_ok());
     }
 
-    /// A rerun of a train finds the long's model published: kept in use, it
-    /// is no failure, and the train exits 0.
-    #[rstest]
-    fn a_train_keeping_no_model_succeeds_its_models_in_use_or_published() {
-        let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
-        let trained = Trained {
-            long: Some(Outcome::InUse {
-                valid_from: t,
-                retrain: Retrain::Every(SignedDuration::from_hours(24)),
-            }),
-            short: Some(Outcome::Published {
-                valid_from: t,
-                holdout: Box::new(Holdout {
-                    earnings: Earnings::default(),
-                    score: ExpectedScore {
-                        rows: 2,
-                        skill: Some(0.1),
-                        ..ExpectedScore::default()
-                    },
-                }),
-            }),
-            meta: None,
-        };
-
-        assert!(reported(&trained).is_ok());
-    }
-
-    /// A meta with no side's model before the train waits: the
-    /// train fails, saying why.
-    #[rstest]
-    fn a_train_whose_meta_waits_fails_saying_so() {
-        let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
-        let trained = Trained {
-            long: Some(Outcome::InUse {
-                valid_from: t,
-                retrain: Retrain::Every(SignedDuration::from_hours(24)),
-            }),
-            short: None,
-            meta: Some(Outcome::Kept(Kept::Waiting)),
-        };
-
-        let err = reported(&trained).unwrap_err().to_string();
-
-        assert!(err.contains("waiting for the sides' decisions"), "{err}");
-    }
-
-    /// The arguments of a `model_ema` live node.
     const LIVE: [&str; 3] = ["model_ema", "--config", "model_ema.toml"];
 
-    /// The `train` the live node of `live` starts, given its `--at`, parsed
-    /// as this binary parses it.
     fn started_train(live: &LiveArgs) -> TrainArgs {
         let argv: Vec<String> = live
             .train_args()
@@ -1262,9 +1021,6 @@ mod tests {
         parse_train(&args).unwrap()
     }
 
-    /// A live node's retrain is a `train` on the node's strategy, config,
-    /// catalog and store, which reads its dataset runs' commission and
-    /// balance from the config.
     #[rstest]
     fn a_live_nodes_retrain_parses_as_train_on_its_files_and_store() {
         let mut argv = LIVE.to_vec();
@@ -1278,72 +1034,6 @@ mod tests {
         assert_eq!(train.models, PathBuf::from("/data/models"));
     }
 
-    /// The commission and balance of a live node's dataset runs, which key
-    /// the store it reads and its retrains train at, are its config's
-    /// (`[model] dataset`), so it takes none.
-    #[rstest]
-    fn live_takes_no_retrain_commission_or_balance() {
-        for flags in [
-            ["--retrain-commission", "3 USD"],
-            ["--retrain-commission-rate", "0.00003"],
-            ["--retrain-commission-per-quantity", "0.035 USD"],
-            ["--retrain-balance", "10000 USD"],
-        ] {
-            let mut argv = LIVE.to_vec();
-            argv.extend(flags);
-            let err = parse_live(&argv).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::UnknownArgument,
-                "{flags:?}: {err}"
-            );
-        }
-    }
-
-    #[rstest]
-    fn the_ema_strategy_has_no_model_to_train() {
-        let mut argv = TRAIN.to_vec();
-        argv[0] = "ema";
-        let err = run_train(&parse_train(&argv).unwrap()).unwrap_err();
-        assert!(err.to_string().contains("no model"), "{err}");
-    }
-
-    /// Two spellings of one commission are one commission.
-    #[rstest]
-    fn two_spellings_of_a_commission_are_one() {
-        for (one, other) in [
-            (["--commission", "3 EUR"], ["--commission", "3.00 EUR"]),
-            (
-                ["--commission-rate", "0.00003"],
-                ["--commission-rate", "0.000030"],
-            ),
-            (
-                ["--commission-per-quantity", "0.035 USD"],
-                ["--commission-per-quantity", "0.0350 USD"],
-            ),
-        ] {
-            let commission = |flags: [&'static str; 2]| {
-                parse_backtest(&backtest_with(&flags))
-                    .unwrap()
-                    .commission
-                    .commission()
-            };
-            assert_eq!(commission(one), commission(other), "{one:?} {other:?}");
-        }
-    }
-
-    /// A model backtest's dataset runs are at its config's commission and
-    /// balance: it takes no balance of theirs.
-    #[rstest]
-    fn a_backtest_takes_no_dataset_balance() {
-        let mut argv = backtest_required();
-        argv.extend(["--dataset-balance", "10000000 EUR"]);
-        let err = parse_backtest(&argv).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
-    }
-
-    /// Every subcommand takes the strategy first, by its command-line
-    /// name: without one, or with a name no strategy has, it is refused.
     #[rstest]
     fn every_subcommand_takes_the_strategy_by_name() {
         let backtest = backtest_required();
@@ -1361,19 +1051,6 @@ mod tests {
                     "{subcommand} {name}"
                 );
             }
-            let err = parse_command(subcommand, &argv[1..]).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::MissingRequiredArgument,
-                "{subcommand}: {err}"
-            );
-            let unknown = [&["EMA_CROSS"][..], &argv[1..]].concat();
-            let err = parse_command(subcommand, &unknown).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::InvalidValue,
-                "{subcommand}: {err}"
-            );
         }
     }
 }

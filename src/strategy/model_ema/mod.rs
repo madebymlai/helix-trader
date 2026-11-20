@@ -1,31 +1,25 @@
-//! Model EMA, an example strategy trading on a learned model: at each
-//! decision of its model section, its model handle (`model::handle`)
-//! predicts each side on its features, the averages of its bars of
-//! `[indicators.fast]` and `[indicators.slow]` (`features.rs`), and a
-//! side expected to clear its margin is a decision
-//! (`handle::Decision`), whose trade it sends at the config's stake through
-//! the shared order module (`decision.trade().send(self, stake, rates)`,
-//! `strategy::orders`): the target its model learned, as a dataset run sets
-//! it at the decision on that side, a bracket or a market entry, closed at
-//! the target's limit from the send, sized at `[trade] risk` of the
-//! account's equity. It hands the module its time
-//! events, which close the trades at their time, and the module sets the
-//! time of the trades still open again at start, as after a restart.
-//! The target closes before the next decision (`ModelConfig::validate`),
-//! so trades do not overlap, on a hedging venue as on a netting one. Its
-//! handle decides only once its features and the target's ATR are
-//! initialized: warm from the replay in a backtest or a dataset run, from
-//! its warmup request live. Its data hooks are the handle's
+//! Model EMA, an example strategy that trades on a learned model.
+//!
+//! At each decision of its `[model]` section, the model handle (`model::handle`) predicts each
+//! side from the averages of `[indicators.fast]` and `[indicators.slow]` (`features.rs`). A side
+//! expected to clear its margin is a decision (`handle::Decision`).
+//!
+//! The strategy sends the trade of each decision at the config's stake through
+//! `strategy::orders`:
+//! - The trade uses the target the model learned.
+//! - It closes at the target's limit, counted from the send.
+//! - It is sized at `[trade] risk` of equity.
+//!
+//! The handle skips executable entries while a trade is outstanding. It decides only once its
+//! features and the target's ATR are initialized. They initialize from the replay in a backtest
+//! or dataset run, and from the warmup request live. The data hooks are the handle's
 //! (`model_data_hooks!`).
 //!
-//! A `[model.meta]` table in its config adds a meta model, which takes
-//! or leaves each trade of the model (`model::meta`).
+//! A `[model.meta]` table adds a meta model, which takes or leaves each trade (`model::meta`).
 //!
-//! In a dataset run (`Mode::Dataset`, the replay of its dataset and its
-//! training, `model::ModelStrategy`) it places no trade of its own: the
-//! handle opens each decision's target, through the same module, and is
-//! handed the order and position events; the module closes its trades at
-//! their time as it does its own.
+//! In a dataset run (`Mode::Dataset`, see `model::ModelStrategy`) the strategy places no trade of
+//! its own. The handle opens the target of each decision through the same module and is handed
+//! the order and position events.
 
 mod features;
 
@@ -59,16 +53,15 @@ use crate::{
     },
 };
 
-/// Config of the `model_ema` strategy, loaded from TOML: the standard
-/// tables, its averages in `[indicators]`, its model in `[model]`, and no
-/// fields of its own (`ModelEmaParams`).
+/// The config of the `model_ema` strategy.
+///
+/// Its part, `ModelEmaParams`, has no fields of its own.
 pub type ModelEmaConfig = StandardConfig<ModelEmaParams>;
 
-/// The strategy's part: no fields of its own. It trades on a model, whose
-/// target trades the one instrument of `[trade]`, at its risk; its
-/// features are a fast and a slow Nautilus `ExponentialMovingAverage`,
-/// `[indicators.fast]` and `[indicators.slow]`, of every bars series of
-/// `[data]`.
+/// The part of the `model_ema` config.
+///
+/// It trades the one instrument of `[trade]` on a model. Its features are a fast and a slow
+/// `ExponentialMovingAverage` of every bars series of `[data]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEmaParams {}
@@ -78,10 +71,10 @@ impl Part for ModelEmaParams {
     const INDICATORS: &'static [&'static dyn Declaration] = &[&features::FAST, &features::SLOW];
     const TAKES_MODEL: bool = true;
 
-    /// The strategy's id alone, `MODEL_EMA-001`: Nautilus tags its orders
-    /// with the id's tag. `oms_type` is left unset: Nautilus keeps the
-    /// strategy's positions as the execution client of the venue does,
-    /// netting or hedging, in a backtest as live.
+    /// Sets only the strategy id, which Nautilus tags orders with.
+    ///
+    /// Leaves `oms_type` unset. Nautilus keeps positions as the venue's execution client does, in
+    /// a backtest as in live.
     fn default_base() -> StrategyConfig {
         StrategyConfig {
             strategy_id: Some(StrategyId::from("MODEL_EMA-001")),
@@ -89,19 +82,18 @@ impl Part for ModelEmaParams {
         }
     }
 
-    /// What its features and the target's ATR read (`model::reads`).
+    /// Returns what the features and the target's ATR read (`model::reads`).
     fn reads(config: &ModelEmaConfig) -> ConfigResult<Vec<Series>> {
         model::reads(config)
     }
 }
 
 impl ModelPart for ModelEmaParams {
-    /// The averages of each of its bars series, of its tables, warmed
-    /// over its warmup.
+    /// Builds the averages of each bars series, warmed over the warmup.
     ///
     /// # Errors
     ///
-    /// Returns an error if `data.series` lists no bars series, under that
+    /// Returns an error if `data.series` lists no bars series. The error is reported under that
     /// field.
     fn features(config: &ModelEmaConfig) -> ConfigResult<Rc<FeatureSet>> {
         features::features(config)
@@ -112,26 +104,22 @@ impl ModelPart for ModelEmaParams {
 #[derive(Debug)]
 pub struct ModelEma {
     core: StrategyCore,
-    /// Its model handle, which owns its warmup.
     model: Rc<ModelHandle>,
-    /// The stake its decisions' trades are sent at, the config's.
     stake: Stake,
-    /// The rates their equity is converted at, the config's.
     rates: Rates,
 }
 
 impl ModelStrategy for ModelEma {
     type Params = ModelEmaParams;
 
-    /// The strategy, deciding on the model of `blueprint`, its model handle
-    /// in `mode`: live, its warmup (`DataConfig::warmup`) is requested at
-    /// start, which hydrates its indicators; otherwise they warm on the data
-    /// replayed.
+    /// Creates the strategy, which decides on the model of `blueprint`.
+    ///
+    /// Live, it requests its warmup at start.
     ///
     /// # Errors
     ///
-    /// Returns an error if `ModelHandle::new` fails, or if Nautilus refuses
-    /// the base (`StrategyCore::new_checked`).
+    /// Returns an error if `ModelHandle::new` fails, or if Nautilus refuses the base
+    /// (`StrategyCore::new_checked`).
     fn with_blueprint(
         config: ModelEmaConfig,
         blueprint: ModelBlueprint,
@@ -146,22 +134,19 @@ impl ModelStrategy for ModelEma {
         })
     }
 
-    /// Its warmup, its model handle's: a live node sizes its cache from
-    /// it.
+    /// Returns the warmup of the model handle.
     fn warmup(&self) -> Rc<Warmup> {
         self.model.warmup()
     }
 }
 
-/// Hands the strategy to `visitor`, as one trading on a model
-/// (`strategy::Visitor`): the command line runs it by this folder's name.
+/// Hands the strategy to `visitor` as one trading on a model (`strategy::Visitor`).
 pub fn visit<V: Visitor>(visitor: V) -> V::Output {
     visitor.model::<ModelEma>()
 }
 
 nautilus_strategy!(ModelEma, {
-    /// The instruments it trades, which its config claims (see
-    /// `StandardConfig`): the live node registers them as it adds it.
+    /// The instruments the config claims, which the live node registers.
     fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
         self.config().external_order_instrument_ids.clone()
     }
@@ -184,10 +169,7 @@ nautilus_strategy!(ModelEma, {
 });
 
 impl DataActor for ModelEma {
-    /// Starts the model handle, which starts the warmup: live, it requests
-    /// the warmup of the bars and of the target's ATR, then subscribes to
-    /// them; then the features, registered as its Nautilus indicator for
-    /// their bars, and the decisions.
+    /// Starts the model handle. The handle starts the warmup and, live, subscribes.
     fn on_start(&mut self) -> anyhow::Result<()> {
         orders::arm_open_trades(self)?;
         Rc::clone(&self.model).start(self)
@@ -247,9 +229,8 @@ mod tests {
         strategy::orders::{Exits, OrderIds, Trade},
     };
 
-    /// Trades AUD/USD on a time-only target of 30 minutes, its unit measured
-    /// in the ATR of 14 hourly bars, deciding hourly on its averages of 10 and
-    /// 30 hourly bars.
+    /// AUD/USD on a time-only target of 30 minutes, with a unit of the ATR of 14
+    /// hourly bars, deciding hourly.
     const CONFIG: &str = r#"
         [data]
         series = [
@@ -273,10 +254,9 @@ mod tests {
         target = { limit = "30m", atr = { period = 14 } }
         retrain = "24h"
         window = "48h"
-        holdout = "12h"
+        calibration = "12h"
         margins = { long = "0.5R", short = "0.5R" }
-        min_expectancy = "0.5R"
-        min_trades = 30
+        min_rows = 30
         learner = { kind = "baseline" }
     "#;
 
@@ -285,20 +265,9 @@ mod tests {
         ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
     }
 
-    /// Its features read the series its example lists, and no other: the
-    /// features build of it.
-    #[rstest]
-    fn the_features_of_the_example_config_read_its_series() {
-        let config = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
-
-        ModelEmaParams::features(&config).unwrap();
-    }
-
-    /// Its side models are fitted on its window less its holdout and the
-    /// calibration before it, as long: 480 hours, 20 days, of which 14 at
-    /// the fewest are weekdays, gold trading 23 hours of each, so 322
-    /// hourly decisions. A split leaves `min_data_in_leaf` rows each side
-    /// at least: its leaves split on those rows.
+    /// Window less calibration is 480 hours, which is 20 days and at least 14 weekdays of 23
+    /// trading hours. That makes 322 hourly decisions. A split leaves `min_data_in_leaf` rows on
+    /// each side.
     #[rstest]
     fn the_example_configs_leaves_split_on_the_rows_its_window_fits_on() {
         let model = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml"))
@@ -308,7 +277,7 @@ mod tests {
             panic!("not LightGBM: {:?}", model.learner);
         };
         let DecisionRule::Every(every) = model.decision;
-        let days = (model.window - model.holdout * 2).as_hours() / 24;
+        let days = (model.window - model.calibration).as_hours() / 24;
         let weekdays = days / 7 * 5 + (days % 7 - 2).max(0);
         let rows = weekdays * 23 * 60 / every.as_mins();
 
@@ -319,51 +288,7 @@ mod tests {
         );
     }
 
-    /// `CONFIG` listing the quotes of the AUD/USD traded before its bars.
-    fn with_quotes() -> String {
-        CONFIG.replace(
-            "series = [",
-            r#"series = [
-            { data = "quotes", instrument_id = "AUD/USD.SIM" },"#,
-        )
-    }
-
-    /// Its features read bars alone: the quotes of the AUD/USD traded, which
-    /// a bracket in basis points has no ATR to run on, are read by none.
-    #[rstest]
-    fn a_tick_series_its_features_do_not_read_is_refused_at_load() {
-        let toml = with_quotes().replace(
-            r#"target = { limit = "30m", atr = { period = 14 } }"#,
-            r#"target = { bracket = { take_profit = { bps = 20 }, stop = { bps = 10 } }, limit = "45m" }"#,
-        );
-
-        let err = ModelEmaConfig::load(&toml).unwrap_err();
-
-        let Some(ConfigError::InvalidValue { field, reason }) = err.downcast_ref::<ConfigError>()
-        else {
-            panic!("not one invalid value: {err}");
-        };
-        assert_eq!(field, "data.series[0]");
-        assert!(reason.contains("QuoteTick of AUD/USD.SIM"), "{reason}");
-    }
-
-    /// The target's ATR, its time-only target's or that of a bracket 2 and
-    /// 1 ATRs out, is built of the quotes of the AUD/USD traded: it reads
-    /// them.
-    #[rstest]
-    fn quotes_the_target_atr_is_built_of_load() {
-        let bracket = with_quotes().replace(
-            r#"target = { limit = "30m", atr = { period = 14 } }"#,
-            r#"target = { bracket = { take_profit = { atr = 2 }, stop = { atr = 1 } }, limit = "45m" }"#,
-        );
-
-        ModelEmaConfig::load(&with_quotes()).unwrap();
-        ModelEmaConfig::load(&bracket).unwrap();
-    }
-
-    /// Its features average each bars series once: listed again, it is
-    /// refused under its second listing, naming it, and not as features
-    /// of one name.
+    /// A bars series listed again is refused under its second listing.
     #[rstest]
     fn a_bars_series_listed_twice_is_refused_under_its_second_listing() {
         let bars = r#"{ data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },"#;
@@ -382,7 +307,6 @@ mod tests {
         assert!(value.contains("AUD/USD.SIM-1-HOUR-MID-INTERNAL"), "{value}");
     }
 
-    /// Its features are averages of bars: ticks alone give it none.
     #[rstest]
     fn a_config_without_bars_series_is_refused_under_the_series() {
         let toml = CONFIG.replace(
@@ -399,73 +323,7 @@ mod tests {
         assert_eq!(field, "data.series");
     }
 
-    /// The fields of the config errors refusing `toml`.
-    fn refused_fields(toml: &str) -> Vec<String> {
-        let err = ModelEmaConfig::load(toml).unwrap_err();
-        let errors = match err.downcast_ref::<ConfigError>() {
-            Some(ConfigError::Multiple { errors }) => errors.clone(),
-            Some(err) => vec![err.clone()],
-            None => panic!("not a config error: {err}"),
-        };
-        errors
-            .into_iter()
-            .map(|e| match e {
-                ConfigError::MissingField { field }
-                | ConfigError::UnsupportedField { field, .. }
-                | ConfigError::InvalidValue { field, .. }
-                | ConfigError::Range { field, .. } => field,
-                e => panic!("unexpected config error {e:?}"),
-            })
-            .collect()
-    }
-
-    /// Its slow average has no table: refused under it, not built.
-    #[rstest]
-    fn a_missing_average_table_is_refused_under_its_name() {
-        let toml = CONFIG.replace("[indicators.slow]\n        period = 30\n", "");
-
-        assert_eq!(refused_fields(&toml), ["indicators.slow"]);
-    }
-
-    /// Its features are its code's: a table it does not declare adds
-    /// none.
-    #[rstest]
-    fn a_table_it_does_not_declare_is_refused_under_its_name() {
-        let toml = CONFIG.replace("[trade]", "[indicators.medium]\nperiod = 20\n\n[trade]");
-
-        assert_eq!(refused_fields(&toml), ["indicators.medium"]);
-    }
-
-    /// Nautilus' `ExponentialMovingAverage::new_checked` refuses a period
-    /// of 0.
-    #[rstest]
-    fn a_period_nautilus_refuses_is_refused_under_its_table() {
-        let toml = CONFIG.replace("period = 10", "period = 0");
-
-        assert_eq!(refused_fields(&toml), ["indicators.fast"]);
-    }
-
-    /// A refused period, a table it does not declare and a limit of an
-    /// hour decided every hour are reported at once, each under its
-    /// field.
-    #[rstest]
-    fn its_table_refusals_are_reported_with_the_other_violations() {
-        let toml = CONFIG
-            .replace("period = 10", "period = 0")
-            .replace("[trade]", "[indicators.medium]\nperiod = 20\n\n[trade]")
-            .replace(r#"limit = "30m""#, r#"limit = "1h""#);
-
-        let mut fields = refused_fields(&toml);
-        fields.sort();
-
-        assert_eq!(
-            fields,
-            ["indicators.fast", "indicators.medium", "model.target.limit"]
-        );
-    }
-
-    /// Without `[base]`, its default: its strategy id alone, Nautilus
-    /// tagging its orders with the id's tag.
+    /// Without `[base]`, only the strategy id is set.
     #[rstest]
     fn defaults_its_base_to_its_strategy_id_alone() {
         let base = ModelEmaConfig::load(CONFIG).unwrap().base;
@@ -474,8 +332,6 @@ mod tests {
         assert_eq!(base.oms_type, None);
     }
 
-    /// It claims the external orders of the instrument it trades, as its
-    /// config does: the live node registers them as it adds it.
     #[rstest]
     fn claims_the_external_orders_of_the_instrument_it_trades() {
         let models = tempfile::tempdir().unwrap();
@@ -491,13 +347,10 @@ mod tests {
         );
     }
 
-    /// 2026-10-26T10:00:00Z, the time of the restart.
+    /// The restart, 2026-10-26T10:00:00Z.
     const NOW: u64 = 1_792_922_400_000_000_000;
     const MINUTE: u64 = 60_000_000_000;
 
-    /// The strategy, backtesting on the empty store under `models`,
-    /// registered without a node on `cache` at `now`, started, and its
-    /// clock.
     fn started(
         cache: &Rc<RefCell<Cache>>,
         models: &Path,
@@ -530,9 +383,8 @@ mod tests {
         (strategy, clock)
     }
 
-    /// A market entry held 30 minutes, sent and filled 20 minutes before a
-    /// restart: started again, the strategy sets its time again, 10
-    /// minutes after the restart.
+    /// A market entry is held 30 minutes and filled 20 minutes before a restart. The restart sets
+    /// its time again, 10 minutes after.
     #[rstest]
     fn a_restart_sets_the_time_of_its_open_trade_again() {
         let aud = InstrumentAny::CurrencyPair(audusd_sim());

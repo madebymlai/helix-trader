@@ -28,7 +28,7 @@ Test layers escalate in parallel. Start at the lowest layer that proves what mat
 | Fuzz test            | Untrusted or adversarial bytes cross an adapter's parser or decoder                |
 | Live acceptance test | Behavior depends on a venue's contract, on its demo or paper account               |
 
-Helix has no property or fuzz harness yet: their rows record when to add one.
+Helix has no fuzz harness yet, its row recording when to add one, and no `proptest` yet: its one property test, the warmup merge's (`strategy::warmup::merge`), draws its cases from a seeded generator (`fastrand`, already in the tree), each failure naming the seed that reproduces it.
 
 ### Projection rule
 
@@ -91,7 +91,7 @@ Each kind of test observes helix at one seam, from the outermost in:
 
 A behavior that passes through Nautilus, a fill, a warmup, a route, a bar it builds, is tested through Nautilus' real engines, cache and clock, the stand-ins sitting at the venue alone. A command's own work, reading a config, refusing a run, printing its results, is tested through the binary.
 
-Expected values are worked from outside the code, never laundered: by hand, from the venue's or Nautilus' documentation, or from a captured venue payload. The fixture catalog's levels are chosen so that a crossover's trades, times and prices follow on paper, and each test's doc comment shows the work. A snapshot holds an output too wide to work by hand, as the golden rows do (`tests/backtest/backtest_golden_rows.rs`), and changes only on purpose: the version it is keyed by is bumped, the snapshot written again, and the commit says why the output moved.
+Expected values are worked from outside the code, never laundered: by hand, from the venue's or Nautilus' documentation, or from a captured venue payload. The fixture catalog's levels are chosen so that a crossover's trades, times and prices follow on paper. A snapshot holds an output too wide to work by hand, as the golden rows do (`tests/backtest/backtest_golden_rows.rs`), and changes only on purpose: the version it is keyed by is bumped, the snapshot written again, and the commit says why the output moved.
 
 ## Live tests
 
@@ -110,7 +110,8 @@ CI runs the suite with `cargo nextest run --workspace --profile ci` and the doc 
 ## Test style
 
 - Name a test after the behavior it exercises, as a sentence (`a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refused`).
-- Write a doc comment when it clarifies the setup, the scenario or the expected values.
+- Add doc comments when they clarify setup, scenarios, or expectations.
+- Explain an integration test file's scenario and fixture once, in its `//!` module doc. A test's own doc comment says only what it adds.
 - Use distinct, non-default inputs and exact expected values, and assert every stable field.
 - Group the assertions after setup and actions, unless the test checks stepwise state changes.
 - Use `unwrap`, `expect`, `panic!` and `assert!` freely: clarity outranks defensive handling in a test.

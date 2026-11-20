@@ -1,7 +1,8 @@
-//! A tick into Nautilus data, at the instrument's precision: a series'
-//! into a quote, an option contract's into a trade. LSE sends prices and
-//! sizes as doubles, each converted once through its shortest decimal
-//! form, which must fit the precision, as an export's are.
+//! Turns a tick into Nautilus data at the instrument's precision. A series' tick becomes a quote,
+//! and an option contract's tick becomes a trade.
+//!
+//! LSE sends prices and sizes as doubles. The parser converts each one once, through its shortest
+//! decimal form, which must fit the precision. Exports convert the same way.
 
 use anyhow::Context;
 use jiff::Timestamp;
@@ -16,15 +17,14 @@ use nautilus_model::{
 use super::messages::LseTick;
 use crate::http::parse::{TradeIds, decimal};
 
-/// `tick` as a quote of `instrument_id`: its bid and ask at
-/// `price_precision`, with no sizes, LSE's socket ticks carrying none, at
-/// `size_precision`; stamped at LSE's time of it (`ts_event`) and at
-/// `ts_init`.
+/// Returns `tick` as a quote of `instrument_id` at the given precisions, with zero sizes.
+///
+/// LSE's socket ticks carry no sizes.
 ///
 /// # Errors
 ///
-/// Returns an error if the tick has no bid or ask, if either has more
-/// decimals than `price_precision`, or if its time is no timestamp.
+/// Returns an error if the tick has no bid or ask, if either has more decimals than
+/// `price_precision`, or if its time is no timestamp.
 pub fn parse_quote(
     tick: &LseTick,
     instrument_id: InstrumentId,
@@ -51,17 +51,15 @@ pub fn parse_quote(
     )
 }
 
-/// `tick`, an option contract's, as a trade of `instrument_id`: its price
-/// at `price_precision` and its volume, the trade's size, at
-/// `size_precision`, with no aggressor side, LSE sending none, and the id
-/// `ids` gives it, as an export's trade gets one; stamped at LSE's time of
-/// it (`ts_event`) and at `ts_init`.
+/// Returns `tick`, an option contract's tick, as a trade of `instrument_id` sized by its volume.
+///
+/// The trade has no aggressor side, because LSE sends none. Its id comes from `ids`, as an
+/// export's trade id does.
 ///
 /// # Errors
 ///
-/// Returns an error if the tick has no price, no volume or a volume of 0,
-/// a quote's, if its price or volume has more decimals than its precision,
-/// or if its time is no timestamp.
+/// Returns an error if the tick has no price, no volume or a volume of 0 (a quote's), if its price
+/// or volume has more decimals than its precision, or if its time is no timestamp.
 pub fn parse_trade(
     tick: &LseTick,
     instrument_id: InstrumentId,
@@ -93,7 +91,6 @@ pub fn parse_trade(
     )
 }
 
-/// LSE's time of `tick`.
 fn ts_event(tick: &LseTick) -> anyhow::Result<UnixNanos> {
     let at: Timestamp = tick
         .ts
@@ -129,8 +126,6 @@ mod tests {
         UnixNanos::from(time.parse::<Timestamp>().unwrap())
     }
 
-    /// The first tick captured: GOLD.F at 16:44:55.499567 on 13 November
-    /// 2026, bid 3888.0, ask 3888.2, price 3888.0, volume 1.
     #[rstest]
     fn a_tick_is_a_quote_of_its_bid_and_ask_with_no_sizes_at_lse_s_time() {
         let received = at("2026-11-13T16:44:55.8Z");
@@ -158,9 +153,6 @@ mod tests {
         );
     }
 
-    /// The forms LSE's documentation gives of its feeds' times: commodities'
-    /// with a space, forex majors' to the nanosecond in Z, UK stocks' to
-    /// the second.
     #[rstest]
     #[case("2026-10-23 20:59:56.585500+00:00", "2026-10-23T20:59:56.5855Z")]
     #[case("2026-10-23T20:59:05.029000000Z", "2026-10-23T20:59:05.029Z")]
@@ -183,7 +175,6 @@ mod tests {
         assert_eq!(quote.ts_event, at(utc));
     }
 
-    /// Rounding it would change LSE's price.
     #[rstest]
     fn a_price_finer_than_the_instrument_s_precision_is_refused() {
         let tick = LseTick {
@@ -204,7 +195,6 @@ mod tests {
         assert!(err.contains("3888.25"), "{err}");
     }
 
-    /// The `n`th option tick of LSE's documentation's chain of AAPL.
     fn option_tick(n: usize) -> LseTick {
         let text = WS_TICKS_AAPL_OPTIONS.lines().nth(n).unwrap();
         let LseWsFrame::Tick(tick) = serde_json::from_str(text).unwrap() else {
@@ -224,9 +214,6 @@ mod tests {
         )
     }
 
-    /// The first, a trade of AAPL's 355 call of 1 contract at 6.70 at
-    /// 14:30:00.816861166 on 12 November 2026, as LSE exported it, which
-    /// its export's tick slice holds first too: the same trade, the same id.
     #[rstest]
     fn an_option_tick_is_a_trade_of_its_price_and_volume_with_no_aggressor_at_lse_s_time() {
         let exported = parse_trade_slice(
@@ -254,9 +241,8 @@ mod tests {
         assert_eq!(exported.ts_event, trade.ts_event);
     }
 
-    /// Two trades alike, of one time, price and size, as OPRA reports a
-    /// contract's fills of one order, keep ids apart, and the same trades
-    /// get the same ids again.
+    /// Trades with the same time, price and size get distinct ids, as OPRA reports one order's
+    /// fills.
     #[rstest]
     fn trades_alike_get_ids_of_their_own_and_the_same_ones_each_time() {
         let tick = option_tick(0);
@@ -272,8 +258,8 @@ mod tests {
         assert_eq!(ids, ids_of());
     }
 
-    /// Its volume is the trade's size, 0 on a quote (LSE's WebSocket
-    /// documentation, "The tick"), which Nautilus' trade cannot have.
+    /// The volume is 0 on a quote (LSE's WebSocket documentation, "The tick"), which Nautilus'
+    /// trade cannot have.
     #[rstest]
     #[case::of_no_volume(None)]
     #[case::of_volume_zero(Some(0.0))]
@@ -290,7 +276,6 @@ mod tests {
         assert!(err.contains("AAPL261120C00355000"), "{err}");
     }
 
-    /// Rounding it would change LSE's price.
     #[rstest]
     fn an_option_price_finer_than_the_contract_s_precision_is_refused() {
         let tick = LseTick {

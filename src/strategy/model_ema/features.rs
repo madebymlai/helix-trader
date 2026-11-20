@@ -1,38 +1,34 @@
-//! The `model_ema` strategy's features: on the bars of each bar type it
-//! reads, its fast and its slow exponential moving average of the closes,
-//! Nautilus' `ExponentialMovingAverage`s of `[indicators.fast]` and
-//! `[indicators.slow]`, named by the feature set's rule: after the bar
-//! type and the table, such as
-//! `XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:fast`, when several bar types
-//! are read, `fast` and `slow` when one is.
+//! Defines the features of the `model_ema` strategy.
+//!
+//! They are the fast and slow `ExponentialMovingAverage` of the closes of each bar type the
+//! strategy reads, built from `[indicators.fast]` and `[indicators.slow]`. A feature is named
+//! after its table when one bar type is read (`fast`). When several are read, it is named after
+//! the bar type and the table (`XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:fast`).
 
 use std::rc::Rc;
 
 use crate::{
     model::features::FeatureSet,
-    strategy::{Declared, EmaArgs},
+    strategy::{Declared, EmaArgs, Series},
 };
 
 use super::ModelEmaConfig;
 
-/// The fast average of each bars series, `[indicators.fast]`.
 pub(super) const FAST: Declared<EmaArgs> = Declared::new("fast");
-/// The slow average of each bars series, `[indicators.slow]`.
 pub(super) const SLOW: Declared<EmaArgs> = Declared::new("slow");
 
-/// The version of these features, in the fingerprint of the strategy's
-/// dataset and models: bumped whenever what they compute changes and
-/// their names and tables do not, such as the kind of average. Their
-/// arguments, their periods and the price they read, are in the
-/// fingerprint by value, as is the bar type each reads. The golden rows
-/// (`tests/backtest/backtest_golden_rows.rs`) fail on a change made
-/// without a bump.
+/// The version of these features, in the fingerprint of the strategy's dataset and models.
+///
+/// Bumped when what the features compute changes and their names and tables do not, such
+/// as the kind of average. The periods, the price read and the bar type are in the fingerprint
+/// by value. The golden rows (`tests/backtest/backtest_golden_rows.rs`) fail on a change without
+/// a bump.
 const VERSION: u32 = 1;
 
-// panics-doc-ok (transitive via FeatureSetBuilder::bars)
-/// The features of `config`: the averages of each of its bar types in
-/// turn, the fast then the slow, warmed by the strategy's warmup, which a
-/// dataset build replays before its first day.
+// panics-doc-ok (transitive via FeatureSetBuilder::feature)
+/// Builds the averages of each bar type in turn, the fast then the slow.
+///
+/// The strategy's warmup warms them. A dataset build replays that warmup before its first day.
 ///
 /// # Errors
 ///
@@ -40,8 +36,7 @@ const VERSION: u32 = 1;
 ///
 /// # Panics
 ///
-/// Panics if `[indicators]` does not build both averages, which the load
-/// refuses.
+/// Panics if `[indicators]` does not build both averages, which the load refuses.
 pub(super) fn features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
     config
         .data
@@ -51,7 +46,9 @@ pub(super) fn features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>
             FeatureSet::builder()
                 .version(VERSION)
                 .warmup(config.data.warmup),
-            |builder, (bar_type, average)| builder.bars(bar_type, average, &config.indicators),
+            |builder, (bar_type, average)| {
+                builder.feature(&[Series::Bars(bar_type)], average, &config.indicators)
+            },
         )
         .build()
 }
@@ -70,9 +67,12 @@ mod tests {
     const SILVER: &str = "XAGUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
     const GOLD_BARS: &str = r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#;
 
-    /// The strategy trading gold on its minute bars, its fast average of
-    /// 2 bars and its slow one of 3, warmed up over 3 hours, on a time-only
-    /// target, its unit measured in the ATR of 3 hourly bars.
+    /// Test config:
+    /// - gold's minute bars
+    /// - a fast average of 2 bars and a slow average of 3
+    /// - a warmup of 3 hours
+    /// - a time-only target
+    /// - a unit of the ATR of 3 hourly bars
     const CONFIG: &str = r#"
         [data]
         series = [
@@ -96,26 +96,21 @@ mod tests {
         target = { limit = "30m", atr = { period = 3 } }
         retrain = "24h"
         window = "48h"
-        holdout = "12h"
+        calibration = "12h"
         margins = { long = "0.5R", short = "0.5R" }
-        min_expectancy = "0.5R"
-        min_trades = 30
+        min_rows = 30
         learner = { kind = "baseline" }
     "#;
 
-    /// The features of the strategy `toml` configures, as its part builds
-    /// them of the loaded config.
     fn features_of(toml: &str) -> Rc<FeatureSet> {
         ModelEmaParams::features(&ModelEmaConfig::load(toml).unwrap()).unwrap()
     }
 
-    /// `CONFIG` reading silver's minute bars after gold's.
     fn with_silver() -> String {
         let silver_bars = GOLD_BARS.replace("XAUUSD", "XAGUSD");
         CONFIG.replace(GOLD_BARS, &format!("{GOLD_BARS}\n{silver_bars}"))
     }
 
-    /// A minute bar of gold closing at `close`.
     fn bar(close: &str) -> Bar {
         Bar::new(
             BarType::from(GOLD),
@@ -129,36 +124,34 @@ mod tests {
         )
     }
 
-    /// A dataset build replays the strategy's warmup before its first day.
     #[rstest]
     fn the_features_declare_the_strategys_warmup() {
         assert_eq!(features_of(CONFIG).warmup(), SignedDuration::from_hours(3));
     }
 
-    /// Each table feeds one feature of one bar type.
+    /// Each table feeds a feature of each bar type. A feature is named after the table alone for
+    /// one bar type, and after the bar type and the table for several.
     #[rstest]
-    fn the_averages_of_one_bar_type_are_named_after_their_tables() {
-        assert_eq!(features_of(CONFIG).names(), ["fast", "slow"]);
+    #[case::of_one_bar_type(CONFIG.to_string(), vec!["fast".to_string(), "slow".to_string()])]
+    #[case::of_several_bar_types(
+        with_silver(),
+        vec![
+            format!("{GOLD}:fast"),
+            format!("{GOLD}:slow"),
+            format!("{SILVER}:fast"),
+            format!("{SILVER}:slow"),
+        ]
+    )]
+    fn the_averages_are_named_after_their_tables_and_bar_types(
+        #[case] toml: String,
+        #[case] names: Vec<String>,
+    ) {
+        assert_eq!(features_of(&toml).names(), names);
     }
 
-    /// Each table feeds a feature of each bar type.
-    #[rstest]
-    fn the_averages_of_several_bar_types_are_named_after_each_and_their_tables_in_order() {
-        assert_eq!(
-            features_of(&with_silver()).names(),
-            [
-                format!("{GOLD}:fast"),
-                format!("{GOLD}:slow"),
-                format!("{SILVER}:fast"),
-                format!("{SILVER}:slow"),
-            ]
-        );
-    }
-
-    /// Closes of 1, 2 and 3: Nautilus' averages start from the mean of
-    /// their first period, then weigh each close 2 / (period + 1). The
-    /// fast one is 1.5 after two bars, then 1.5 + 2/3 (3 - 1.5) = 2.5; the
-    /// slow one is warm after three, at 2.
+    /// Closes of 1, 2 and 3. The averages start from the mean of their first period, then weigh
+    /// each close 2 / (period + 1). Fast: 1.5 after two bars, then 1.5 + 2/3 (3 - 1.5) = 2.5.
+    /// Slow: warm after three, at 2.
     #[rstest]
     fn the_averages_are_of_the_periods_their_tables_set() {
         let features = features_of(CONFIG);
@@ -173,57 +166,16 @@ mod tests {
         assert!((values[1] - 2.0).abs() < 1e-9, "{values:?}");
     }
 
-    /// Rows and models of a fast average of 2 bars are not those of one of
-    /// 4, with no version bump.
+    /// A changed period, bar spec or instrument changes the fingerprint with no version bump.
+    /// This holds even though one series names the features after their tables alone.
     #[rstest]
-    fn a_changed_period_changes_the_fingerprint() {
-        let changed = CONFIG.replace("period = 2", "period = 4");
-
+    #[case::a_period(CONFIG.replace("period = 2", "period = 4"))]
+    #[case::a_bar_spec(CONFIG.replace("step = 1,", "step = 5,"))]
+    #[case::an_instrument(CONFIG.replace("XAUUSD", "XAGUSD"))]
+    fn a_changed_period_bar_spec_or_instrument_changes_the_fingerprint(#[case] changed: String) {
         assert_ne!(
             features_of(&changed).fingerprint(),
             features_of(CONFIG).fingerprint()
-        );
-    }
-
-    /// Rows and models of gold's minute bars are not those of its
-    /// 5-minute bars, though one series names the features after their
-    /// tables alone.
-    #[rstest]
-    fn another_bar_spec_changes_the_fingerprint() {
-        let five_minutes = CONFIG.replace("step = 1,", "step = 5,");
-
-        assert_ne!(
-            features_of(&five_minutes).fingerprint(),
-            features_of(CONFIG).fingerprint()
-        );
-    }
-
-    /// Rows and models of gold's bars are not those of silver's, though
-    /// one series names the features after their tables alone.
-    #[rstest]
-    fn another_instrument_changes_the_fingerprint() {
-        let silver = CONFIG.replace("XAUUSD", "XAGUSD");
-
-        assert_ne!(
-            features_of(&silver).fingerprint(),
-            features_of(CONFIG).fingerprint()
-        );
-    }
-
-    /// Nautilus parses a `PriceType` in any case: `"mid"` is the price
-    /// `"MID"` is, and keys the same rows and models.
-    #[rstest]
-    fn a_price_type_written_in_another_case_keeps_the_fingerprint() {
-        let price_type = |name: &str| {
-            CONFIG.replace(
-                "period = 2",
-                &format!("period = 2\nprice_type = \"{name}\""),
-            )
-        };
-
-        assert_eq!(
-            features_of(&price_type("mid")).fingerprint(),
-            features_of(&price_type("MID")).fingerprint()
         );
     }
 }

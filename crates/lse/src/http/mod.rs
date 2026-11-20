@@ -1,10 +1,13 @@
-//! LSE's REST API: the client (`client`), its typed queries (`query`), an
-//! export over any span, asked a UTC day and, past LSE's rows an export, a
-//! half at a time, with the span LSE has not loaded yet (`export`), the
-//! listings of CME contracts in LSE's catalogue (`listing`), LSE's answers
-//! and refusals (`models`, `error`), the parsing of an export's Parquet
-//! file into Nautilus data (`parse`), and the rows of LSE's sources that are
-//! not prices over any window (`rows`).
+//! The client for LSE's REST API.
+//!
+//! The submodules are:
+//! - `client`: the HTTP client.
+//! - `query`: the typed queries.
+//! - `export`: exports over any span.
+//! - `listing`: the listings of CME contracts.
+//! - `models` and `error`: LSE's answers and refusals.
+//! - `parse`: turns an export's Parquet file into Nautilus data.
+//! - `rows`: the rows of LSE's sources that are not prices.
 
 pub mod client;
 pub mod error;

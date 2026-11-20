@@ -26,9 +26,17 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# RELEASES.md records changes and .github/ holds the process, workarounds
-# among their subjects, rather than marking code.
-EXCLUDED = ("crates/lse/docs-snapshot/", ".nautilus-engineering/", ".github/", "RELEASES.md")
+# RELEASES.md records changes, and .github/, docs/architecture.md and
+# docs/documenting-code.md hold the process, workarounds among their subjects,
+# rather than marking code.
+EXCLUDED = (
+    "crates/lse/docs-snapshot/",
+    ".nautilus-engineering/",
+    ".github/",
+    "RELEASES.md",
+    "docs/architecture.md",
+    "docs/documenting-code.md",
+)
 
 # "Temporary" opening a sentence; the other markers in any case.
 MARKER_CASED = re.compile(r"\bTemporary\b")

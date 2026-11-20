@@ -1,15 +1,9 @@
-//! The model section of a strategy's TOML: when the strategy decides, the
-//! target of its decisions, which its model learns, how often a model is
-//! retrained, if ever, and the window it is trained on, the least its
-//! holdout earns to be published, in R, the margins in R its expected R
-//! must clear to trade a side, and its learner; and, optionally, the meta
-//! model filtering its trades.
+//! Holds the model section of a strategy's TOML.
 //!
-//! A strategy has at most two levels of models: the side models of a
-//! `ModelConfig`, and one meta model (`MetaConfig`) deciding whether to
-//! take the trade of the side picked. The types hold no third: a meta
-//! section has no meta section of its own, and writing one is refused at
-//! load as an unknown field.
+//! A strategy has at most two levels of models: the side models of a `ModelConfig`, and one meta
+//! model (`MetaConfig`). The meta model decides whether to take the trade of the picked side. A
+//! meta section has no meta section of its own. Writing one is refused at load as an unknown
+//! field.
 
 use jiff::SignedDuration;
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
@@ -18,7 +12,6 @@ use serde::{Deserialize, de::IgnoredAny};
 use super::{
     dataset::DatasetVenue,
     decide::DecisionRule,
-    holdout::Minimums,
     learner::LearnerConfig,
     schedule::Retrain,
     targets::{Side, Target, TargetConfig},
@@ -30,7 +23,9 @@ use crate::strategy::{
     risk::{R, Risk},
 };
 
-/// A strategy's model, loaded from TOML, such as
+/// A strategy's model.
+///
+/// For example:
 ///
 /// ```toml
 /// [model]
@@ -38,106 +33,81 @@ use crate::strategy::{
 /// target = { bracket = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 } }, limit = "45m" }
 /// retrain = "168h"
 /// window = "720h"
-/// holdout = "120h"
+/// calibration = "120h"
 /// margins = { long = "0.5R", short = "0.5R" }
-/// min_expectancy = "0.1R"
-/// min_trades = 30
+/// min_rows = 300
 /// learner = { kind = "lightgbm" }
 /// dataset = { commission = { rate = "0.00003" }, balance = "10000 USD" }
 /// ```
 ///
-/// Its target `T` is as the TOML has it, a `Target` (a `ModelSection`),
-/// until the section trades the instrument of the strategy's `[trade]`
-/// (`ModelSection::trading`).
+/// The target `T` is a `Target` until `ModelSection::trading`.
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig<T = TargetConfig> {
     /// When the strategy decides.
     pub decision: DecisionRule,
-    /// The target of each decision, read from orders in a dataset run: the
-    /// side models learn the net R of each side of it.
+    /// The target. The side models learn its net R for each side.
     pub target: T,
-    /// How often the model is retrained, such as `"168h"`: at every multiple
-    /// of it since the Unix epoch, in a backtest as live
-    /// (`model::schedule`). Left out, never: each model is trained once and
-    /// kept (`Retrain::Never`).
+    /// How often the model is retrained, at every multiple of the interval since the Unix epoch
+    /// (`model::schedule`).
+    ///
+    /// Left out, the model never retrains (`Retrain::Never`), and each `train --at` trains a model
+    /// set at its time.
     #[serde(default)]
     #[builder(default, into)]
     pub retrain: Retrain,
-    /// How far back from a retrain its rows go, such as `"720h"`.
+    /// How far back from a retrain the rows go.
     pub window: SignedDuration,
-    /// The last part of the window the model is scored on and not fitted
-    /// on, such as `"120h"`.
-    pub holdout: SignedDuration,
-    /// The sides traded, each with the expected net R it trades from.
+    /// The last part of the window. The models are calibrated on it and not fitted on it (`train`).
+    pub calibration: SignedDuration,
+    /// The sides traded, each with its margin.
     pub margins: Margins,
-    /// The least expectancy, the average net R per trade, the trades picked between the
-    /// sides earn on the holdout for the sides' models to be published
-    /// (`holdout`, `train`).
-    pub min_expectancy: R,
-    /// The fewest trades picked between the sides on the holdout for the
-    /// sides' models to be published.
-    pub min_trades: usize,
+    /// The fewest rows of each slice, at least one. A train with fewer fails.
+    pub min_rows: usize,
     /// The learner and its settings.
     pub learner: LearnerConfig,
-    /// The meta model deciding whether to take each trade of this one, a
-    /// `[model.meta]` table; none takes every trade.
+    /// The `[model.meta]` table. It decides whether to take each trade. None takes every trade.
     pub meta: Option<MetaConfig>,
-    /// The venue its dataset runs are made at, such as `{ commission = {
-    /// per_quantity = "0.035 USD" }, balance = "10000 USD" }`: the
-    /// commission their targets are net of, the balance their reference
-    /// stake is of and, optionally, their latency (`latency = "150ms"`). It
-    /// keys the dataset and the stores (`dataset::fingerprint`), so `train`,
-    /// a backtest's retrains and a live node all read the one store of the
-    /// config, whatever a backtest's own commission, balance and latency.
+    /// The venue the dataset runs are made at. It keys the dataset and the stores
+    /// (`dataset::fingerprint`). So `train`, a backtest and a live node read the one store,
+    /// whatever the commission, balance and latency of the backtest.
     pub dataset: DatasetVenue,
 }
 
-/// A meta model: on each decision that picks a side, the realized net R of
-/// that side's trade, the target on it, learned from the sides' features,
-/// the side picked and the decision's calibrated level and side call. It is
-/// retrained on the sides' schedule, right after them, or, the sides never
-/// retrained, trained once and kept.
+/// A meta model.
 ///
-/// In the TOML, a probability `threshold` or a `size` is refused as the
-/// section is parsed, saying what takes its place (`MetaFields`).
+/// On each decision that picks a side, it learns the realized net R of that side's trade. It
+/// learns from the sides' features, the side picked, and the calibrated level and side call of the
+/// decision. It is retrained right after the sides, or at each `train --at` if they never are.
+///
+/// A probability `threshold` or a `size` is refused at parsing (`MetaFields`).
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(try_from = "MetaFields")]
 pub struct MetaConfig {
-    /// How far back from a retrain its rows go; never before the
-    /// sides' first model, whose predictions the rows need. Never
-    /// retrained, sides trained with their meta, neither in use, are
-    /// trained as of this much before the meta, so their out-of-sample
-    /// decisions over the window are the meta's rows.
+    /// How far back from a retrain its rows go. Its train fits an out-of-fold pair of the sides as
+    /// of this much before. The out-of-sample picks of that pair over the window are the rows.
     pub window: SignedDuration,
-    /// The last part of the window the model is scored on and not fitted
-    /// on.
-    pub holdout: SignedDuration,
-    /// The net R the meta expects of the trade of the side picked, its
-    /// calibrated expected R, from which the trade is taken
-    /// (`holdout::MetaMargin`).
+    /// The last part of the window. The model is calibrated on it and not fitted on it.
+    pub calibration: SignedDuration,
+    /// The calibrated net R the meta model must expect from the trade (`earnings::MetaMargin`).
     pub margin: R,
-    /// The least expectancy, the average net R per trade, the meta's decisions earn on the
-    /// holdout for its model to be published (`holdout`).
-    pub min_expectancy: R,
-    /// The fewest trades the meta's decisions take on the holdout for its
-    /// model to be published.
-    pub min_trades: usize,
+    /// The fewest rows of each slice, at least one.
+    pub min_rows: usize,
     /// The learner and its settings.
     pub learner: LearnerConfig,
 }
 
-/// The keys of a meta section as the TOML has them: a `MetaConfig`'s, and
-/// those of a meta deciding on a probability, `threshold` and `size`, each
-/// refused naming what takes its place, before a margin is looked for.
+/// The keys of a `MetaConfig`, plus `threshold` and `size`.
+///
+/// Parsing refuses `threshold` and `size`, naming what takes their place, before it looks for a
+/// margin.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MetaFields {
     window: SignedDuration,
-    holdout: SignedDuration,
+    calibration: SignedDuration,
     margin: Option<R>,
-    min_expectancy: R,
-    min_trades: usize,
+    min_rows: usize,
     learner: LearnerConfig,
     threshold: Option<IgnoredAny>,
     size: Option<IgnoredAny>,
@@ -149,10 +119,9 @@ impl TryFrom<MetaFields> for MetaConfig {
     fn try_from(fields: MetaFields) -> Result<Self, String> {
         let MetaFields {
             window,
-            holdout,
+            calibration,
             margin,
-            min_expectancy,
-            min_trades,
+            min_rows,
             learner,
             threshold,
             size,
@@ -173,20 +142,17 @@ impl TryFrom<MetaFields> for MetaConfig {
         }
         Ok(Self {
             window,
-            holdout,
+            calibration,
             margin: margin.ok_or("missing field `margin`")?,
-            min_expectancy,
-            min_trades,
+            min_rows,
             learner,
         })
     }
 }
 
-/// The sides a strategy trades, each with its margin: the expected net R
-/// of a trade, its calibrated expected R, from which the side is traded
-/// (`payoff`), such as `margins = { long = "0.5R", short = "0.5R" }`. A
-/// side without one has no model, trained, stored, scored nor traded:
-/// `{ long = "0.5R" }` is a long-only model.
+/// The sides a strategy trades, each with the calibrated expected net R a trade must clear
+/// (`payoff`). A side without one has no model, so it is not trained, stored, scored or traded.
+/// For example, `{ long = "0.5R" }` is a long-only model.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Margins {
@@ -195,7 +161,7 @@ pub struct Margins {
 }
 
 impl Margins {
-    /// The margin of `side`, if it is traded.
+    /// Returns the margin of `side`, if it is traded.
     #[must_use]
     pub const fn of(&self, side: Side) -> Option<R> {
         match side {
@@ -204,7 +170,7 @@ impl Margins {
         }
     }
 
-    /// The sides traded, the long first, each with its margin.
+    /// Returns the sides traded, the long first, each with its margin.
     pub fn sides(&self) -> impl Iterator<Item = (Side, R)> {
         Side::BOTH
             .into_iter()
@@ -212,14 +178,12 @@ impl Margins {
     }
 }
 
-/// A model section as a strategy's TOML has it: its target trades nothing
-/// yet.
+/// A model section whose target trades nothing yet.
 pub type ModelSection = ModelConfig<Target>;
 
 impl ModelSection {
-    /// The section, its target trading `traded` at `risk`, the config's,
-    /// its reference stake, through `conversions`, the pairs of its
-    /// `[trade]` (`Target::trading`).
+    /// Returns the section with its target trading `traded` at `risk` through `conversions`
+    /// (`Target::trading`).
     #[must_use]
     pub fn trading(
         self,
@@ -232,10 +196,9 @@ impl ModelSection {
             target,
             retrain,
             window,
-            holdout,
+            calibration,
             margins,
-            min_expectancy,
-            min_trades,
+            min_rows,
             learner,
             meta,
             dataset,
@@ -245,10 +208,9 @@ impl ModelSection {
             target: target.trading(traded, risk, conversions),
             retrain,
             window,
-            holdout,
+            calibration,
             margins,
-            min_expectancy,
-            min_trades,
+            min_rows,
             learner,
             meta,
             dataset,
@@ -257,27 +219,27 @@ impl ModelSection {
 }
 
 impl ModelConfig {
-    /// Checks the section against itself and against the strategy's data
-    /// `requirements`.
+    /// Checks the section against the strategy's data `requirements`.
+    ///
+    /// Reports every violation as a `ConfigError` under its field, or as `ConfigError::Multiple`
+    /// if there are several.
     ///
     /// # Errors
     ///
-    /// Returns an error if `[model]` violates a rule, with every violation,
-    /// each Nautilus' `ConfigError` under its field of `[model]`
-    /// (`model.…`), as one `ConfigError::Multiple` if there are several:
-    /// the decision rule, the target or the learner invalid (see
-    /// `DecisionRule::validate`, `TargetConfig::validate`,
-    /// `LearnerConfig::validate`), the retrain interval not positive, the
-    /// target's ATR without bars built from what the strategy reads of the
-    /// instrument traded (see `TargetConfig::atr_bars`) or warming over
-    /// longer than its warmup, the target's limit not shorter than the
-    /// window, the holdout not positive or leaving no fitted row (see
-    /// `validate_window`), the margins naming no side, the minimums invalid
-    /// (see `validate_minimums`), the meta model invalid (see
-    /// `MetaConfig::validate`), the target's limit not shorter than the
-    /// decision cadence (see `validate_cadence`), or shorter than the
-    /// longest its dataset runs take to process a command (see
-    /// `validate_latency`).
+    /// Returns an error if:
+    /// - The decision rule, the target or the learner is invalid (see `DecisionRule::validate`,
+    ///   `TargetConfig::validate`, `LearnerConfig::validate`).
+    /// - The retrain interval is not positive.
+    /// - The target's ATR has no bars built from what the strategy reads for the traded instrument
+    ///   (see `TargetConfig::atr_bars`).
+    /// - The target's ATR warms over longer than its warmup.
+    /// - The target's limit is not shorter than the window.
+    /// - The calibration is not positive or leaves no fit slice (see `validate_window`).
+    /// - The margins name no side.
+    /// - The minimum number of rows is below one (see `validate_min_rows`).
+    /// - The meta model is invalid (see `MetaConfig::validate`).
+    /// - The target's limit is shorter than the longest time its dataset runs take to process a
+    ///   command (see `validate_latency`).
     pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         validate_decisions(
@@ -290,7 +252,7 @@ impl ModelConfig {
         errors.collect(learner(&self.learner, "model.learner"));
         validate_window(
             self.window,
-            self.holdout,
+            self.calibration,
             &self.target,
             "model",
             "model.target.limit",
@@ -300,52 +262,21 @@ impl ModelConfig {
             self.margins.sides().next().is_some(),
             ConfigError::invalid_value("model.margins", "the margins name no side to trade"),
         );
-        validate_minimums(self.minimums(), "model", &mut errors);
+        validate_min_rows(self.min_rows, "model", &mut errors);
         if let Some(meta) = &self.meta {
             meta.validate(&self.target, &mut errors);
         }
-        validate_cadence(self.decision, &self.target, &mut errors);
         validate_latency(&self.target, &self.dataset, &mut errors);
         errors.into_result()
     }
-
-    /// The least a side's model is published with, on its holdout.
-    #[must_use]
-    pub const fn minimums(&self) -> Minimums {
-        Minimums {
-            min_expectancy: self.min_expectancy,
-            min_trades: self.min_trades,
-        }
-    }
 }
 
-/// Pushes onto `errors` the violation of `target` not closing before the
-/// next decision of `rule`: the sides trade the target, and a live
-/// account nets a new trade into one still open, where a dataset run's
-/// hedging venue keeps them apart.
-fn validate_cadence(rule: DecisionRule, target: &TargetConfig, errors: &mut ConfigErrorCollector) {
-    let DecisionRule::Every(cadence) = rule;
-    let limit = target.settles_within();
-    errors.check(
-        limit < cadence,
-        ConfigError::invalid_value(
-            "model.target.limit",
-            format!(
-                "the target's limit {limit:#} is not shorter than the decision cadence \
-                 {cadence:#}: a trade would still be open at the next decision"
-            ),
-        ),
-    );
-}
-
-/// Pushes onto `errors` the violation of the limit of `target` being
-/// shorter than the longest a dataset run at the latency of `dataset`
-/// takes to process a command (`DatasetVenue::delay`): the time alert
-/// would find an entry still on its way to the venue, which Nautilus counts
-/// neither open nor filled (`Order::is_open`), so it would neither cancel
-/// nor close it, and the entry would fill with no time limit. A limit of
-/// that delay exactly is taken: the purge timer bounding it fires once in
-/// every minute, so the entry is processed before the alert.
+/// Refuses a `target` limit shorter than the longest time a dataset run takes to process a command
+/// (`DatasetVenue::delay`).
+///
+/// The time alert would find the entry neither open nor filled (`Order::is_open`), and so not
+/// cancel it. A limit of exactly that delay is taken, because the purge timer fires once a minute
+/// and the entry is processed before the alert.
 fn validate_latency(
     target: &TargetConfig,
     dataset: &DatasetVenue,
@@ -370,38 +301,27 @@ fn validate_latency(
 }
 
 impl MetaConfig {
-    /// Pushes onto `errors` every violation of the meta model against the
-    /// sides' `target`, each under its field of `[model.meta]`
-    /// (`model.meta.…`): the learner invalid (see
-    /// `LearnerConfig::validate`), the target's limit not shorter than the
-    /// window, the holdout not positive or leaving no fitted row, or the
-    /// minimums invalid (see `validate_minimums`).
+    /// Pushes onto `errors` every violation of the meta model against the sides' `target`.
+    ///
+    /// The violations are:
+    /// - An invalid learner.
+    /// - A limit not shorter than the window.
+    /// - A calibration that is not positive or leaves no fit slice.
+    /// - A minimum number of rows below one.
     pub fn validate(&self, target: &TargetConfig, errors: &mut ConfigErrorCollector) {
         errors.collect(learner(&self.learner, "model.meta.learner"));
         validate_window(
             self.window,
-            self.holdout,
+            self.calibration,
             target,
             "model.meta",
             "model.meta.window",
             errors,
         );
-        validate_minimums(self.minimums(), "model.meta", errors);
-    }
-
-    /// The least a meta model is published with, on its holdout.
-    #[must_use]
-    pub const fn minimums(&self) -> Minimums {
-        Minimums {
-            min_expectancy: self.min_expectancy,
-            min_trades: self.min_trades,
-        }
+        validate_min_rows(self.min_rows, "model.meta", errors);
     }
 }
 
-/// Pushes onto `errors` the violations of what every model section has:
-/// the decision `rule`, the `target`, the `retrain` (`Retrain::validate`),
-/// against the strategy's `requirements`.
 fn validate_decisions(
     rule: DecisionRule,
     target: &TargetConfig,
@@ -415,11 +335,11 @@ fn validate_decisions(
     );
     errors.collect(target.validate(rule, requirements));
     retrain.validate(errors);
-    // An ATR without bars is the target's violation, pushed above.
+
+    // An ATR without bars is the target's violation, pushed above
     if let Ok(Some(atr)) = target.atr_bars(rule, requirements) {
-        // A dataset run replays the warmup before its first day, and no
-        // more: an ATR still cold then opens no target at the day's first
-        // decisions, which a longer build would.
+        // A dataset run replays only the warmup before its first day, and a cold ATR opens no
+        // target.
         let warms = i32::try_from(atr.args.period)
             .ok()
             .and_then(|period| atr.bar_type.spec().timedelta().checked_mul(period));
@@ -436,23 +356,19 @@ fn validate_decisions(
     }
 }
 
-/// The violation of `learner`, under `field`.
 fn learner(learner: &LearnerConfig, field: &str) -> ConfigResult<()> {
     learner
         .validate()
         .map_err(|e| ConfigError::invalid_value(field, format!("{e:#}")))
 }
 
-/// Pushes onto `errors`, of `section` (`model` or `model.meta`), the
-/// violations of the limit of `target` not shorter than `window`, under
-/// `limit_field`, or `holdout` not positive or too long to leave a fitted
-/// row before it and the calibration, as long as it, before it (`train`):
-/// the window longer than twice the holdout and the limit. The sides'
-/// window is their target's to fit, and a meta's the meta's own, set
-/// beside the target it shares.
+/// Refuses a `target` limit not shorter than `window`, under `limit_field`.
+///
+/// Also refuses a `calibration` that is not positive or leaves no fit slice (`train`), because a
+/// fitted row settles by the start of the calibration.
 fn validate_window(
     window: SignedDuration,
-    holdout: SignedDuration,
+    calibration: SignedDuration,
     target: &TargetConfig,
     section: &str,
     limit_field: &str,
@@ -467,45 +383,42 @@ fn validate_window(
         ),
     );
     errors.check(
-        holdout.is_positive() && holdout * 2 + limit < window,
+        calibration.is_positive() && calibration + limit < window,
         ConfigError::invalid_value(
-            format!("{section}.holdout"),
+            format!("{section}.calibration"),
             format!(
-                "the holdout {holdout:#} and the calibration as long before it leave no fitted \
-                 row in the window {window:#} after the target's limit {limit:#}"
+                "the calibration {calibration:#} leaves no fit slice in the window {window:#} \
+                 after the target's limit {limit:#}"
             ),
         ),
     );
 }
 
-/// Pushes onto `errors`, under `section` (`model` or `model.meta`), the
-/// violation of the minimum count of trades of `minimums` below one; their
-/// least expectancy, an R, is a finite number as it is parsed.
-fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigErrorCollector) {
+fn validate_min_rows(min_rows: usize, section: &str, errors: &mut ConfigErrorCollector) {
     errors.check(
-        minimums.min_trades >= 1,
+        min_rows >= 1,
         ConfigError::invalid_value(
-            format!("{section}.min_trades"),
-            format!(
-                "the minimum count of trades is {}, not at least one",
-                minimums.min_trades
-            ),
+            format!("{section}.min_rows"),
+            format!("the minimum of rows is {min_rows}, not at least one"),
         ),
     );
 }
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Money};
+    use nautilus_model::{
+        data::{BarType, NautilusDataType},
+        identifiers::InstrumentId,
+        types::Money,
+    };
     use rstest::rstest;
     use rust_decimal::Decimal;
 
     use super::*;
     use crate::{
-        backtest::{Commission, Latency},
+        backtest::Commission,
         model::{
             dataset::DatasetVenue,
-            learner::LightGbmConfig,
             targets::{BracketSpec, DEFAULT_ATR, Distance},
         },
         strategy::{AtrArgs, requirements::TickSeries},
@@ -513,22 +426,18 @@ mod tests {
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
 
-    /// A model section deciding every hour, with a bracket closed after 45
-    /// minutes, on a window of 48 hours, 12 of them held out.
     const SECTION: &str = r#"
         decision = { every = "1h" }
         target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "45m" }
         retrain = "24h"
         window = "48h"
-        holdout = "12h"
+        calibration = "12h"
         margins = { long = "0.5R", short = "0.5R" }
-        min_expectancy = "1R"
-        min_trades = 30
+        min_rows = 30
         learner = { kind = "fake" }
         dataset = { commission = { per_quantity = "0.035 USD" }, balance = "10000 USD" }
     "#;
 
-    /// The section with `line` added or, if its key is there, replacing it.
     fn section(line: &str) -> String {
         let key = line.split('=').next().unwrap().trim();
         let kept = SECTION
@@ -537,30 +446,24 @@ mod tests {
         kept.chain([line]).collect::<Vec<_>>().join("\n")
     }
 
-    /// The requirements of a strategy reading the quotes of `instrument`.
     fn reading(instrument: &str) -> DataRequirements {
         DataRequirements {
             bar_types: vec![],
-            ticks: vec![
-                toml::from_str::<TickSeries>(&format!(
-                    r#"data = "quotes"
-                       instrument_id = "{instrument}""#
-                ))
-                .unwrap(),
-            ],
+            ticks: vec![TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from(instrument),
+            }],
             custom: vec![],
             warmup: SignedDuration::ZERO,
         }
     }
 
-    /// What every test's strategy trades: gold.
     fn gold() -> TradedInstrument {
         TradedInstrument {
             instrument_id: InstrumentId::from(GOLD),
         }
     }
 
-    /// The section of `toml`, trading gold.
     fn parse(toml: &str) -> anyhow::Result<ModelConfig> {
         Ok(toml::from_str::<ModelSection>(toml)?.trading(
             &gold(),
@@ -569,12 +472,10 @@ mod tests {
         ))
     }
 
-    /// The error of loading `toml` for a strategy reading gold, if any.
     fn load(toml: &str) -> anyhow::Result<ModelConfig> {
         load_warming(toml, SignedDuration::ZERO)
     }
 
-    /// `load`, the strategy warming for `warmup`.
     fn load_warming(toml: &str, warmup: SignedDuration) -> anyhow::Result<ModelConfig> {
         let config = parse(toml)?;
         config.validate(&reading_gold_for(warmup))?;
@@ -585,20 +486,17 @@ mod tests {
         format!("{:#}", load(toml).unwrap_err())
     }
 
-    /// The message of the parse error refusing `toml`, no config error, so
-    /// that nothing else of the section was looked at.
+    /// The parse error's message. It is no config error, because nothing else was looked at.
     fn refused_parsing(toml: &str) -> String {
         let err = load(toml).unwrap_err();
         assert!(err.downcast_ref::<ConfigError>().is_none(), "{err:#}");
         format!("{err:#}")
     }
 
-    /// The fields of the config errors refusing `toml`.
     fn refused_fields(toml: &str) -> Vec<String> {
         refused_fields_warming(toml, SignedDuration::ZERO)
     }
 
-    /// `refused_fields`, the strategy warming for `warmup`.
     fn refused_fields_warming(toml: &str, warmup: SignedDuration) -> Vec<String> {
         let err = load_warming(toml, warmup).unwrap_err();
         let errors = match err.downcast_ref::<ConfigError>() {
@@ -633,7 +531,7 @@ mod tests {
             Retrain::Every(SignedDuration::from_hours(24))
         );
         assert_eq!(config.window, SignedDuration::from_hours(48));
-        assert_eq!(config.holdout, SignedDuration::from_hours(12));
+        assert_eq!(config.calibration, SignedDuration::from_hours(12));
         assert_eq!(
             config.margins,
             Margins {
@@ -641,13 +539,7 @@ mod tests {
                 short: Some(R::new(0.5))
             }
         );
-        assert_eq!(
-            config.minimums(),
-            Minimums {
-                min_expectancy: R::new(1.0),
-                min_trades: 30
-            }
-        );
+        assert_eq!(config.min_rows, 30);
         assert_eq!(config.learner, LearnerConfig::Fake {});
     }
 
@@ -656,80 +548,45 @@ mod tests {
         assert!(refused(&section("retrain_every = \"24h\"")).contains("retrain_every"));
     }
 
-    /// One load shows every mistake: a retrain interval not positive is
-    /// reported under `model.retrain`, beside a minimum of no trade.
     #[rstest]
-    fn a_retrain_interval_not_positive_is_refused_with_the_sections_other_violations() {
-        for retrain in ["0h", "-24h"] {
-            let toml = section(&format!(r#"retrain = "{retrain}""#))
-                .replace("min_trades = 30", "min_trades = 0");
+    #[case::nought("0h")]
+    #[case::negative("-24h")]
+    fn a_retrain_interval_not_positive_is_refused_with_the_sections_other_violations(
+        #[case] retrain: &str,
+    ) {
+        let toml =
+            section(&format!(r#"retrain = "{retrain}""#)).replace("min_rows = 30", "min_rows = 0");
 
-            let err = refused(&toml);
-
-            assert!(
-                err.contains("model.retrain") && err.contains("retrain interval"),
-                "{retrain}: {err}"
-            );
-            assert!(err.contains("model.min_trades"), "{retrain}: {err}");
-        }
+        assert_eq!(refused_fields(&toml), ["model.retrain", "model.min_rows"]);
     }
 
-    /// Time only, or a bracket: the target closes after its limit at the
-    /// latest, which the window must hold. Deciding every 72 hours, so that
-    /// the cadence holds these limits and the window alone refuses them, the
-    /// time-only target's ATR of one bar of 72 hours warm over a warmup as
-    /// long.
     #[rstest]
-    fn a_limit_not_shorter_than_the_window_is_refused_under_the_limit() {
-        let warmup = SignedDuration::from_hours(72);
-        for target in [
-            r#"target = { limit = "48h", atr = { period = 1 } }"#,
-            r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "49h" }"#,
-        ] {
-            let toml = section(target).replace(r#"every = "1h""#, r#"every = "72h""#);
-
-            let err = format!("{:#}", load_warming(&toml, warmup).unwrap_err());
-            assert!(err.contains("not shorter than the window"), "{err}");
-            assert_eq!(
-                refused_fields_warming(&toml, warmup),
-                ["model.target.limit", "model.holdout"],
-                "{target}"
-            );
-        }
-    }
-
-    /// Deciding every hour, a bracket closed after an hour, or a time-only
-    /// trade of an hour and a half, its ATR of one hourly bar warm over a
-    /// warmup of an hour, would still be open at the next decision.
-    #[rstest]
-    fn a_limit_not_shorter_than_the_decision_cadence_is_refused_naming_both() {
+    #[case::time_only(r#"target = { limit = "48h", atr = { period = 1 } }"#)]
+    #[case::bracket(
+        r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "49h" }"#
+    )]
+    fn a_limit_not_shorter_than_the_window_is_refused_under_the_limit(#[case] target: &str) {
         let warmup = SignedDuration::from_hours(1);
-        for (target, named) in [
-            (
-                r#"bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "1h""#,
-                "limit 1h",
-            ),
-            (r#"limit = "90m", atr = { period = 1 }"#, "limit 1h 30m"),
-        ] {
-            let toml = section(&format!("target = {{ {target} }}"));
+        let toml = section(target);
 
-            let err = format!("{:#}", load_warming(&toml, warmup).unwrap_err());
-
-            assert!(
-                err.contains(named) && err.contains("cadence 1h"),
-                "{named}: {err}"
-            );
-            assert_eq!(
-                refused_fields_warming(&toml, warmup),
-                ["model.target.limit"],
-                "{named}"
-            );
-        }
+        assert_eq!(
+            refused_fields_warming(&toml, warmup),
+            ["model.target.limit", "model.calibration"]
+        );
     }
 
-    /// A trade closed at its time alone: no exit, and the ATR its unit is
-    /// measured in, of its `atr` table on the decision cadence's bars, as a
-    /// bracket's: 3 hourly bars of gold's mids.
+    #[rstest]
+    #[case::bracket(
+        r#"bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "1h""#
+    )]
+    #[case::time_only(r#"limit = "90m", atr = { period = 1 }"#)]
+    fn a_target_may_reach_or_outlast_the_next_decision(#[case] target: &str) {
+        let warmup = SignedDuration::from_hours(1);
+        let toml = section(&format!("target = {{ {target} }}"));
+
+        load_warming(&toml, warmup).unwrap();
+    }
+
     #[rstest]
     fn a_time_only_target_loads_with_its_atr_and_no_exits() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
@@ -752,111 +609,48 @@ mod tests {
         );
     }
 
-    /// A bracket has both exits: one alone is refused as the section is
-    /// parsed, on its own, a minimum of no trade beside it not reported.
     #[rstest]
-    fn a_take_profit_or_a_stop_alone_is_refused_at_parsing_on_its_own() {
-        for (bracket, missing) in [
-            ("take_profit = { bps = 7.5 }", "stop"),
-            ("stop = { bps = 5 }", "take_profit"),
-        ] {
-            let toml = section(&format!(
-                r#"target = {{ bracket = {{ {bracket} }}, limit = "45m" }}"#
-            ))
-            .replace("min_trades = 30", "min_trades = 0");
+    #[case::take_profit_alone("take_profit = { bps = 7.5 }", "stop")]
+    #[case::stop_alone("stop = { bps = 5 }", "take_profit")]
+    fn a_take_profit_or_a_stop_alone_is_refused_at_parsing_on_its_own(
+        #[case] bracket: &str,
+        #[case] missing: &str,
+    ) {
+        let toml = section(&format!(
+            r#"target = {{ bracket = {{ {bracket} }}, limit = "45m" }}"#
+        ))
+        .replace("min_rows = 30", "min_rows = 0");
 
-            let err = refused_parsing(&toml);
+        let err = refused_parsing(&toml);
 
-            assert!(err.contains(&format!("missing field `{missing}`")), "{err}");
-            assert!(!err.contains("min_trades"), "{err}");
-        }
-    }
-
-    /// A target's exits are in its bracket or nowhere: beside the limit,
-    /// together or one alone, they are unknown fields of the target.
-    #[rstest]
-    fn exits_beside_the_limit_are_refused_as_unknown() {
-        for target in [
-            r#"target = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" }"#,
-            r#"target = { take_profit = { bps = 7.5 }, limit = "45m" }"#,
-            r#"target = { stop = { bps = 5 }, limit = "45m" }"#,
-        ] {
-            let err = refused_parsing(&section(target));
-
-            assert!(err.contains("unknown field"), "{target}: {err}");
-        }
-    }
-
-    /// The two targets and the label chosen among them are gone: each is
-    /// an unknown field, of the section and of the target.
-    #[rstest]
-    fn the_fields_of_two_targets_and_a_label_are_refused_as_unknown() {
-        for (toml, name) in [
-            (section(r#"barrier = { limit = "45m" }"#), "barrier"),
-            (section(r#"horizon = "45m""#), "horizon"),
-            (section(r#"targets = { horizon = "45m" }"#), "targets"),
-            (section(r#"label = "barrier""#), "label"),
-            (
-                section(r#"target = { limit = "45m", barrier = { limit = "45m" } }"#),
-                "barrier",
-            ),
-            (
-                section(r#"target = { limit = "45m", horizon = "45m" }"#),
-                "horizon",
-            ),
-        ] {
-            let err = refused(&toml);
-
-            assert!(err.contains(&format!("unknown field `{name}`")), "{err}");
-        }
+        assert!(err.contains(&format!("missing field `{missing}`")), "{err}");
+        assert!(!err.contains("min_rows"), "{err}");
     }
 
     #[rstest]
-    fn a_target_without_a_limit_is_refused() {
-        let toml =
-            section("target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } } }");
+    #[case::both(
+        r#"target = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" }"#,
+        "stop"
+    )]
+    #[case::take_profit(
+        r#"target = { take_profit = { bps = 7.5 }, limit = "45m" }"#,
+        "take_profit"
+    )]
+    #[case::stop(r#"target = { stop = { bps = 5 }, limit = "45m" }"#, "stop")]
+    fn exits_beside_the_limit_are_refused_as_unknown(#[case] target: &str, #[case] key: &str) {
+        let err = refused_parsing(&section(target));
 
-        let err = refused(&toml);
-
-        assert!(err.contains("missing field `limit`"), "{err}");
-    }
-
-    /// The window of 48 hours holds the holdout, the calibration as long
-    /// before it, and before them a fitted row settled 45 minutes later: 23
-    /// hours of holdout leave one, 24 none.
-    #[rstest]
-    fn a_holdout_leaving_no_fitted_row_before_it_and_its_calibration_is_refused() {
-        for holdout in ["24h", "0h"] {
-            let toml = section(&format!(r#"holdout = "{holdout}""#));
-            assert!(refused(&toml).contains("holdout"), "{holdout}");
-        }
-        assert!(load(&section(r#"holdout = "23h""#)).is_ok());
-    }
-
-    /// A margin is in R: a bare number, a margin in money say, is refused as
-    /// the section is parsed, at its field, saying so.
-    #[rstest]
-    fn a_bare_number_margin_is_refused_at_parsing_saying_it_is_in_r() {
-        for (margins, field) in [
-            (r#"{ long = 0.5, short = "0.5R" }"#, "long = 0.5"),
-            (r#"{ long = "0.5R", short = 1 }"#, "short = 1"),
-        ] {
-            let err = refused_parsing(&section(&format!("margins = {margins}")));
-
-            assert!(err.contains(field) && err.contains("in R"), "{err}");
-        }
+        assert!(err.contains(&format!("`{key}`")), "{err}");
     }
 
     #[rstest]
-    fn a_bare_number_meta_margin_is_refused_at_parsing_saying_it_is_in_r() {
-        let meta = META.replace(r#"margin = "0.25R""#, "margin = 0.25");
+    #[case::to_the_limit("47h15m")]
+    #[case::of_nought("0h")]
+    fn a_calibration_leaving_no_fitted_row_before_it_is_refused(#[case] calibration: &str) {
+        let toml = section(&format!(r#"calibration = "{calibration}""#));
 
-        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
-
-        assert!(
-            err.contains("margin = 0.25") && err.contains("in R"),
-            "{err}"
-        );
+        assert_eq!(refused_fields(&toml), ["model.calibration"]);
+        assert!(load(&section(r#"calibration = "47h""#)).is_ok());
     }
 
     #[rstest]
@@ -865,21 +659,6 @@ mod tests {
         assert!(refused(&section(r#"margins = { both = "0.5R" }"#)).contains("both"));
     }
 
-    /// An R is a finite number: a margin of NaN or infinity is refused as the
-    /// section is parsed.
-    #[rstest]
-    fn a_margin_not_a_finite_number_of_r_is_refused_at_parsing() {
-        for margins in [
-            r#"{ long = "nanR" }"#,
-            r#"{ long = "0.5R", short = "infR" }"#,
-        ] {
-            let err = refused_parsing(&section(&format!("margins = {margins}")));
-
-            assert!(err.contains("not a finite number of R"), "{err}");
-        }
-    }
-
-    /// `{ long = "0.5R" }` is a long-only model: the short is not traded.
     #[rstest]
     fn margins_of_one_side_trade_that_side_alone() {
         let config = load(&section(r#"margins = { long = "0.5R" }"#)).unwrap();
@@ -891,8 +670,6 @@ mod tests {
         assert_eq!(config.margins.of(Side::Short), None);
     }
 
-    /// The section's dataset venue: the commission, balance and latency
-    /// its dataset runs are made at.
     fn dataset_of(line: &str) -> anyhow::Result<DatasetVenue> {
         Ok(load(&section(line))?.dataset)
     }
@@ -912,59 +689,40 @@ mod tests {
     }
 
     #[rstest]
-    fn a_dataset_commission_is_per_order_a_rate_or_per_quantity() {
-        let at = |commission: &str| {
-            dataset_of(&format!(
-                r#"dataset = {{ commission = {{ {commission} }}, balance = "1000 EUR" }}"#
-            ))
-            .unwrap()
-            .commission
-        };
-        assert_eq!(
-            at(r#"per_order = "3 EUR""#),
-            Commission::PerOrder(Money::from("3 EUR"))
-        );
-        assert_eq!(
-            at(r#"rate = "0.0005""#),
-            Commission::Rate(Decimal::new(5, 4))
-        );
-        assert_eq!(
-            at(r#"per_quantity = "0.035 EUR""#),
-            Commission::PerQuantity(Money::from_str_exact("0.035 EUR").unwrap())
-        );
+    #[case::per_order(r#"per_order = "3 EUR""#, Commission::PerOrder(Money::from("3 EUR")))]
+    #[case::rate(r#"rate = "0.0005""#, Commission::Rate(Decimal::new(5, 4)))]
+    #[case::per_quantity(
+        r#"per_quantity = "0.035 EUR""#,
+        Commission::PerQuantity(Money::from_str_exact("0.035 EUR").unwrap())
+    )]
+    fn a_dataset_commission_is_per_order_a_rate_or_per_quantity(
+        #[case] commission: &str,
+        #[case] expected: Commission,
+    ) {
+        let dataset = dataset_of(&format!(
+            r#"dataset = {{ commission = {{ {commission} }}, balance = "1000 EUR" }}"#
+        ))
+        .unwrap();
+
+        assert_eq!(dataset.commission, expected);
     }
 
+    /// Nautilus refuses a negative amount per order or quantity as it builds the fee model. Helix
+    /// refuses a negative rate.
     #[rstest]
-    fn a_section_without_a_dataset_venue_is_refused_at_parsing_naming_it() {
-        let without: String = SECTION
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("dataset"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let err = refused_parsing(&without);
-        assert!(err.contains("dataset"), "{err}");
-    }
+    #[case::per_order(r#"per_order = "-3 USD""#, "greater than or equal to zero")]
+    #[case::rate(r#"rate = "-0.0005""#, "commission rate -0.0005 must not be negative")]
+    #[case::per_quantity(r#"per_quantity = "-0.035 USD""#, "greater than or equal to zero")]
+    fn a_negative_dataset_commission_is_refused_at_parsing(
+        #[case] commission: &str,
+        #[case] reason: &str,
+    ) {
+        let line =
+            format!(r#"dataset = {{ commission = {{ {commission} }}, balance = "1000 USD" }}"#);
 
-    #[rstest]
-    fn a_dataset_commission_of_no_kind_or_two_is_refused_at_parsing() {
-        for commission in ["", r#"rate = "0.0005", per_order = "3 USD""#] {
-            let line =
-                format!(r#"dataset = {{ commission = {{ {commission} }}, balance = "1000 USD" }}"#);
-            assert!(dataset_of(&line).is_err(), "{commission}");
-        }
-    }
+        let err = refused_parsing(&section(&line));
 
-    #[rstest]
-    fn a_negative_dataset_commission_is_refused_at_parsing() {
-        for commission in [
-            r#"per_order = "-3 USD""#,
-            r#"rate = "-0.0005""#,
-            r#"per_quantity = "-0.035 USD""#,
-        ] {
-            let line =
-                format!(r#"dataset = {{ commission = {{ {commission} }}, balance = "1000 USD" }}"#);
-            assert!(dataset_of(&line).is_err(), "{commission}");
-        }
+        assert!(err.contains(reason), "{err}");
     }
 
     #[rstest]
@@ -984,41 +742,32 @@ mod tests {
     }
 
     #[rstest]
-    fn a_dataset_balance_not_positive_is_refused_at_parsing() {
-        for balance in ["0 USD", "-1000 USD"] {
-            let line = format!(
-                r#"dataset = {{ commission = {{ rate = "0.0005" }}, balance = "{balance}" }}"#
-            );
-            let err = format!("{:#}", dataset_of(&line).unwrap_err());
-            assert!(err.contains("balance"), "{balance}: {err}");
-        }
+    #[case::nought("0 USD", "0.00 USD")]
+    #[case::negative("-1000 USD", "-1000.00 USD")]
+    fn a_dataset_balance_not_positive_is_refused_at_parsing(
+        #[case] balance: &str,
+        #[case] refused: &str,
+    ) {
+        let line =
+            format!(r#"dataset = {{ commission = {{ rate = "0.0005" }}, balance = "{balance}" }}"#);
+
+        let err = format!("{:#}", dataset_of(&line).unwrap_err());
+
+        assert!(err.contains(refused), "{err}");
     }
 
-    /// 150 ms, as jiff reads a config's durations: each command of its
-    /// dataset runs reaches their venues 150 ms after it is sent.
     #[rstest]
     fn a_dataset_venue_may_declare_the_latency_of_its_runs() {
-        let at_150ms = Latency::try_from(SignedDuration::from_millis(150)).unwrap();
-        for latency in ["150ms", "0.15s", "PT0.15S"] {
-            let line = format!(
-                r#"dataset = {{ commission = {{ rate = "0.0005" }}, balance = "1000 USD", latency = "{latency}" }}"#
-            );
-            assert_eq!(
-                dataset_of(&line).unwrap().latency,
-                Some(at_150ms),
-                "{latency}"
-            );
-        }
+        let line = r#"dataset = { commission = { rate = "0.0005" }, balance = "1000 USD", latency = "150ms" }"#;
+
+        let latency = dataset_of(line).unwrap().latency;
+
+        assert_eq!(
+            latency.map(|latency| latency.to_string()),
+            Some("150ms".into())
+        );
     }
 
-    /// Nautilus' default: each command reaches the venue as it is sent.
-    #[rstest]
-    fn a_dataset_venue_without_a_latency_has_none() {
-        assert_eq!(load(SECTION).unwrap().dataset.latency, None);
-    }
-
-    /// The section with a bracket closed after `limit`, its dataset runs
-    /// at a latency of `latency`.
     fn at_latency(limit: &str, latency: &str) -> String {
         let target = format!(
             r#"target = {{ bracket = {{ take_profit = {{ bps = 7.5 }}, stop = {{ bps = 5 }} }}, limit = "{limit}" }}"#
@@ -1035,47 +784,50 @@ mod tests {
             .join("\n")
     }
 
-    /// A dataset run processes a command at most its latency and a minute
-    /// after it is sent: a time alert before then can find its entry not
-    /// yet at the venue, neither open nor filled, and leave the entry to
-    /// fill with no time limit. 30 s against 1 m and a minute; 1 m against
-    /// 150 ms and a minute.
     #[rstest]
-    fn a_limit_shorter_than_its_dataset_runs_latency_and_a_minute_is_refused_naming_both() {
-        for (limit, latency) in [("30s", "1m"), ("1m", "150ms")] {
-            let toml = at_latency(limit, latency);
+    #[case::of_half_a_minute("30s", "1m")]
+    #[case::of_a_minute("1m", "150ms")]
+    fn a_limit_shorter_than_its_dataset_runs_latency_and_a_minute_is_refused_naming_both(
+        #[case] limit: &str,
+        #[case] latency: &str,
+    ) {
+        let toml = at_latency(limit, latency);
 
-            assert_eq!(refused_fields(&toml), ["model.target.limit"], "{limit}");
-            let err = refused(&toml);
-            assert!(
-                err.contains(&format!("limit {limit}"))
-                    && err.contains(&format!("latency {latency}")),
-                "{limit} {latency}: {err}"
-            );
-        }
+        assert_eq!(refused_fields(&toml), ["model.target.limit"]);
+        let err = refused(&toml);
+        assert!(
+            err.contains(&format!("limit {limit}")) && err.contains(&format!("latency {latency}")),
+            "{err}"
+        );
     }
 
-    /// 61 s against 1 s and a minute, the shortest limit taken at that
-    /// latency; 45 m against 150 ms.
     #[rstest]
-    fn a_limit_as_long_as_its_dataset_runs_latency_and_a_minute_loads() {
-        for (limit, latency) in [("61s", "1s"), ("45m", "150ms")] {
-            assert!(
-                load(&at_latency(limit, latency)).is_ok(),
-                "{limit} {latency}"
-            );
-        }
+    #[case::the_shortest("61s", "1s")]
+    #[case::of_45_minutes("45m", "150ms")]
+    fn a_limit_as_long_as_its_dataset_runs_latency_and_a_minute_loads(
+        #[case] limit: &str,
+        #[case] latency: &str,
+    ) {
+        assert!(load(&at_latency(limit, latency)).is_ok());
     }
 
-    /// None is left out, not a latency of nothing.
     #[rstest]
-    fn a_dataset_latency_that_is_no_positive_duration_is_refused_at_parsing() {
-        for latency in [r#""-1s""#, r#""0s""#, r#""150""#, "150"] {
-            let line = format!(
-                r#"dataset = {{ commission = {{ rate = "0.0005" }}, balance = "1000 USD", latency = {latency} }}"#
-            );
-            assert!(dataset_of(&line).is_err(), "{latency}");
-        }
+    #[case::negative("-1s", "1s ago")]
+    #[case::nought("0s", "0s")]
+    fn a_dataset_latency_that_is_no_positive_duration_is_refused_at_parsing(
+        #[case] latency: &str,
+        #[case] named: &str,
+    ) {
+        let line = format!(
+            r#"dataset = {{ commission = {{ rate = "0.0005" }}, balance = "1000 USD", latency = "{latency}" }}"#
+        );
+
+        let err = format!("{:#}", dataset_of(&line).unwrap_err());
+
+        assert!(
+            err.contains(&format!("must be positive, not {named}")),
+            "{err}"
+        );
     }
 
     #[rstest]
@@ -1086,117 +838,28 @@ mod tests {
         assert!(err.contains("leverage"), "{err}");
     }
 
-    /// The name the least expectancy had, before it was read as Nautilus'
-    /// expectancy in R: spelled so that a rename of the key leaves it.
-    const OLD_MINIMUM: &str = concat!("min_", "pnl");
-
-    /// The least expectancy is `min_expectancy`: a section of its old name
-    /// is refused, naming the new one.
+    /// The floor is the 20 rows of the adapter's dataset, not the default 200 of a leaf.
     #[rstest]
-    fn the_old_name_of_the_least_expectancy_is_refused_naming_the_new() {
-        let old = SECTION.replace("min_expectancy", OLD_MINIMUM);
+    #[case::of_one_row(1, &["model.learner"])]
+    #[case::of_19_rows(19, &["model.learner"])]
+    #[case::of_20_rows(20, &[])]
+    #[case::of_50_rows(50, &[])]
+    fn lightgbm_leaves_of_fewer_than_20_rows_are_refused(
+        #[case] rows: u32,
+        #[case] refused: &[&str],
+    ) {
+        let toml = section(&format!(
+            r#"learner = {{ kind = "lightgbm", min_data_in_leaf = {rows} }}"#
+        ));
 
-        let err = refused_parsing(&old);
-
-        assert!(
-            err.contains(OLD_MINIMUM) && err.contains("min_expectancy"),
-            "{err}"
-        );
-    }
-
-    /// The meta's too.
-    #[rstest]
-    fn the_old_name_of_the_metas_least_expectancy_is_refused_naming_the_new() {
-        let meta = META.replace("min_expectancy", OLD_MINIMUM);
-
-        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
-
-        assert!(
-            err.contains(OLD_MINIMUM) && err.contains("min_expectancy"),
-            "{err}"
-        );
-    }
-
-    /// The least expectancy is in R: a bare number, a minimum in
-    /// money say, is refused as the section is parsed, at its field, saying
-    /// so.
-    #[rstest]
-    fn a_bare_number_least_expectancy_is_refused_at_parsing_saying_it_is_in_r() {
-        for line in ["min_expectancy = 1.0", "min_expectancy = 1"] {
-            let err = refused_parsing(&section(line));
-
-            assert!(err.contains(line) && err.contains("in R"), "{err}");
-        }
-    }
-
-    #[rstest]
-    fn a_least_expectancy_not_a_finite_number_of_r_is_refused_at_parsing() {
-        for line in [r#"min_expectancy = "nanR""#, r#"min_expectancy = "-infR""#] {
-            let err = refused_parsing(&section(line));
-
-            assert!(err.contains("not a finite number of R"), "{err}");
-        }
-    }
-
-    /// A minimum below nought publishes a model expected to lose a little.
-    #[rstest]
-    fn a_least_expectancy_below_nought_loads_and_no_minimum_trade_is_refused() {
-        assert_eq!(
-            load(&section(r#"min_expectancy = "-0.5R""#))
-                .unwrap()
-                .min_expectancy,
-            R::new(-0.5)
-        );
-        assert_eq!(
-            refused_fields(&section("min_trades = 0")),
-            ["model.min_trades"]
-        );
-    }
-
-    #[rstest]
-    fn a_strategy_sets_each_of_lightgbms_settings() {
-        let config = load(&section(
-            r#"learner = { kind = "lightgbm", num_iterations = 300, learning_rate = 0.02, num_leaves = 15, min_data_in_leaf = 50 }"#,
-        ))
-        .unwrap();
-
-        assert_eq!(
-            config.learner,
-            LearnerConfig::LightGbm(
-                LightGbmConfig::builder()
-                    .num_iterations(300)
-                    .learning_rate(0.02)
-                    .num_leaves(15)
-                    .min_data_in_leaf(50)
-                    .build()
-            )
-        );
-    }
-
-    /// The floor is the adapter's dataset's, 20 rows, not the default of
-    /// 200 rows a leaf: 20 and 50 load.
-    #[rstest]
-    fn lightgbm_leaves_of_fewer_than_20_rows_are_refused() {
-        let lightgbm = |rows: u32| {
-            section(&format!(
-                r#"learner = {{ kind = "lightgbm", min_data_in_leaf = {rows} }}"#
-            ))
+        let fields = match load(&toml) {
+            Ok(_) => vec![],
+            Err(_) => refused_fields(&toml),
         };
 
-        for rows in [1, 19] {
-            assert!(
-                refused(&lightgbm(rows)).contains("min_data_in_leaf"),
-                "{}",
-                refused(&lightgbm(rows))
-            );
-        }
-        for rows in [20, 50] {
-            assert!(load(&lightgbm(rows)).is_ok(), "{rows}");
-        }
+        assert_eq!(fields, refused);
     }
 
-    /// Its harness reads the quotes of what it trades when no series reads
-    /// it.
     #[rstest]
     fn a_traded_instrument_the_strategy_does_not_read_is_no_error() {
         let config = parse(SECTION).unwrap();
@@ -1204,8 +867,6 @@ mod tests {
         config.validate(&reading("EURUSD.ICMARKETS")).unwrap();
     }
 
-    /// A bracket 2 ATRs away in the side's favor, 1.5 against it, its ATR
-    /// `atr`, a table or none.
     fn atr_section(atr: Option<&str>) -> String {
         let atr = atr.map_or_default(|atr| format!(", atr = {atr}"));
         section(&format!(
@@ -1213,8 +874,6 @@ mod tests {
         ))
     }
 
-    /// The requirements of a strategy reading the quotes of gold, warming
-    /// for `warmup`.
     fn reading_gold_for(warmup: SignedDuration) -> DataRequirements {
         DataRequirements {
             warmup,
@@ -1222,34 +881,27 @@ mod tests {
         }
     }
 
-    /// Deciding every hour, the ATR's bars are hours: its default 14 warm
-    /// in 14 hours, 3 in 3. A dataset run, which replays the warmup before
-    /// its first day, would open no target at that day's first decisions
-    /// after a shorter one.
     #[rstest]
-    fn a_target_atr_warming_longer_than_the_warmup_is_refused() {
-        for (atr, hours) in [(None, 14), (Some("{ period = 3 }"), 3)] {
-            let config = parse(&atr_section(atr)).unwrap();
+    #[case::of_14_bars(None, 14)]
+    #[case::of_3_bars(Some("{ period = 3 }"), 3)]
+    fn a_target_atr_warming_longer_than_the_warmup_is_refused(
+        #[case] atr: Option<&str>,
+        #[case] hours: i64,
+    ) {
+        let config = parse(&atr_section(atr)).unwrap();
 
-            let shorter = SignedDuration::from_hours(hours - 1);
-            let err = format!(
-                "{:#}",
-                config.validate(&reading_gold_for(shorter)).unwrap_err()
-            );
-            assert!(err.contains("warmup"), "{atr:?}: {err}");
-            assert!(err.contains("model.target.bracket.atr"), "{atr:?}: {err}");
-
-            let warmup = SignedDuration::from_hours(hours);
-            assert!(
-                config.validate(&reading_gold_for(warmup)).is_ok(),
-                "{atr:?}"
-            );
-        }
+        let shorter = SignedDuration::from_hours(hours - 1);
+        let err = format!(
+            "{:#}",
+            config.validate(&reading_gold_for(shorter)).unwrap_err()
+        );
+        assert!(err.contains("warmup"), "{err}");
+        assert!(err.contains("model.target.bracket.atr"), "{err}");
+        let warmup = SignedDuration::from_hours(hours);
+        assert!(config.validate(&reading_gold_for(warmup)).is_ok());
     }
 
-    /// The requirements of a strategy reading `ticks` of gold, each by the
-    /// name Nautilus parses, and `bar_types`, warming for 14 hours, as the
-    /// default ATR of hourly bars does.
+    /// Reads the `ticks` of gold by the name Nautilus parses, and `bar_types`, warming 14 hours.
     fn reading_gold(ticks: &[&str], bar_types: &[&str]) -> DataRequirements {
         DataRequirements {
             bar_types: bar_types
@@ -1258,12 +910,9 @@ mod tests {
                 .collect(),
             ticks: ticks
                 .iter()
-                .map(|data| {
-                    toml::from_str::<TickSeries>(&format!(
-                        r#"data = "{data}"
-                           instrument_id = "{GOLD}""#
-                    ))
-                    .unwrap()
+                .map(|data| TickSeries {
+                    data: data.parse().unwrap(),
+                    instrument_id: InstrumentId::from(GOLD),
                 })
                 .collect(),
             custom: vec![],
@@ -1271,24 +920,99 @@ mod tests {
         }
     }
 
-    /// A time-only target's unit is the worth of its ATR: one without an
-    /// `atr` table is refused under it, beside the section's others, saying
-    /// so.
     #[rstest]
     fn a_time_only_target_without_an_atr_is_refused_under_its_atr() {
         let toml =
-            section(r#"target = { limit = "30m" }"#).replace("min_trades = 30", "min_trades = 0");
+            section(r#"target = { limit = "30m" }"#).replace("min_rows = 30", "min_rows = 0");
 
         assert_eq!(
             refused_fields(&toml),
-            ["model.target.atr", "model.min_trades"]
+            ["model.target.atr", "model.min_rows"]
         );
         let err = refused(&toml);
         assert!(err.contains("ATR") && err.contains("unit"), "{err}");
     }
 
-    /// A time-only target's ATR warms as a bracket's does, its 3 hourly bars
-    /// in 3 hours: over a shorter warmup it is refused under its own table.
+    #[rstest]
+    #[case::bracket(
+        atr_section(Some("{ period = 14, bar_interval = '15m' }")),
+        "model.target.bracket.atr"
+    )]
+    #[case::time_only(
+        section("target = { limit = '45m', atr = { period = 14, bar_interval = '15m' } }"),
+        "model.target.atr"
+    )]
+    fn target_atr_interval_requires_fourteen_complete_quarter_hours_of_warmup(
+        #[case] toml: String,
+        #[case] owner: &str,
+    ) {
+        let toml = toml.replace("every = \"1h\"", "every = \"1m\"");
+        let threshold = SignedDuration::from_mins(210);
+        assert_eq!(
+            refused_fields_warming(&toml, threshold - SignedDuration::from_nanos(1)),
+            [owner]
+        );
+        let config = load_warming(&toml, threshold).unwrap();
+        assert_eq!(
+            config.decision,
+            DecisionRule::Every(SignedDuration::from_mins(1))
+        );
+        let bars = config
+            .target
+            .atr_bars(config.decision, &reading(GOLD))
+            .unwrap()
+            .unwrap();
+        assert_eq!(bars.args.period, 14);
+        assert_eq!(
+            bars.bar_type,
+            BarType::from("XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL")
+        );
+    }
+
+    #[rstest]
+    #[case::zero("0s")]
+    #[case::negative("-15m")]
+    #[case::submillisecond("1us")]
+    #[case::unsupported_step("7m")]
+    fn target_atr_interval_must_make_a_positive_supported_time_bar(#[case] interval: &str) {
+        let toml = atr_section(Some(&format!(
+            "{{ period = 1, bar_interval = '{interval}' }}"
+        )));
+        let fields = refused_fields_warming(&toml, SignedDuration::from_hours(14));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f == "model.target.bracket.atr"
+                    || f == "model.target.bracket.atr.bar_interval"),
+            "{fields:?}"
+        );
+    }
+
+    #[rstest]
+    fn target_atr_interval_cannot_fall_back_to_buildable_decision_bars() {
+        let config = parse(&section(
+            "target = { limit = '45m', atr = { period = 1, bar_interval = '15m' } }",
+        ))
+        .unwrap();
+        let requirements = reading_gold(
+            &[],
+            &["XAUUSD.ICMARKETS-1-DAY-LAST-INTERNAL@1-HOUR-EXTERNAL"],
+        );
+        let err = config.validate(&requirements).unwrap_err();
+        assert!(err.to_string().contains("model.target.atr"), "{err}");
+    }
+
+    #[rstest]
+    fn target_atr_interval_is_not_a_setting_for_basis_point_exits() {
+        let toml = section(
+            "target = { limit = '45m', bracket = { take_profit = { bps = 20 }, stop = { bps = 10 }, atr = { period = 1, bar_interval = '15m' } } }",
+        );
+        assert_eq!(
+            refused_fields_warming(&toml, SignedDuration::from_hours(1)),
+            ["model.target.bracket.atr"]
+        );
+    }
+
     #[rstest]
     fn a_time_only_targets_atr_warming_longer_than_the_warmup_is_refused_under_it() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
@@ -1300,22 +1024,19 @@ mod tests {
         assert!(load_warming(&toml, SignedDuration::from_hours(3)).is_ok());
     }
 
-    /// A bracket in basis points may be written with an `atr` table, so the
-    /// load refuses it, beside the section's others.
     #[rstest]
     fn an_atr_table_no_distance_uses_is_refused_under_the_bracket() {
         let toml = section(
             r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, atr = { period = 3 } }, limit = "45m" }"#,
         )
-        .replace("min_trades = 30", "min_trades = 0");
+        .replace("min_rows = 30", "min_rows = 0");
 
         assert_eq!(
             refused_fields(&toml),
-            ["model.target.bracket.atr", "model.min_trades"]
+            ["model.target.bracket.atr", "model.min_rows"]
         );
     }
 
-    /// One distance in ATRs, of its table, the other in basis points.
     #[rstest]
     fn a_bracket_mixing_atrs_and_basis_points_loads() {
         let config = parse(&section(
@@ -1331,70 +1052,48 @@ mod tests {
             Some(BracketSpec {
                 take_profit: Distance::Atr(Decimal::new(15, 1)),
                 stop: Distance::BasisPoints(Decimal::new(75, 1)),
-                atr: Some(AtrArgs {
-                    period: 3,
-                    ..DEFAULT_ATR
-                }),
+                atr: Some(
+                    AtrArgs {
+                        period: 3,
+                        ..DEFAULT_ATR
+                    }
+                    .into()
+                ),
             })
         );
     }
 
     #[rstest]
-    fn a_distance_not_positive_is_refused_under_the_bracket() {
-        for bracket in [
-            "take_profit = { bps = 0 }, stop = { bps = 5 }",
-            "take_profit = { bps = 7.5 }, stop = { bps = -1 }",
-        ] {
-            let toml = section(&format!(
-                r#"target = {{ bracket = {{ {bracket} }}, limit = "45m" }}"#
-            ));
+    #[case::a_take_profit_of_nought("take_profit = { bps = 0 }, stop = { bps = 5 }")]
+    #[case::a_negative_stop("take_profit = { bps = 7.5 }, stop = { bps = -1 }")]
+    fn a_distance_not_positive_is_refused_under_the_bracket(#[case] bracket: &str) {
+        let toml = section(&format!(
+            r#"target = {{ bracket = {{ {bracket} }}, limit = "45m" }}"#
+        ));
 
-            assert_eq!(refused_fields(&toml), ["model.target.bracket"], "{bracket}");
-        }
+        assert_eq!(refused_fields(&toml), ["model.target.bracket"]);
     }
 
-    /// Without quotes, the ATR's bars are built from the trades, or from
-    /// the source bars the strategy reads.
     #[rstest]
-    fn a_target_atr_is_built_from_the_trades_or_the_bars_of_a_strategy_without_quotes() {
+    #[case::trades(reading_gold(&["trades"], &[]))]
+    #[case::source_bars(reading_gold(
+        &[],
+        &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"],
+    ))]
+    fn a_target_atr_is_built_from_the_trades_or_the_bars_of_a_strategy_without_quotes(
+        #[case] requirements: DataRequirements,
+    ) {
         let config = parse(&atr_section(None)).unwrap();
 
-        for requirements in [
-            reading_gold(&["trades"], &[]),
-            reading_gold(
-                &[],
-                &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"],
-            ),
-        ] {
-            assert!(config.validate(&requirements).is_ok(), "{requirements:?}");
-        }
+        assert!(config.validate(&requirements).is_ok());
     }
 
-    /// Neither quotes, trades nor bars of the target's instrument: the
-    /// ATR's bars have nothing to be built from.
-    #[rstest]
-    fn a_target_atr_on_an_instrument_whose_prices_the_strategy_does_not_read_is_refused() {
-        let config = parse(&atr_section(None)).unwrap();
-
-        let err = format!(
-            "{:#}",
-            config
-                .validate(&reading_gold(&["order_book_depths"], &[]))
-                .unwrap_err()
-        );
-
-        assert!(err.contains("ATR") && err.contains(GOLD), "{err}");
-        assert!(err.contains("model.target.bracket.atr"), "{err}");
-    }
-
-    /// A meta model on the section's target, held out its last 12 hours.
     const META: &str = r#"
         [meta]
         window = "36h"
-        holdout = "12h"
+        calibration = "12h"
         margin = "0.25R"
-        min_expectancy = "0.5R"
-        min_trades = 20
+        min_rows = 20
         learner = { kind = "baseline" }
     "#;
 
@@ -1404,19 +1103,12 @@ mod tests {
 
         let meta = config.meta.unwrap();
         assert_eq!(meta.window, SignedDuration::from_hours(36));
-        assert_eq!(meta.holdout, SignedDuration::from_hours(12));
+        assert_eq!(meta.calibration, SignedDuration::from_hours(12));
         assert_eq!(meta.margin, R::new(0.25));
-        assert_eq!(
-            meta.minimums(),
-            Minimums {
-                min_expectancy: R::new(0.5),
-                min_trades: 20
-            }
-        );
+        assert_eq!(meta.min_rows, 20);
         assert_eq!(meta.learner, LearnerConfig::Baseline {});
     }
 
-    /// Two levels at most: a meta section has no meta section of its own.
     #[rstest]
     fn a_nested_meta_section_is_refused() {
         let nested = format!(
@@ -1429,8 +1121,6 @@ mod tests {
         assert!(err.contains("unknown field `meta`"), "{err}");
     }
 
-    /// Sides on a time-only target: their meta model learns those trades,
-    /// no exit being needed.
     #[rstest]
     fn a_meta_model_on_a_time_only_target_is_loaded() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 1 } }"#);
@@ -1442,24 +1132,17 @@ mod tests {
         assert!(config.meta.is_some());
     }
 
-    /// A meta takes a trade from a margin in R, not from a probability:
-    /// a threshold, alone as a section of probabilities has it or beside a
-    /// margin, is refused as the section is parsed, saying that the margin
-    /// takes its place, not as any unknown field.
     #[rstest]
-    fn a_meta_threshold_is_refused_at_parsing_naming_the_margin() {
-        for meta in [
-            META.replace(r#"margin = "0.25R""#, "threshold = 0.55"),
-            format!("{META}\nthreshold = 0.55"),
-        ] {
-            let err = refused_parsing(&format!("{SECTION}\n{meta}"));
+    #[case::alone(META.replace(r#"margin = "0.25R""#, "threshold = 0.55"))]
+    #[case::beside_a_margin(format!("{META}\nthreshold = 0.55"))]
+    fn a_meta_threshold_is_refused_at_parsing_naming_the_margin(#[case] meta: String) {
+        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
 
-            assert!(
-                err.contains("threshold") && err.contains("`margin`"),
-                "{err}"
-            );
-            assert!(!err.contains("unknown field"), "{err}");
-        }
+        assert!(
+            err.contains("threshold") && err.contains("`margin`"),
+            "{err}"
+        );
+        assert!(!err.contains("unknown field"), "{err}");
     }
 
     #[rstest]
@@ -1471,9 +1154,6 @@ mod tests {
         assert!(err.contains("missing field `margin`"), "{err}");
     }
 
-    /// A meta takes or leaves a decision's trade, which the strategy sizes
-    /// by its stake: a size is refused as the section is parsed, pointing
-    /// to the stake, `[trade] risk` and the strategy's multiple of it.
     #[rstest]
     fn a_meta_size_is_refused_at_parsing_pointing_to_the_stake() {
         let toml = format!("{SECTION}\n{META}\nsize = {{ min = 0.5, max = 2 }}");
@@ -1487,8 +1167,6 @@ mod tests {
         assert!(!err.contains("trade_size"), "{err}");
     }
 
-    /// The refusal of the section with `META`, `line` added to it or, if
-    /// its key is there, replacing it.
     fn meta_refused(line: &str) -> String {
         let key = line.split('=').next().unwrap().trim();
         let meta: Vec<&str> = META
@@ -1499,49 +1177,10 @@ mod tests {
         refused(&format!("{SECTION}\n{}", meta.join("\n")))
     }
 
-    /// The target's limit, 45 minutes, does not fit the meta's window: that
-    /// window is the meta's own to widen, the limit the sides' too.
     #[rstest]
     fn a_meta_window_not_longer_than_the_targets_limit_is_refused() {
         let err = meta_refused(r#"window = "45m""#);
 
         assert!(err.contains("model.meta.window"), "{err}");
-    }
-
-    /// The meta's window of 36 hours cannot hold 35 of holdout and as many
-    /// of calibration.
-    #[rstest]
-    fn a_meta_holdout_leaving_no_fitted_row_is_refused() {
-        let err = meta_refused(r#"holdout = "35h""#);
-
-        assert!(err.contains("model.meta.holdout"), "{err}");
-    }
-
-    #[rstest]
-    fn a_meta_margin_not_a_finite_number_of_r_is_refused_at_parsing() {
-        let meta = META.replace(r#"margin = "0.25R""#, r#"margin = "nanR""#);
-
-        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
-
-        assert!(err.contains("not a finite number of R"), "{err}");
-    }
-
-    #[rstest]
-    fn a_bare_number_meta_least_expectancy_is_refused_at_parsing_saying_it_is_in_r() {
-        let meta = META.replace(r#"min_expectancy = "0.5R""#, "min_expectancy = 0.5");
-
-        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
-
-        assert!(
-            err.contains("min_expectancy = 0.5") && err.contains("in R"),
-            "{err}"
-        );
-    }
-
-    #[rstest]
-    fn a_meta_minimum_of_no_trade_is_refused() {
-        let err = meta_refused("min_trades = 0");
-
-        assert!(err.contains("model.meta.min_trades"), "{err}");
     }
 }

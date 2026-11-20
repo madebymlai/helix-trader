@@ -1,9 +1,7 @@
-//! The adapter's tests of its public boundaries, as Nautilus' adapter
-//! guide places them ("Testing": "Typed HTTP and WebSocket behavior through
-//! mock servers, event dispatch, lifecycle, and retries"), each against the
-//! mock LSE peers and their captured payloads of `lse::testing`, which the
-//! crate's dev-dependency on itself enables (`test-support`). Pure protocol
-//! logic is tested in `src`.
+//! Tests the adapter's public boundaries against the mock LSE peers of `lse::testing`.
+//!
+//! The crate's dev-dependency on itself enables those mocks (`test-support`). Pure protocol logic
+//! is tested in `src`.
 
 mod data_client;
 mod data_tester;

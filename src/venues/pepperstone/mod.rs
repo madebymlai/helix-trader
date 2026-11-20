@@ -1,23 +1,19 @@
-//! Pepperstone, over Spotware's cTrader Open API through the cTrader
-//! adapter (`ctrader`): Pepperstone's forex and metals and their quotes for
-//! the catalog, which fill-catalog fills through the node, and the live
-//! node's clients on a hedging account, both the routing table's through
-//! `BROKER`, one of its cTrader brokers (`super`). Pepperstone's instruments
-//! are on venue `PEPPERSTONE` (`XAUUSD.PEPPERSTONE`), its clients named
-//! `PEPPERSTONE`. See `README.md`.
+//! Provides Pepperstone forex and metals for the catalog, and the live node's clients on a hedging
+//! account. Both use Spotware's cTrader Open API through the cTrader adapter (`ctrader`), and both
+//! go through `BROKER`, one of the cTrader brokers in the routing table (`super`). The instruments
+//! are on venue `PEPPERSTONE` (`XAUUSD.PEPPERSTONE`), and the clients are named `PEPPERSTONE`. See
+//! `README.md`.
 //!
-//! The adapter names no broker and the credential is the cTrader login's:
-//! this module names Pepperstone's venue and the variables of its account.
+//! The adapter names no broker, and the credential is the cTrader login. So this module names only
+//! the venue and the account variables.
 
 use ctrader::{CTraderAccountVars, CTraderConnection};
 
 use super::CTraderBroker;
 
-/// The venue of Pepperstone's instruments, and the name of its clients.
+/// The venue for the Pepperstone instruments, and the name of its clients.
 pub const VENUE: &str = "PEPPERSTONE";
 
-/// Pepperstone as the routing table takes it: its venue and the variables of its
-/// account.
 pub(super) const BROKER: CTraderBroker = CTraderBroker {
     venue: VENUE,
     account: CTraderAccountVars {
@@ -26,8 +22,7 @@ pub(super) const BROKER: CTraderBroker = CTraderBroker {
     },
 };
 
-/// Pepperstone's connection, from the process' environment (or `.env`, once
-/// read): see `CTraderConnection::from_vars`.
+/// Returns the Pepperstone connection from the process environment.
 ///
 /// # Errors
 ///

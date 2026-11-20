@@ -18,6 +18,8 @@ The direct writer resumes each series 1 ns after its stored end, even if the req
 
 ## Instrument identity
 
+Fill and replay use the same resolved source series: a Nautilus `BarType` for bars, or a data kind and `InstrumentId` for instrument-keyed data. Windows merge only for the same series. If a strategy asks for a futures root and its December contract explicitly, December trades are read once over the combined coverage; its quotes and bars stay separate.
+
 The source, catalog, strategy and live broker must agree on instrument IDs. IB keeps the venue of an instrument it loads by ID, so a contract the config names under Databento's venue (`ESZ21.GLBX`) keeps it live; only a contract IB has not loaded takes its exchange's venue (`ESZ21.CME`, Nautilus' `determine_venue`). Changing source or venue requires matching config IDs and a refilled catalog.
 
 ## Tests

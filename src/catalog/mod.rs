@@ -1,12 +1,9 @@
-//! Catalog filling, naming no venue: the traded instruments, the series
-//! their strategy bars are built from (the source bars of a composite bar
-//! type, or quotes) and funding, written into the Nautilus catalog through
-//! a node (`NodeFill`) or directly (`fill_catalog`), from the history
-//! source of each instrument's venue (see `venues`), and custom data of no
-//! instrument, from the source its type names, through the node.
+//! Fills the Nautilus catalog and names no venue (build step 1).
 //!
-//! Build step 1. Backtest reads what this module writes. The instruments
-//! come from the strategy's data requirements.
+//! It writes the traded instruments, the series of their strategy bars and their funding. Each
+//! instrument's venue history source supplies the data (see `venues`). The fill runs through a
+//! node (`NodeFill`) or directly (`fill_catalog`). Custom data that belongs to no instrument goes
+//! through the node, from the source that its type names.
 
 mod fill_catalog;
 pub use fill_catalog::fill_catalog;
@@ -26,9 +23,7 @@ pub use node_fill::{
     CustomFillRequest, FillData, FillRequest, NodeClient, NodeFill, missing, missing_custom,
 };
 
-/// The config a node takes of the catalog in directory `dir`, by its path
-/// as given: Nautilus resolves a relative one against the working
-/// directory when it opens the catalog.
+/// Returns the config a node takes for the catalog in `dir`, using the path as given.
 ///
 /// # Errors
 ///
@@ -40,16 +35,16 @@ pub(crate) fn catalog_config(dir: &Path) -> anyhow::Result<DataCatalogConfig> {
     Ok(DataCatalogConfig::new(path.to_owned(), None, None))
 }
 
-/// The instruments of `instrument_ids`, in their order, as the catalog at
-/// `catalog` defines them: those a strategy trades, or the pairs it
-/// converts through. The catalog is opened through Nautilus'
-/// `ParquetDataCatalog::from_uri`, whose error a missing directory is,
-/// where `ParquetDataCatalog::new` panics.
+/// Returns the instruments of `instrument_ids`, in order, as the catalog at `catalog` defines them.
+///
+/// Opens the catalog with `ParquetDataCatalog::from_uri`. It errors on a missing directory, where
+/// `new` panics.
 ///
 /// # Errors
 ///
-/// Returns an error if the catalog cannot be opened or read, or an
-/// instrument of `instrument_ids` is not in it.
+/// Returns an error if:
+/// - The catalog cannot be opened or read.
+/// - An instrument in `instrument_ids` is not in the catalog.
 pub fn instruments(
     catalog: &Path,
     instrument_ids: &[InstrumentId],

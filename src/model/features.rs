@@ -1,120 +1,107 @@
-//! A strategy's features: Nautilus indicators, each declared once with its
-//! data kind and its source, fed by Nautilus whatever the kind.
+//! Declares a strategy's features as Nautilus indicators.
 //!
-//! A feature is built of a declared indicator's table in `[indicators]`
-//! (`strategy::Declared`, `IndicatorsConfig`), never by hand: the builder
-//! takes the declaration and the tables, builds the indicator, names the
-//! feature and carries the table's arguments into the fingerprint. A
-//! feature is named after its table (`fast`) when the table feeds that
-//! feature alone, and after the series it reads and its table
-//! (`XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:fast`, `QuoteTick of
-//! XAUUSD.ICMARKETS:fast`) when the table feeds several. A raw feature of
-//! custom data has no table, and is named by the strategy.
+//! Each feature is declared once, on the list of series it reads (`FeatureSetBuilder::feature`).
+//! The series can be any number of bar types, tick series (quotes, trades, depth or deltas of an
+//! instrument or futures root) and custom series (`Series`), in any combination.
 //!
-//! The set is one Nautilus indicator (`ActorIndicator`), shared between
-//! Nautilus, the strategy's warmup and the strategy as an `Rc` (Nautilus'
-//! registration takes a shared indicator whose handlers borrow it
-//! immutably, so the features sit in a `RefCell`). `register` registers it
-//! with Nautilus once per bar type for bars: the data engine then hands it
-//! each bar before the strategy's own handler, live and replayed, with no
-//! strategy code. Its quotes and trades come through the warmup instead
-//! (`Warmup::feeding_ticks`, the warmup a model strategy's `ModelHandle`
-//! builds): Nautilus hands a registered indicator each live tick as it
-//! comes, while a live warmup's older windows are still being answered, so
-//! the warmup hands the set the quotes and trades of its responses and the
-//! live ones the strategy hands it, these held until it ends
-//! (`strategy::warmup`'s `hold`, which goes once Nautilus holds them,
-//! helix-trader#16; the set then registered for quotes and trades again);
-//! in a replay, as they come. Nautilus routes no depth or book deltas to
-//! indicators at all, only to the actor's handlers: the strategy hands the
-//! warmup those of its responses and its live and replayed ones from them
-//! (`model_data_hooks!`), which hands them to the set (`BookIndicator`), the
-//! live ones held while a live warmup is pending, as quotes and trades are.
-//! Bars built from a warmup's quotes, trades or source bars reach only the
-//! cache, not the indicators: the strategy's warmup hands them to `handle_bar`
-//! (`Warmup::on_data_response`).
+//! A feature is built from a declared indicator's table in `[indicators]` (`strategy::Declared`,
+//! `IndicatorsConfig`), never by hand. A raw feature has no table and is named by the strategy.
+//! Other features are named as follows:
+//! - If the table feeds the feature alone, the feature is named after its table (`fast`).
+//! - Otherwise it is named after its series and its table. The whole list of series comes in the
+//!   order declared, separated by `, ` (`QuoteTick of XAUUSD.ICMARKETS, TradeTick of
+//!   XAUUSD.ICMARKETS:fast`).
 //!
-//! A raw feature reads custom data, which Nautilus' `Indicator` does not
-//! handle: a custom series, of a whole Nautilus data type, its type name,
-//! identifier and metadata (`FeatureSetBuilder::custom`), an instrument's
-//! custom data under its id among them, which a model strategy reads, its
-//! `[data] series` listing it (`custom`, `model::reads`). It
-//! reads Nautilus' cache, which the set takes from the actor it is
-//! registered with (`register`): the data engine caches each point it
-//! processes, live or replayed, before the strategy's handlers run, one
-//! history per data type, and the feature's value is a function of the
-//! strategy (`read`) of the latest point of its data type
-//! (`Cache::custom_data`), read as the set's values are. The data engine
-//! does not cache a request's response, so a live warmup adds its own
-//! (`Warmup::on_historical_data`). A raw feature is cold until the cache
-//! holds a point of its data type.
+//! The set is one Nautilus indicator (`ActorIndicator`). The strategy and its warmup share it as an
+//! `Rc`. Its features sit in a `RefCell`, because the handlers borrow the set immutably.
 //!
-//! A feature on the ticks of a futures root (`GC.GLBX`, see `rolls`), or
-//! on a custom series under the root's id, reads the contract standing
-//! for it: `register` sets it from the clock (`rolls::front`), and that
-//! contract's quotes, trades, depth, deltas and custom data (keyed by the
-//! contract's id, `CustomSeries::on`) are matched to it.
-//! The set's tick series (`ticks`) are what the model handle's
-//! subscriptions subscribe to (`strategy::subscriptions`) and a live
-//! warmup requests; at the roller's
-//! transition, `roll` moves the root's features
-//! to the post contract and resets them (Nautilus' `Indicator::reset`):
-//! their windows never mix two contracts, which trade at different prices,
-//! and the set is not initialized until they refill, so decisions wait. A
-//! raw feature has no window: it reads the latest point of the post
-//! contract the cache holds, if any. Other instruments' features, and the
-//! raw features of a custom series of no root, are untouched.
+//! The set is registered with none of Nautilus' indicators of the strategy. Instead the warmup
+//! hands it every bar, quote and trade (`Warmup::feeding`, `Warmup::feeding_ticks`). Nautilus hands
+//! a registered indicator each live tick as it comes, and each live bar once its request
+//! completes. That happens while a live warmup's older windows are still being answered. The warmup
+//! orders its responses across series and holds the live updates until it ends.
 //!
-//! Each update reaches only the features declared on its kind and source.
-//! An update of a kind or source no feature reads is a no-op, so the
-//! panicking defaults of Nautilus' `Indicator` trait are never called. The
-//! set never returns an error: Nautilus stops handling a bar at an
-//! indicator's error, before the strategy's handler, and the warmup its
-//! hand-over of ticks, so an error of one feature (an indicator reading the
-//! last price of a quote) is logged and the update goes on.
+//! Temporary: `strategy::warmup`'s `hold` and `merge` do this, until Nautilus holds them
+//! (helix-trader#16) and orders a warmup's history across data types (helix-trader#46). Then the
+//! set is registered for quotes, trades and bars again.
 //!
-//! The names and their order are fixed when the set is built; `values`
-//! snapshots the features in that order, once every one is initialized. A
-//! side model reads them, then its side's payoff features, which the target
-//! names (`side_names`, `side_row`); a meta model reads them, then the side
-//! picked and the decision's level and side call (`meta_names`,
-//! `meta_row`).
-//! A feature exposes its current value through `Feature`, which every
-//! Nautilus moving average has with no extra code; a raw feature reads its
-//! value from the cache instead (see above).
+//! Nautilus routes depth and deltas to the actor's handlers alone. It routes custom data to
+//! `on_data` and `on_historical_data` alone. So the strategy hands them to the warmup
+//! (`model_data_hooks!`), and the warmup hands them to the set (`BookIndicator`,
+//! `CustomIndicator`). A feature that reads a custom series supplies its own handler
+//! (`Feature::custom_handler`).
 //!
-//! The set records, for each instrument, the time (`ts_init`) of the
-//! latest quote, trade, bar, depth or deltas a feature read
-//! (`last_update`), a root's under the root: a decision is fresh only if
-//! data of the traded instrument came since the previous one (`decide`).
-//! Custom data is no update of any instrument.
+//! Bars built from a warmup's quotes, trades or source bars reach only the cache. So the warmup
+//! reads them there and hands them to `handle_bar` (`Warmup::on_data_response`).
 //!
-//! A set declares its warmup (`FeatureSetBuilder::warmup`), how much data
-//! its features read before a decision, such as the strategy's: a dataset
-//! build replays it before its first day (`dataset`).
+//! A raw feature reads a custom series of a whole Nautilus data type (`FeatureSetBuilder::custom`),
+//! with no indicator. It reads from the cache of the actor the set is registered with (`register`).
+//! Its value is `read` applied to the latest point of the data type (`Cache::custom_data`), and it
+//! is cold until the cache holds one. The data engine caches each point it processes before the
+//! strategy's handlers run, but not a request's response. So a live warmup adds its own
+//! (`Warmup::on_historical_data`).
 //!
-//! A feature over the target's bracket (`OverBracket`, declared with
-//! `FeatureSetBuilder::over_bracket`) reads quotes, and is handed the
-//! bracket's width (`targets::BracketWidth`) as it is built: the width at
-//! the decision its value is for, the decision its quotes are read at, and
-//! the target's time limit. The set's features read one width, which the
-//! model handle has the target's setter run on (`bracket_width`), so the
-//! width's ATR is the target's, with no series of the strategy's. The width
-//! is the target's, in the fingerprint of a dataset beside the set's
+//! A feature on a futures root (`GC.GLBX`, see `rolls`) reads the contract standing for the root.
+//! `register` sets that contract from the clock (`rolls::front`). The contract's data is matched to
+//! the feature, including custom data keyed by its id (`CustomSeries::on`). `roll` moves the root's
+//! features to the post contract and resets them (`Indicator::reset`). So their windows never mix
+//! two contracts, and decisions wait until the windows refill. A raw feature reads the post
+//! contract's latest cached point.
+//!
+//! `ticks`, `bar_types` and `custom` gather the series of all features, each once, in the order
+//! declared. Three things use them:
+//! - The model handle subscribes to them (`strategy::subscriptions`).
+//! - A live warmup requests them.
+//! - `[data] series` is checked against them (`model::reads`).
+//!
+//! An update reaches only the features declared on a series of its kind and source. It reaches each
+//! such feature once, however many of the feature's series it matches. An update no feature reads
+//! is a no-op, so the panicking defaults of Nautilus' `Indicator` are never called.
+//!
+//! The set never returns an error. Nautilus stops handling a bar at an indicator's error, before
+//! the strategy's handler, and the warmup stops its hand-over of ticks. So the set logs one
+//! feature's error and the update goes on.
+//!
+//! The names and their order are fixed when the set is built. `values` snapshots them once every
+//! feature is initialized.
+//! - A side model reads them, then its side's payoff features (`side_names`, `side_row`).
+//! - A meta model reads them, then the side picked and the decision's level and side call
+//!   (`meta_names`, `meta_row`).
+//!
+//! The set records the `ts_init` of the latest update a feature read, for each instrument
+//! (`last_update`). A root's is recorded under the root. A decision is fresh only if data of the
+//! traded instrument came since the previous decision (`decide`). Custom data is no update of any
+//! instrument.
+//!
+//! The warmup (`FeatureSetBuilder::warmup`) is how much data the features read before a decision.
+//! A dataset build replays it before its first day (`dataset`).
+//!
+//! A feature over the target's bracket (`Feature::over_bracket`, an `OverBracket`) is declared
+//! like any other. It is handed the width (`targets::BracketWidth`) that the builder takes once
+//! (`FeatureSetBuilder::bracket`). The set refuses:
+//! - Such a feature with no width given.
+//! - A width that no feature reads.
+//! - A second width.
+//!
+//! A feature that reads a width it was never handed panics, and never reads NaN. The model handle
+//! has the target's setter run on the one width (`bracket_width`), so its ATR is the target's, with
+//! no series of the strategy's. The dataset's fingerprint includes the width beside the set's
 //! (`targets::fingerprint`).
 //!
-//! The fingerprint covers what makes the features what they are: their
-//! names in order, the series each reads (which the name of a feature
-//! named after its table alone, or of a raw feature, does not tell), the
-//! whole data type of a raw feature's custom series, the arguments of
-//! each table they are built from by value
-//! (`IndicatorsConfig::canonical_args`: parsed, so however the TOML spells
-//! them), the warmup, and the version of the strategy's feature code
-//! (`FeatureSetBuilder::version`), bumped by hand when what it computes
-//! changes. An indicator the strategy builds of `[indicators]` for its own
-//! logic is not in it. The code shared by every set, this module and
-//! Nautilus' indicators, is versioned with the dataset
-//! (`dataset::VERSION`).
+//! The fingerprint covers:
+//! - The names, in order.
+//! - The series each feature reads, which a name from its table alone, or a raw feature's name,
+//!   does not tell.
+//! - The whole data type of each custom series.
+//! - The arguments of each table by value (`IndicatorsConfig::canonical_args`), however the TOML
+//!   spells them.
+//! - The warmup.
+//! - The version of the strategy's feature code (`FeatureSetBuilder::version`), which is bumped by
+//!   hand when what the code computes changes.
+//!
+//! It does not cover an indicator that the strategy builds from `[indicators]` for its own logic.
+//! The code shared by every set, which is this module and Nautilus' indicators, is versioned with
+//! the dataset (`dataset::VERSION`).
 
 use std::{
     any::Any,
@@ -136,8 +123,8 @@ use nautilus_core::UnixNanos;
 use nautilus_indicators::indicator::{Indicator, MovingAverage};
 use nautilus_model::{
     data::{
-        Bar, BarType, CustomData, NautilusDataType, OrderBookDeltas, OrderBookDepth, QuoteTick,
-        TradeTick,
+        Bar, BarType, CustomData, DataType, NautilusDataType, OrderBookDeltas, OrderBookDepth,
+        QuoteTick, TradeTick,
     },
     enums::OrderSide,
     identifiers::InstrumentId,
@@ -148,42 +135,33 @@ use super::{calibration::Expected, targets::BracketWidth};
 use crate::{
     rolls::{Transition, front},
     strategy::{
-        Declaration, Declared, IndicatorArgs, IndicatorsConfig,
+        Declaration, Declared, IndicatorArgs, IndicatorsConfig, Series,
         requirements::{CustomSeries, TickSeries},
-        warmup::BookIndicator,
+        warmup::{BookIndicator, CustomIndicator, Warmup},
     },
 };
 
-/// The names of a side model's features: the strategy's `names`, then the
-/// target's `payoff` names (`targets::TargetConfig::payoff_names`), in the
-/// order of `side_row`.
+/// The names of a side model's features: `names`, then the target's `payoff` names.
 #[must_use]
 pub fn side_names(names: &[String], payoff: &[String]) -> Vec<String> {
     names.iter().chain(payoff).cloned().collect()
 }
 
-/// A side model's row: the decision's `features`, then its side's `payoff`
-/// features (`targets::SideTarget::payoff`), in the order of `side_names`.
+/// A side model's row: the decision's `features`, then its side's `payoff` features.
 #[must_use]
 pub fn side_row(features: &[f64], payoff: &[f64]) -> Vec<f64> {
     features.iter().chain(payoff).copied().collect()
 }
 
-/// The names of the side picked and the decision's calibrated level and
-/// side call, the last values of a meta model's rows.
+/// The names of the last values of a meta model's rows.
 pub const PICKED_FEATURES: [&str; 3] = ["picked_side", "level", "side_call"];
 
-/// The values of the `side` picked and the decision's level and side call
-/// of `expected`, in the order of `PICKED_FEATURES`: the side 1 a buy, -1 a
-/// sell.
 fn picked_values(side: OrderSide, expected: Expected) -> [f64; 3] {
     let side = if side == OrderSide::Buy { 1.0 } else { -1.0 };
     [side, expected.level, expected.side_call]
 }
 
-/// The names of a meta model's features, of its sides' `names`: those,
-/// then the side picked and the decision's level and side call
-/// (`PICKED_FEATURES`).
+/// The names of a meta model's features: `names`, then `PICKED_FEATURES`.
 #[must_use]
 pub fn meta_names(names: &[String]) -> Vec<String> {
     names
@@ -193,9 +171,8 @@ pub fn meta_names(names: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// A meta model's row: the sides' `features`, then the `side` picked and
-/// the decision's level and side call of `expected`, in the order of
-/// `meta_names`.
+/// A meta model's row: the sides' `features`, then the `side` picked (1 a buy, -1 a sell), then the
+/// level and side call from `expected`.
 #[must_use]
 pub fn meta_row(features: &[f64], side: OrderSide, expected: Expected) -> Vec<f64> {
     features
@@ -205,10 +182,32 @@ pub fn meta_row(features: &[f64], side: OrderSide, expected: Expected) -> Vec<f6
         .collect()
 }
 
-/// A feature: a Nautilus indicator exposing its current value.
+/// A Nautilus indicator exposing its current value.
 pub trait Feature: Indicator {
-    /// The current value, read once the indicator is initialized.
+    /// The current value, read once initialized.
     fn value(&self) -> f64;
+
+    /// Returns the handler for custom data, or `None` if the feature has none. A feature on a
+    /// custom series with no handler is refused at build.
+    fn custom_handler(&mut self) -> Option<&mut dyn CustomHandler> {
+        None
+    }
+
+    /// Returns how it reads the target's bracket, or `None` unless it is formed over it.
+    fn over_bracket(&mut self) -> Option<&mut dyn OverBracket> {
+        None
+    }
+}
+
+/// How a feature reads custom data (`Feature::custom_handler`).
+pub trait CustomHandler {
+    /// Reads `data`, a point of one of the feature's custom series, in the order it comes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the feature cannot read the point, such as a point of a type it does not
+    /// know. The set logs the error.
+    fn handle_custom(&mut self, data: &CustomData) -> anyhow::Result<()>;
 }
 
 impl<T: MovingAverage> Feature for T {
@@ -217,36 +216,35 @@ impl<T: MovingAverage> Feature for T {
     }
 }
 
-/// A feature formed over the target's bracket: its value at a decision is
-/// over the bracket's width there, which it reads from the width it is
-/// handed as it is built (`FeatureSetBuilder::over_bracket`).
-pub trait OverBracket: Feature {
+/// How a feature formed over the target's bracket reads it (`Feature::over_bracket`).
+///
+/// Its value at a decision is over the bracket's width there. Reading a width it was never handed
+/// panics, which only a feature outside a set can do.
+pub trait OverBracket {
     /// Reads its values over `width` from now on.
     fn over(&mut self, width: Rc<BracketWidth>);
 }
 
-/// How a raw feature reads its value from a custom data point.
 type Read = Box<dyn Fn(&CustomData) -> f64>;
 
-/// A declared feature: its source, and the indicator fed from it, or how a
-/// raw feature reads its value.
 enum Slot {
-    Quotes(Reading, Box<dyn Feature>),
-    Trades(Reading, Box<dyn Feature>),
-    Bars(BarType, Box<dyn Feature>),
-    Depth(Reading, Box<dyn Feature>),
-    Deltas(Reading, Box<dyn Feature>),
-    /// A custom series, read from the cache by its data type: on a root,
-    /// with the root it reads, by the data type of the contract read
-    /// (`CustomSeries::on`).
+    Indicator(Vec<Source>, Box<dyn Feature>),
+    /// A raw feature: a custom series read from the cache by its data type.
     Custom(CustomSeries, Option<Reading>, Read),
 }
 
-/// The instrument whose ticks a feature reads, or the root its custom
-/// series is under, a futures root or a plain instrument, and the
-/// contract it reads them of: the one
-/// standing for the root, from `register` (`rolls::front`) and each roll
-/// (`roll`); the instrument itself if it does not roll.
+/// How an update matches a source.
+///
+/// - Bars match by their standard bar type (`BarType::standard`).
+/// - Ticks of one kind match by the contract read.
+/// - A custom series matches by its data type as read (`read_type`).
+enum Source {
+    Bars(BarType),
+    Ticks(NautilusDataType, Reading),
+    Custom(CustomSeries, Option<Reading>),
+}
+
+/// The instrument or root read, and the contract standing for it, or the instrument itself if none.
 #[derive(Debug, Clone, Copy)]
 struct Reading {
     instrument_id: InstrumentId,
@@ -257,30 +255,27 @@ struct Reading {
 pub struct FeatureSet {
     names: Vec<String>,
     slots: RefCell<Vec<Slot>>,
-    /// The width the features over the bracket read, if any.
     width: Option<Rc<BracketWidth>>,
-    /// The time of the latest update of each instrument a feature read.
     updates: RefCell<BTreeMap<InstrumentId, UnixNanos>>,
-    /// The cache of the actor the set is registered with, which its raw
-    /// features read (`register`).
+    /// Set by `register`.
     cache: RefCell<Option<Rc<RefCell<Cache>>>>,
     warmup: SignedDuration,
     fingerprint: Fingerprint,
 }
 
-/// Declares the features of a `FeatureSet`, each with its source, in the
-/// order of their values: a feature of a declared indicator's table, or a
-/// raw feature of custom data. An indicator is never handed in built:
+/// Declares the features of a `FeatureSet`, in the order of their values.
+///
+/// An indicator is never handed in built:
 ///
 /// ```
-/// # use helix_trader::{model::features::FeatureSet, strategy::{Declared, EmaArgs, IndicatorsConfig}};
+/// # use helix_trader::{model::features::FeatureSet, strategy::{Declared, EmaArgs, IndicatorsConfig, Series}};
 /// # use nautilus_model::identifiers::InstrumentId;
 /// const MID: Declared<EmaArgs> = Declared::new("mid");
 /// let indicators: IndicatorsConfig =
 ///     toml::from_str(r#"mid = { period = 1, price_type = "MID" }"#).unwrap();
 ///
 /// let features = FeatureSet::builder()
-///     .quotes(InstrumentId::from("AUD/USD.SIM"), MID, &indicators)
+///     .feature(&[Series::quotes(InstrumentId::from("AUD/USD.SIM"))], MID, &indicators)
 ///     .build()
 ///     .unwrap();
 ///
@@ -288,12 +283,12 @@ pub struct FeatureSet {
 /// ```
 ///
 /// ```compile_fail
-/// # use helix_trader::model::features::FeatureSet;
+/// # use helix_trader::{model::features::FeatureSet, strategy::Series};
 /// # use nautilus_indicators::average::ema::ExponentialMovingAverage;
 /// # use nautilus_model::identifiers::InstrumentId;
 /// let features = FeatureSet::builder()
-///     .quotes(
-///         InstrumentId::from("AUD/USD.SIM"),
+///     .feature(
+///         &[Series::quotes(InstrumentId::from("AUD/USD.SIM"))],
 ///         "mid",
 ///         ExponentialMovingAverage::new(1, None),
 ///     )
@@ -302,30 +297,24 @@ pub struct FeatureSet {
 pub struct FeatureSetBuilder {
     names: Vec<Name>,
     slots: Vec<Slot>,
-    /// The width the features over the bracket read, if any.
     width: Option<Rc<BracketWidth>>,
-    /// The arguments of each table a feature is built from, by its name,
-    /// in canonical form (`IndicatorsConfig::canonical_args`).
     arguments: BTreeMap<&'static str, String>,
+    refused: Vec<String>,
     version: u32,
     warmup: SignedDuration,
 }
 
-/// How a declared feature is named (see `FeatureSetBuilder::build`).
 enum Name {
-    /// After the `[indicators]` table it is built from.
     Table(&'static str),
-    /// As the strategy gives it: a raw feature's.
     Given(String),
 }
 
-/// A SHA-256 hash of what makes rows, models and decisions comparable:
-/// equal fingerprints, same features and decisions.
+/// A SHA-256 hash of what makes rows, models and decisions comparable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Fingerprint([u8; 32]);
 
 impl FeatureSet {
-    /// A builder with no feature declared.
+    /// Returns a builder with no feature declared.
     #[must_use]
     pub fn builder() -> FeatureSetBuilder {
         FeatureSetBuilder {
@@ -333,6 +322,7 @@ impl FeatureSet {
             slots: vec![],
             width: None,
             arguments: BTreeMap::new(),
+            refused: vec![],
             version: 0,
             warmup: SignedDuration::ZERO,
         }
@@ -344,8 +334,7 @@ impl FeatureSet {
         &self.names
     }
 
-    /// The value of each feature, in the order of the names, if every
-    /// feature is initialized: a raw feature's read from the cache now.
+    /// The value of each feature, in the order of the names, if every feature is initialized.
     #[must_use]
     pub fn values(&self) -> Option<Vec<f64>> {
         let cache = self.cache.borrow();
@@ -357,276 +346,358 @@ impl FeatureSet {
             .collect()
     }
 
-    /// Whether every feature is initialized.
     #[must_use]
     pub fn initialized(&self) -> bool {
         self.values().is_some()
     }
 
-    /// The fingerprint of the feature names in order, the arguments of
-    /// their tables, the strategy's feature version and the warmup.
+    /// The fingerprint of the set (see the module).
     #[must_use]
     pub fn fingerprint(&self) -> Fingerprint {
         self.fingerprint
     }
 
-    /// How much data the features read before a decision: a dataset build
-    /// replays this much before its first day (`dataset`).
+    /// How much data the features read before a decision.
     #[must_use]
     pub const fn warmup(&self) -> SignedDuration {
         self.warmup
     }
 
-    /// The tick series the features read as they are, quotes, trades,
-    /// depth and deltas, each of its declared instrument, a root or plain,
-    /// each once, in order: what a strategy's
-    /// subscriptions subscribe to (`strategy::subscriptions`) and a live
-    /// warmup requests. Bars and custom series (`custom`) are not among
-    /// them.
+    /// The tick series the features read, each once, in the order declared. Bars and custom series
+    /// are not among them.
     #[must_use]
     pub fn ticks(&self) -> Vec<TickSeries> {
         let mut ticks: Vec<TickSeries> = Vec::new();
-        for tick in self.slots.borrow().iter().filter_map(Slot::tick_series) {
-            if !ticks.contains(&tick) {
-                ticks.push(tick);
+
+        for slot in self.slots.borrow().iter() {
+            for tick in slot.sources().iter().filter_map(Source::tick_series) {
+                if !ticks.contains(&tick) {
+                    ticks.push(tick);
+                }
             }
         }
         ticks
     }
 
-    /// The bar types the features read, each once, in order: the bars
-    /// beside `ticks`.
+    /// The bar types the features read, each once, in the order declared.
     #[must_use]
     pub fn bar_types(&self) -> Vec<BarType> {
         let mut bar_types: Vec<BarType> = Vec::new();
+
         for slot in self.slots.borrow().iter() {
-            if let Slot::Bars(bar_type, _) = slot
-                && !bar_types.contains(bar_type)
-            {
-                bar_types.push(*bar_type);
+            for source in slot.sources() {
+                if let Source::Bars(bar_type) = source
+                    && !bar_types.contains(bar_type)
+                {
+                    bar_types.push(*bar_type);
+                }
             }
         }
         bar_types
     }
 
-    /// The custom series the features read, each once, in order, beside
-    /// the `ticks`: series a model strategy reads (`model::reads`).
+    /// The custom series the features read, each once, in the order declared. It covers the series
+    /// of raw features and the custom series among a feature's series.
     #[must_use]
     pub fn custom(&self) -> Vec<CustomSeries> {
         let mut custom: Vec<CustomSeries> = Vec::new();
+
         for slot in self.slots.borrow().iter() {
-            if let Slot::Custom(series, ..) = slot
-                && !custom.contains(series)
-            {
-                custom.push(series.clone());
+            let read = match slot {
+                Slot::Custom(series, ..) => vec![series],
+                Slot::Indicator(sources, _) => sources
+                    .iter()
+                    .filter_map(|source| match source {
+                        Source::Custom(series, _) => Some(series),
+                        Source::Bars(_) | Source::Ticks(..) => None,
+                    })
+                    .collect(),
+            };
+
+            for series in read {
+                if !custom.contains(series) {
+                    custom.push(series.clone());
+                }
             }
         }
         custom
     }
 
-    /// The time (`ts_init`) of the latest quote, trade, bar, depth or
-    /// deltas of `instrument_id` a feature read, if any: an update no
-    /// feature reads, or custom data, is none.
+    /// The custom series among the features' series, which the set hands to their custom handlers.
+    /// The series of raw features are not among them.
+    #[must_use]
+    pub fn handled_custom(&self) -> Vec<CustomSeries> {
+        let mut custom: Vec<CustomSeries> = Vec::new();
+
+        for slot in self.slots.borrow().iter() {
+            for source in slot.sources() {
+                if let Source::Custom(series, _) = source
+                    && !custom.contains(series)
+                {
+                    custom.push(series.clone());
+                }
+            }
+        }
+        custom
+    }
+
+    /// The `ts_init` of the latest update of `instrument_id` that a feature read, if any.
     #[must_use]
     pub fn last_update(&self, instrument_id: InstrumentId) -> Option<UnixNanos> {
         self.updates.borrow().get(&instrument_id).copied()
     }
 
-    /// Records an update of `instrument_id` at `ts_init`, read by a
-    /// feature; an older one leaves the latest.
     fn updated(&self, instrument_id: InstrumentId, ts_init: UnixNanos) {
         let mut updates = self.updates.borrow_mut();
         let latest = updates.entry(instrument_id).or_insert(ts_init);
         *latest = (*latest).max(ts_init);
     }
 
-    /// Registers the set with `actor`'s Nautilus indicators, from its
-    /// `on_start`: each tick feature, or raw feature of a custom series on
-    /// a root, reads the contract standing for its instrument or root now
-    /// (`rolls::front`), the
-    /// raw features from `actor`'s cache, and the set is registered for the
-    /// bars of each bar type a feature reads (`register_contracts`).
-    /// Nautilus registers an indicator once per source, so a set registered
-    /// again, on a restart, gets each bar once.
+    /// Returns whether any of `sources` reads the tick.
+    ///
+    /// It records the update under the instrument of each source that does, or under the root for a
+    /// root.
+    fn reads_ticks(
+        &self,
+        sources: &[Source],
+        data: &NautilusDataType,
+        contract: InstrumentId,
+        ts_init: UnixNanos,
+    ) -> bool {
+        let mut read = false;
+
+        for source in sources {
+            if let Source::Ticks(of, reading) = source
+                && of == data
+                && reading.contract == contract
+            {
+                self.updated(reading.instrument_id, ts_init);
+                read = true;
+            }
+        }
+        read
+    }
+
+    fn reads_bar(&self, sources: &[Source], bar: &Bar) -> bool {
+        let read = sources.iter().any(|source| match source {
+            Source::Bars(bar_type) => bar_type.standard() == bar.bar_type.standard(),
+            Source::Ticks(..) | Source::Custom(..) => false,
+        });
+
+        if read {
+            self.updated(bar.bar_type.instrument_id(), bar.ts_init);
+        }
+        read
+    }
+
+    pub(super) fn warmed(self: &Rc<Self>, warmup: Warmup) -> Warmup {
+        let ticks = self.ticks();
+        warmup
+            .feeding(&self.bar_types(), Rc::clone(self) as SharedActorIndicator)
+            .feeding_ticks(&ticks, Rc::clone(self) as SharedActorIndicator)
+            .feeding_books(&ticks, Rc::clone(self) as Rc<dyn BookIndicator>)
+            .feeding_custom(
+                &self.handled_custom(),
+                Rc::clone(self) as Rc<dyn CustomIndicator>,
+            )
+    }
+
+    /// Registers the set on `actor`, from its `on_start`.
+    ///
+    /// A set registered again on a restart gets each update once, because the actor's indicators
+    /// are not registered with. Temporary until Nautilus holds and orders them: helix-trader#16 and
+    /// helix-trader#46.
     pub fn register<A: DataActor + DataActorNative>(self: &Rc<Self>, actor: &mut A) {
         *self.cache.borrow_mut() = Some(actor.cache_rc());
         let now = actor.clock().utc_now();
+
         for slot in self.slots.borrow_mut().iter_mut() {
-            if let Some(reading) = slot.reading_mut() {
+            for reading in slot.readings_mut() {
                 reading.contract = front(reading.instrument_id, now);
             }
         }
-        self.register_contracts(actor);
     }
 
-    /// The width of the target's bracket its features read, if any: the
-    /// one the target's setter is to run on (`TargetSetter::sharing`).
     pub(super) fn bracket_width(&self) -> Option<&BracketWidth> {
         self.width.as_deref()
     }
 
-    /// Moves the features reading a root rolled by `roll` (those on its
-    /// pre contract that are not the contract itself, read as a plain
-    /// instrument), tick and raw features alike, a custom series' on the
-    /// root among them, to its post contract, and
-    /// resets the tick features (`Indicator::reset`): they are cold until
-    /// they refill on the post contract, so the set is not initialized and
-    /// decisions wait; a raw feature reads the post contract's latest point
-    /// the cache holds. The other features are untouched. From the roller's transition
-    /// (`rolls::Roller::on_time_event`).
-    pub fn roll<A: DataActorNative>(self: &Rc<Self>, actor: &mut A, roll: &Transition) {
+    /// Moves the features that read the root `roll` rolls to the post contract.
+    ///
+    /// Only features on its pre contract that are not the contract itself move. The roller calls it
+    /// on a transition (`rolls::Roller::on_time_event`).
+    pub fn roll(&self, roll: &Transition) {
         for slot in self.slots.borrow_mut().iter_mut() {
             slot.roll(roll);
         }
-        self.register_contracts(actor);
+    }
+}
+
+/// The warmup's side of the set for books (`Warmup::feeding_books`).
+impl BookIndicator for FeatureSet {
+    fn handle_depth(&self, depth: &OrderBookDepth) {
+        for slot in self.slots.borrow_mut().iter_mut() {
+            if let Slot::Indicator(sources, feature) = slot
+                && self.reads_ticks(
+                    sources,
+                    &NautilusDataType::OrderBookDepth,
+                    depth.instrument_id,
+                    depth.ts_init,
+                )
+            {
+                feature.handle_depth(depth);
+            }
+        }
     }
 
-    /// Registers the set with `actor`'s Nautilus indicators for the bars of
-    /// each bar type a feature reads. Not for quotes and trades: the warmup
-    /// hands it those (`Warmup::feeding_ticks`), holding the live ones while
-    /// it is pending, which Nautilus does not do for an indicator.
-    fn register_contracts<A: DataActorNative>(self: &Rc<Self>, actor: &mut A) {
-        let core = actor.core_mut();
-        for slot in self.slots.borrow().iter() {
-            let shared = Rc::clone(self) as SharedActorIndicator;
-            match slot {
-                Slot::Bars(bar_type, _) => core.register_indicator_for_bars(*bar_type, shared),
-                Slot::Quotes(..)
-                | Slot::Trades(..)
-                | Slot::Depth(..)
-                | Slot::Deltas(..)
-                | Slot::Custom(..) => {}
+    fn handle_deltas(&self, deltas: &OrderBookDeltas) {
+        for slot in self.slots.borrow_mut().iter_mut() {
+            if let Slot::Indicator(sources, feature) = slot
+                && self.reads_ticks(
+                    sources,
+                    &NautilusDataType::OrderBookDelta,
+                    deltas.instrument_id,
+                    deltas.ts_init,
+                )
+            {
+                feature.handle_deltas(deltas);
             }
         }
     }
 }
 
-/// The warmup's side of the set for books, which Nautilus routes to no
-/// indicator: the warmup hands it those of its responses and the live and
-/// replayed ones the strategy hands it (`Warmup::feeding_books`, see the
-/// module).
-impl BookIndicator for FeatureSet {
-    /// Feeds `depth` to the features declared on its instrument's depth,
-    /// or on the depth of the root it stands for.
-    fn handle_depth(&self, depth: &OrderBookDepth) {
-        for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Depth(reading, feature) = slot
-                && reading.contract == depth.instrument_id
+/// The warmup's side of the set for custom data (`Warmup::feeding_custom`).
+impl CustomIndicator for FeatureSet {
+    fn handle_custom(&self, data: &CustomData) {
+        let mut slots = self.slots.borrow_mut();
+        for (slot, name) in slots.iter_mut().zip(&self.names) {
+            if let Slot::Indicator(sources, feature) = slot
+                && sources.iter().any(|source| source.reads_custom(data))
+                && let Err(e) = feature
+                    .custom_handler()
+                    .expect("a feature on a custom series has a custom handler, checked at build")
+                    .handle_custom(data)
             {
-                feature.handle_depth(depth);
-                self.updated(reading.instrument_id, depth.ts_init);
-            }
-        }
-    }
-
-    /// Feeds `deltas` to the features declared on its instrument's deltas,
-    /// or on the deltas of the root it stands for.
-    fn handle_deltas(&self, deltas: &OrderBookDeltas) {
-        for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Deltas(reading, feature) = slot
-                && reading.contract == deltas.instrument_id
-            {
-                feature.handle_deltas(deltas);
-                self.updated(reading.instrument_id, deltas.ts_init);
+                log::error!("feature {name} on the custom data {}: {e}", data.data_type);
             }
         }
     }
 }
 
 impl Slot {
-    /// The feature's value, if it is initialized: a raw feature's read of
-    /// the latest point of its data type in `cache`, none before the set is
-    /// registered with one.
     fn value(&self, cache: Option<&Cache>) -> Option<f64> {
         match self {
-            Self::Quotes(_, feature)
-            | Self::Trades(_, feature)
-            | Self::Bars(_, feature)
-            | Self::Depth(_, feature)
-            | Self::Deltas(_, feature) => feature.initialized().then(|| feature.value()),
-            Self::Custom(series, reading, read) => {
-                let on = reading.map(|reading| series.on(reading.contract));
-                cache?
-                    .custom_data(on.as_ref().unwrap_or(series).data_type())
-                    .map(&**read)
+            Self::Indicator(_, feature) => feature.initialized().then(|| feature.value()),
+            Self::Custom(series, reading, read) => cache?
+                .custom_data(&read_type(series, reading.as_ref()))
+                .map(&**read),
+        }
+    }
+
+    fn sources(&self) -> &[Source] {
+        match self {
+            Self::Indicator(sources, _) => sources,
+            Self::Custom(..) => &[],
+        }
+    }
+
+    fn readings_mut(&mut self) -> Vec<&mut Reading> {
+        match self {
+            Self::Indicator(sources, _) => sources
+                .iter_mut()
+                .filter_map(|source| match source {
+                    Source::Ticks(_, reading) => Some(reading),
+                    Source::Custom(_, reading) => reading.as_mut(),
+                    Source::Bars(_) => None,
+                })
+                .collect(),
+            Self::Custom(_, reading, _) => reading.iter_mut().collect(),
+        }
+    }
+
+    fn roll(&mut self, roll: &Transition) {
+        let mut moved = false;
+
+        for reading in self.readings_mut() {
+            if reading.contract == roll.pre && reading.instrument_id != roll.pre {
+                reading.contract = roll.post;
+                moved = true;
             }
         }
-    }
 
-    /// What a tick feature or a raw feature of a custom series on a root
-    /// reads; none for bars or another custom series.
-    fn reading_mut(&mut self) -> Option<&mut Reading> {
-        match self {
-            Self::Quotes(reading, _)
-            | Self::Trades(reading, _)
-            | Self::Depth(reading, _)
-            | Self::Deltas(reading, _) => Some(reading),
-            Self::Custom(_, reading, _) => reading.as_mut(),
-            Self::Bars(..) => None,
-        }
-    }
-
-    /// Moves the feature to `roll`'s post contract and resets it, if it
-    /// reads the root on the pre contract (see `FeatureSet::roll`).
-    fn roll(&mut self, roll: &Transition) {
-        let Some(reading) = self.reading_mut() else {
-            return;
-        };
-        if reading.contract == roll.pre && reading.instrument_id != roll.pre {
-            reading.contract = roll.post;
+        if moved {
             self.reset();
         }
     }
 
-    /// Makes the feature cold: an indicator reset (`Indicator::reset`); a
-    /// raw feature holds nothing to reset, reading the cache.
     fn reset(&mut self) {
         match self {
-            Self::Quotes(_, feature)
-            | Self::Trades(_, feature)
-            | Self::Bars(_, feature)
-            | Self::Depth(_, feature)
-            | Self::Deltas(_, feature) => feature.reset(),
+            Self::Indicator(_, feature) => feature.reset(),
             Self::Custom(..) => {}
         }
     }
 
-    /// The tick series a tick feature reads, of its declared instrument;
-    /// none for bars or a custom series.
-    fn tick_series(&self) -> Option<TickSeries> {
-        let (data, reading) = match self {
-            Self::Quotes(reading, _) => (NautilusDataType::QuoteTick, reading),
-            Self::Trades(reading, _) => (NautilusDataType::TradeTick, reading),
-            Self::Depth(reading, _) => (NautilusDataType::OrderBookDepth, reading),
-            Self::Deltas(reading, _) => (NautilusDataType::OrderBookDelta, reading),
-            Self::Bars(..) | Self::Custom(..) => return None,
-        };
-        Some(TickSeries {
-            data,
-            instrument_id: reading.instrument_id,
-        })
-    }
-
-    /// The series the feature reads, as a feature's name and the
-    /// fingerprint have it: the bar type of bars, the tick series of
-    /// ticks (`QuoteTick of XAUUSD.ICMARKETS`), a root's as the root, a
-    /// custom series by its data type as Nautilus writes it, its topic of
-    /// its type name, metadata and identifier (see `CustomSeries`).
+    /// The series as they appear in a feature's name and the fingerprint.
     fn series(&self) -> String {
         match self {
-            Self::Bars(bar_type, _) => bar_type.to_string(),
+            Self::Indicator(sources, _) => sources
+                .iter()
+                .map(Source::series)
+                .collect::<Vec<_>>()
+                .join(", "),
             Self::Custom(series, ..) => series.to_string(),
-            slot => slot
-                .tick_series()
-                .expect("a feature on neither bars nor a custom series reads ticks")
-                .to_string(),
         }
     }
 }
 
+impl Source {
+    fn of(series: &Series) -> Self {
+        match series {
+            Series::Bars(bar_type) => Self::Bars(*bar_type),
+            Series::Ticks(ticks) => {
+                Self::Ticks(ticks.data.clone(), Reading::of(ticks.instrument_id))
+            }
+            Series::Custom(custom) => Self::Custom(custom.clone(), custom.root().map(Reading::of)),
+        }
+    }
+
+    fn tick_series(&self) -> Option<TickSeries> {
+        match self {
+            Self::Ticks(data, reading) => Some(TickSeries {
+                data: data.clone(),
+                instrument_id: reading.instrument_id,
+            }),
+            Self::Bars(_) | Self::Custom(..) => None,
+        }
+    }
+
+    fn reads_custom(&self, data: &CustomData) -> bool {
+        match self {
+            Self::Custom(series, reading) => read_type(series, reading.as_ref()) == data.data_type,
+            Self::Bars(_) | Self::Ticks(..) => false,
+        }
+    }
+
+    fn series(&self) -> String {
+        match self {
+            Self::Bars(bar_type) => bar_type.to_string(),
+            Self::Ticks(..) => self
+                .tick_series()
+                .expect("a tick source has a tick series")
+                .to_string(),
+            Self::Custom(series, _) => series.to_string(),
+        }
+    }
+}
+
+fn read_type(series: &CustomSeries, reading: Option<&Reading>) -> DataType {
+    reading.map_or_else(
+        || series.data_type().clone(),
+        |reading| series.on(reading.contract).data_type().clone(),
+    )
+}
+
 impl Reading {
-    /// `instrument_id` read, on itself until `register` sets the contract
-    /// standing for it.
     const fn of(instrument_id: InstrumentId) -> Self {
         Self {
             instrument_id,
@@ -644,9 +715,8 @@ impl Debug for FeatureSet {
     }
 }
 
-/// Nautilus' side of the set, for its bars, and the warmup's, for its quotes
-/// and trades (`Warmup::feeding_ticks`). Its handlers never fail: a
-/// feature's error is logged, and the other features are fed.
+/// The warmup's side of the set, for bars (`Warmup::feeding`), quotes and trades
+/// (`Warmup::feeding_ticks`).
 impl ActorIndicator for FeatureSet {
     fn key(&self) -> usize {
         std::ptr::from_ref(self).addr()
@@ -663,13 +733,16 @@ impl ActorIndicator for FeatureSet {
     fn handle_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
         let mut slots = self.slots.borrow_mut();
         for (slot, name) in slots.iter_mut().zip(&self.names) {
-            if let Slot::Quotes(reading, feature) = slot
-                && reading.contract == quote.instrument_id
+            if let Slot::Indicator(sources, feature) = slot
+                && self.reads_ticks(
+                    sources,
+                    &NautilusDataType::QuoteTick,
+                    quote.instrument_id,
+                    quote.ts_init,
+                )
+                && let Err(e) = feature.handle_quote(quote)
             {
-                if let Err(e) = feature.handle_quote(quote) {
-                    log::error!("feature {name} on the quote {quote}: {e}");
-                }
-                self.updated(reading.instrument_id, quote.ts_init);
+                log::error!("feature {name} on the quote {quote}: {e}");
             }
         }
         Ok(())
@@ -677,25 +750,26 @@ impl ActorIndicator for FeatureSet {
 
     fn handle_trade(&self, trade: &TradeTick) -> anyhow::Result<()> {
         for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Trades(reading, feature) = slot
-                && reading.contract == trade.instrument_id
+            if let Slot::Indicator(sources, feature) = slot
+                && self.reads_ticks(
+                    sources,
+                    &NautilusDataType::TradeTick,
+                    trade.instrument_id,
+                    trade.ts_init,
+                )
             {
                 feature.handle_trade(trade);
-                self.updated(reading.instrument_id, trade.ts_init);
             }
         }
         Ok(())
     }
 
-    /// Nautilus routes a bar by instrument and specification; a feature
-    /// reads the bars of its bar type alone, of the same aggregation source.
     fn handle_bar(&self, bar: &Bar) -> anyhow::Result<()> {
         for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Bars(bar_type, feature) = slot
-                && bar_type.standard() == bar.bar_type.standard()
+            if let Slot::Indicator(sources, feature) = slot
+                && self.reads_bar(sources, bar)
             {
                 feature.handle_bar(bar);
-                self.updated(bar_type.instrument_id(), bar.ts_init);
             }
         }
         Ok(())
@@ -703,169 +777,55 @@ impl ActorIndicator for FeatureSet {
 }
 
 impl FeatureSetBuilder {
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the quotes of `instrument_id`.
+    /// Declares the feature of `declared`, built from its table in `indicators`, on `series`.
+    ///
+    /// `build` refuses an empty list of series, and a custom series if the feature has no custom
+    /// handler. The load refuses a missing, unparsable or refused table for an indicator the
+    /// strategy declares (`Part::INDICATORS`).
     ///
     /// # Panics
     ///
-    /// Panics if its table is missing, does not parse or is refused,
-    /// which the load refuses of an indicator the strategy declares
-    /// (`Part::INDICATORS`).
+    /// Panics if:
+    /// - Its table is missing.
+    /// - Its table does not parse or is refused.
     #[must_use]
-    pub fn quotes<A>(
-        self,
-        instrument_id: InstrumentId,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        self.table(declared, indicators, |feature| {
-            Slot::Quotes(Reading::of(instrument_id), feature)
-        })
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the trades of `instrument_id`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `quotes`).
-    #[must_use]
-    pub fn trades<A>(
-        self,
-        instrument_id: InstrumentId,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        self.table(declared, indicators, |feature| {
-            Slot::Trades(Reading::of(instrument_id), feature)
-        })
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the bars of `bar_type`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `quotes`).
-    #[must_use]
-    pub fn bars<A>(
-        self,
-        bar_type: BarType,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        self.table(declared, indicators, |feature| {
-            Slot::Bars(bar_type, feature)
-        })
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the book depth of `instrument_id`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `quotes`).
-    #[must_use]
-    pub fn depth<A>(
-        self,
-        instrument_id: InstrumentId,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        self.table(declared, indicators, |feature| {
-            Slot::Depth(Reading::of(instrument_id), feature)
-        })
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the book deltas of `instrument_id`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `quotes`).
-    #[must_use]
-    pub fn deltas<A>(
-        self,
-        instrument_id: InstrumentId,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        self.table(declared, indicators, |feature| {
-            Slot::Deltas(Reading::of(instrument_id), feature)
-        })
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the quotes of `instrument_id`, over the bracket of
-    /// `width`, which it is handed (`OverBracket::over`) and the target's
-    /// setter runs on (`FeatureSet::bracket_width`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `quotes`), or if a feature declared before reads another width: the
-    /// setter runs on one.
-    #[must_use]
-    pub fn over_bracket<A>(
+    pub fn feature<A>(
         mut self,
-        instrument_id: InstrumentId,
+        series: &[Series],
         declared: Declared<A>,
         indicators: &IndicatorsConfig,
-        width: &Rc<BracketWidth>,
     ) -> Self
     where
         A: IndicatorArgs,
-        A::Indicator: OverBracket + 'static,
+        A::Indicator: Feature + 'static,
     {
-        assert!(
-            self.width
-                .as_ref()
-                .is_none_or(|read| Rc::ptr_eq(read, width)),
-            "features over two widths of the target's bracket: its setter runs on one"
-        );
-        self.width = Some(Rc::clone(width));
-        let table = declared.name();
-        self.arguments
-            .insert(table, indicators.canonical_args(declared));
-        let mut feature = indicators.build(declared);
-        feature.over(Rc::clone(width));
-        self.declare(
-            Name::Table(table),
-            Slot::Quotes(Reading::of(instrument_id), Box::new(feature)),
-        )
+        let feature = Box::new(self.built(declared, indicators));
+        self.indicator(declared.name(), series, feature)
     }
 
-    /// Declares a raw feature, named `name`, on `series`, a custom series
-    /// (see `strategy::requirements::CustomSeries`), an instrument's
-    /// custom data under its id among them: its value is `read` of the
-    /// latest point of its data type the cache holds, cold until it holds
-    /// one. On a root, it reads the series of the contract standing for
-    /// the root, from `register` and each roll; any other series stands
-    /// for itself, a contract's among them, and no roll moves it.
+    /// Takes the bracket `width` (`FeatureSet::bracket_width`).
+    ///
+    /// The features over the bracket read it, and the target's setter runs on it. `build` refuses:
+    /// - A second width.
+    /// - A width no feature reads.
+    /// - A feature over the bracket with no width.
+    #[must_use]
+    pub fn bracket(mut self, width: &Rc<BracketWidth>) -> Self {
+        if self.width.is_some() {
+            self.refused.push(
+                "the set is given the width of the target's bracket twice: the target's setter \
+                 runs on one"
+                    .to_string(),
+            );
+        }
+        self.width = Some(Rc::clone(width));
+        self
+    }
+
+    /// Declares a raw feature, named `name`, on the custom series `series`.
+    ///
+    /// Its value is `read` applied to the latest point of its data type that the cache holds. A
+    /// series not on a root stands for itself, and no roll moves it.
     #[must_use]
     pub fn custom(
         self,
@@ -883,43 +843,51 @@ impl FeatureSetBuilder {
         )
     }
 
-    /// Sets the version of the strategy's feature code, in the
-    /// fingerprint: bumped by hand whenever what the features compute
-    /// changes, which then rebuilds the strategy's dataset and models. 0
-    /// unless given.
+    /// Sets the version of the strategy's feature code, in the fingerprint.
+    ///
+    /// It is bumped by hand when what the features compute changes, which rebuilds the strategy's
+    /// dataset and models. It is 0 unless given.
     #[must_use]
     pub const fn version(mut self, version: u32) -> Self {
         self.version = version;
         self
     }
 
-    /// Declares how much data the features read before a decision, such
-    /// as the strategy's warmup: a dataset build replays this much before
-    /// its first day, so that the day's first decisions are those of a
-    /// longer build. None unless given.
+    /// Declares how much data the features read before a decision.
+    ///
+    /// A dataset build replays this much before its first day. It is zero unless given.
     #[must_use]
     pub const fn warmup(mut self, warmup: SignedDuration) -> Self {
         self.warmup = warmup;
         self
     }
 
-    /// The feature set, shared. A feature of a table is named after the
-    /// table if the table feeds it alone, `<series>:<table>` if it feeds
-    /// several, the series the feature's (see the module for both forms);
-    /// a raw feature as given. The fingerprint hashes, each part
-    /// told apart (`Fingerprint::with`), the names in order, then
-    /// `series <series>` of each feature in that order, then
-    /// `indicators.<table> <arguments>` of each table a feature is built
-    /// from, by table name, the arguments in canonical form
-    /// (`IndicatorsConfig::canonical_args`), then `version <n>` and
-    /// `warmup <ns> ns`.
+    /// Returns the feature set, shared.
+    ///
+    /// Features are named as the module says. The fingerprint hashes these parts, each told apart
+    /// (`Fingerprint::with`):
+    /// - The names in order.
+    /// - `series <series>` of each feature.
+    /// - `indicators.<table> <arguments>` of each table by name
+    ///   (`IndicatorsConfig::canonical_args`).
+    /// - `version <n>`.
+    /// - `warmup <ns> ns`.
     ///
     /// # Errors
     ///
-    /// Returns an error if no feature is declared, two share a name, or
-    /// the warmup is negative.
+    /// Returns an error if:
+    /// - No feature is declared.
+    /// - A feature is declared on no series, or on a custom series it has no custom handler for
+    ///   (see `feature`).
+    /// - Two features share a name.
+    /// - A feature over the target's bracket is given no width.
+    /// - A width is given twice or read by no feature (see `bracket`).
+    /// - The warmup is negative.
     pub fn build(self) -> anyhow::Result<Rc<FeatureSet>> {
         anyhow::ensure!(!self.names.is_empty(), "a feature set needs a feature");
+        if let Some(refused) = self.refused.first() {
+            anyhow::bail!("{refused}");
+        }
         let names: Vec<String> = self
             .names
             .iter()
@@ -936,15 +904,43 @@ impl FeatureSetBuilder {
         if let Some(name) = names.iter().find(|name| !seen.insert(*name)) {
             anyhow::bail!("two features are named {name}");
         }
+        let mut slots = self.slots;
+        let mut over = slots
+            .iter_mut()
+            .zip(&names)
+            .filter_map(|(slot, name)| match slot {
+                Slot::Indicator(_, feature) => feature.over_bracket().map(|over| (over, name)),
+                Slot::Custom(..) => None,
+            })
+            .peekable();
+
+        match &self.width {
+            Some(width) => {
+                anyhow::ensure!(
+                    over.peek().is_some(),
+                    "the set is given a width of the target's bracket, and no feature is formed \
+                     over the bracket (`Feature::over_bracket`)"
+                );
+
+                for (feature, _) in over {
+                    feature.over(Rc::clone(width));
+                }
+            }
+            None => {
+                if let Some((_, name)) = over.next() {
+                    anyhow::bail!(
+                        "the feature {name} is formed over the target's bracket, and the set is \
+                         given no width of it (`FeatureSetBuilder::bracket`)"
+                    );
+                }
+            }
+        }
         anyhow::ensure!(
             !self.warmup.is_negative(),
             "the features' warmup {:#} is negative",
             self.warmup
         );
-        let series = self
-            .slots
-            .iter()
-            .map(|slot| format!("series {}", slot.series()));
+        let series = slots.iter().map(|slot| format!("series {}", slot.series()));
         let arguments = self
             .arguments
             .iter()
@@ -962,7 +958,7 @@ impl FeatureSetBuilder {
             });
         Ok(Rc::new(FeatureSet {
             names,
-            slots: RefCell::new(self.slots),
+            slots: RefCell::new(slots),
             width: self.width,
             updates: RefCell::default(),
             cache: RefCell::default(),
@@ -971,27 +967,44 @@ impl FeatureSetBuilder {
         }))
     }
 
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, read from the source `slot` gives it, its table's
-    /// arguments recorded for the fingerprint.
-    fn table<A>(
-        mut self,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-        slot: impl FnOnce(Box<dyn Feature>) -> Slot,
-    ) -> Self
+    /// Builds the indicator, recording its table's arguments for the fingerprint.
+    fn built<A>(&mut self, declared: Declared<A>, indicators: &IndicatorsConfig) -> A::Indicator
     where
         A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
     {
-        let table = declared.name();
         self.arguments
-            .insert(table, indicators.canonical_args(declared));
-        let feature = Box::new(indicators.build(declared));
-        self.declare(Name::Table(table), slot(feature))
+            .insert(declared.name(), indicators.canonical_args(declared));
+        indicators.build(declared)
     }
 
-    /// Whether `table` feeds more than one of the features.
+    /// Refuses an empty list of series or a custom series without a custom handler (see `feature`).
+    fn indicator(
+        mut self,
+        table: &'static str,
+        series: &[Series],
+        mut feature: Box<dyn Feature>,
+    ) -> Self {
+        if series.is_empty() {
+            self.refused.push(format!(
+                "the feature of [indicators.{table}] reads no series"
+            ));
+        }
+
+        if feature.custom_handler().is_none() {
+            for series in series {
+                if let Series::Custom(custom) = series {
+                    self.refused.push(format!(
+                        "the feature of [indicators.{table}] is declared on the custom series \
+                         {custom}, which it does not read: it has no custom handler \
+                         (`Feature::custom_handler`)"
+                    ));
+                }
+            }
+        }
+        let sources = series.iter().map(Source::of).collect();
+        self.declare(Name::Table(table), Slot::Indicator(sources, feature))
+    }
+
     fn feeds_several(&self, table: &str) -> bool {
         self.names
             .iter()
@@ -1008,9 +1021,8 @@ impl FeatureSetBuilder {
 }
 
 impl Fingerprint {
-    /// This fingerprint extended with `part`: a change to either changes
-    /// the result. The part's length goes in first, so that parts are told
-    /// apart, not concatenated.
+    /// Extends the fingerprint with `part`, its length first, so that parts are told apart, not
+    /// concatenated.
     #[must_use]
     pub fn with(self, part: &[u8]) -> Self {
         let hash = Sha256::new()

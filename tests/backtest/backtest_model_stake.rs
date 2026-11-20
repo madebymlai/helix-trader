@@ -1,15 +1,15 @@
-//! A model strategy sends its decisions' trades at a stake of the
-//! account's equity (`strategy::orders::Trade::send`), while its targets,
-//! the dataset's rows and the decisions' payoff features, are priced at the
-//! reference stake: the config's risk, multiple 1, of the dataset balance,
-//! a constant equity (`model::targets`). On the hand-worked targets' quotes
-//! (`backtest_targets`) the probe of `common::dataset` trades the long of a
-//! baseline model at every decision, on an account of 25M USD where its
-//! dataset runs hold 10M USD: each entry fills at its stake of the account,
-//! rounded down, a bracket's over its stop, a time-only target's over its
-//! ATR, and at a multiple of it, while the rows are at the reference stake.
-//! The rows do not move with the dataset run's P&L, nor with where its
-//! replay starts. One node per thread.
+//! A model strategy sends its trades at a stake of the account's equity
+//! (`strategy::orders::Trade::send`). Its targets, the dataset's rows and the payoff features are
+//! priced at the reference stake: the config's risk, multiple 1, of the dataset balance
+//! (`model::targets`).
+//!
+//! On the hand-worked quotes of `backtest_targets`, the probe of `common::dataset` trades a
+//! baseline long at every decision on a 25M USD account, where its dataset runs hold 10M. Each
+//! entry is its stake of the account, rounded down, over the stop for a bracket and over the ATR
+//! for a time-only target, at a multiple of the stake. The rows stay at the reference stake
+//! whatever the dataset run's P&L or replay start.
+//!
+//! The reference stake is 4 USD of 10M. The entries' stake is 10 USD of the 25M account.
 
 use std::{path::Path, thread};
 
@@ -30,13 +30,13 @@ use crate::{
     backtest_model::hand_worked,
     backtest_targets::hand_worked_quotes,
     common::{
-        dataset::{Account, Record, baseline_of, blueprint, features, replay_of, trade_staking},
+        dataset::{
+            Account, Record, baseline_of, blueprint, features, model_set, replay_of, trade_staking,
+        },
         ic,
     },
 };
 
-/// The account the probe trades on, holding 25M USD where its dataset runs
-/// hold 10M: the config's stake of it, 0.00004%, is 10 USD.
 fn account(multiple: i64) -> Account {
     Account {
         balance: Money::from("25000000 USD"),
@@ -44,14 +44,11 @@ fn account(multiple: i64) -> Account {
     }
 }
 
-/// The window of the hand-worked quotes the probe decides over, its
-/// decisions at 09:00 to 12:00.
+/// Returns the window of the hand-worked quotes' decisions, 09:00 to 12:00.
 fn window() -> (Timestamp, Timestamp) {
     (ic::at("08:30:00"), ic::at("12:30:00"))
 }
 
-/// The rows the dataset run of `config` settles over `[from, to]` of the
-/// hand-worked quotes.
 fn rows_of(config: &ModelConfig, from: Timestamp, to: Timestamp) -> Vec<TargetRow> {
     let config = config.clone();
     thread::spawn(move || {
@@ -62,19 +59,19 @@ fn rows_of(config: &ModelConfig, from: Timestamp, to: Timestamp) -> Vec<TargetRo
     .unwrap()
 }
 
-/// What the probe of `config` records trading the long of a baseline model
-/// published under `models`, on `account`, over `window`.
 fn traded(config: &ModelConfig, models: &Path, account: Account) -> Record {
     let (config, models) = (config.clone(), models.to_path_buf());
     thread::spawn(move || {
         let (from, to) = window();
         blueprint(features(), config.clone())
-            .model_set(&models)
+            .model_store(&models)
             .unwrap()
-            .side(Side::Long)
-            .unwrap()
-            .store()
-            .publish(&baseline_of(&features(), &config, Side::Long, from, 8))
+            .publish(&model_set(
+                &config,
+                from,
+                vec![baseline_of(&features(), &config, Side::Long, 8)],
+                None,
+            ))
             .unwrap();
         let catalog = ic::catalog_of(hand_worked_quotes(), ic::at("08:00:00"), ic::at("13:00:00"));
         trade_staking(&catalog, features(), (from, to), &config, &models, &account)
@@ -83,7 +80,6 @@ fn traded(config: &ModelConfig, models: &Path, account: Account) -> Record {
     .unwrap()
 }
 
-/// Each entry `record` filled: when, of how much, and what it risks.
 fn entries(record: &Record) -> Vec<(Timestamp, Quantity, Option<EntryRisk>)> {
     record
         .entries
@@ -92,12 +88,10 @@ fn entries(record: &Record) -> Vec<(Timestamp, Quantity, Option<EntryRisk>)> {
         .collect()
 }
 
-/// The decision at `hh_mm`, firing 10 ms after it.
 fn decided(hh_mm: &str) -> Timestamp {
     ic::at(&format!("{hh_mm}:00.010"))
 }
 
-/// The units of each side of `rows`, in USD.
 fn units(rows: &[TargetRow]) -> Vec<(UnixNanos, Money, Money)> {
     rows.iter()
         .map(|row| {
@@ -110,14 +104,7 @@ fn units(rows: &[TargetRow]) -> Vec<(UnixNanos, Money, Money)> {
         .collect()
 }
 
-/// The hand-worked bracket's long, 7.5 bps of the mid of 4000.10 away on
-/// both sides, its stop 3.00 away, 4001.10 and 3.00 after the rise at
-/// 11:20. The dataset run prices its rows at the reference stake, 4 USD of
-/// 10M (`RISK`): one ounce, IC's whole ounces, one R worth 3 USD. Trading
-/// on 25M USD at the config's stake, 10 USD, each entry is 10 / 3.00 = 3.33
-/// oz rounded down, 3 oz, its R 9 USD; at twice the stake, 20 USD, 6.67
-/// rounded down, 6 oz, its R 18 USD. The trades' P&L before an entry moves
-/// the account's equity by a few dollars, not the size.
+/// P&L before an entry moves the equity by a few dollars, not the size.
 #[rstest]
 fn a_model_strategys_bracket_trade_fills_at_its_stake_of_the_accounts_equity() {
     let config = hand_worked(Side::Long);
@@ -152,11 +139,8 @@ fn a_model_strategys_bracket_trade_fills_at_its_stake_of_the_accounts_equity() {
     );
 }
 
-/// The time-only target of the hand-worked targets (`backtest_targets`):
-/// closed 30 minutes after its decision, its one R the ATR of 2 hourly bars
-/// of the mids, none at 09:00, 1.60 at 10:00 and 2.40 at 11:00, and at
-/// 12:00, after the hour from 4000.10 to 4001.10 (the rise at 11:20), a
-/// true range of 1.00, (2.40 + 1.00) / 2 = 1.70.
+/// The time-only target of `backtest_targets` closes after 30 minutes. Its R is the ATR of 2 hourly
+/// mid bars: none at 09:00, 1.60 at 10:00, 2.40 at 11:00 and 1.70 at 12:00.
 fn time_only() -> ModelConfig {
     let spec = Target::builder()
         .limit(SignedDuration::from_mins(30))
@@ -174,12 +158,6 @@ fn time_only() -> ModelConfig {
     }
 }
 
-/// The time-only target's long on its ATR. At the reference stake, 4 USD
-/// of 10M, the dataset's rows are of 4 / 1.60 = 2.5 oz rounded down, 2 oz,
-/// one R worth 3.20 USD, at 10:00, and of 4 / 2.40 = 1.67 oz, 1 oz, worth
-/// 2.40 USD, at 11:00. Trading on 25M USD at the config's stake, 10 USD,
-/// the entries are 10 / 1.60 = 6.25 oz, 6 oz, and 10 / 2.40 = 4.17 oz, 4
-/// oz, each one R worth 9.60 USD, and at 12:00 10 / 1.70 = 5.88 oz, 5 oz.
 #[rstest]
 fn a_model_strategys_time_only_trade_fills_at_its_stake_over_its_atr() {
     let config = time_only();
@@ -189,39 +167,34 @@ fn a_model_strategys_time_only_trade_fills_at_its_stake_over_its_atr() {
 
     let record = traded(&config, models.path(), account(1));
 
-    let filled: Vec<(Timestamp, Quantity, Decimal)> = entries(&record)
-        .into_iter()
-        .map(|(at, quantity, risk)| (at, quantity, risk.unwrap().multiple))
-        .collect();
+    let risk = |r: &str| {
+        Some(EntryRisk {
+            r: Money::from(r),
+            multiple: Decimal::ONE,
+        })
+    };
     assert_eq!(
-        filled,
+        entries(&record),
         [
-            (decided("10:00"), Quantity::from(6), Decimal::ONE),
-            (decided("11:00"), Quantity::from(4), Decimal::ONE),
-            (decided("12:00"), Quantity::from(5), Decimal::ONE),
+            (decided("10:00"), Quantity::from(6), risk("9.60 USD")),
+            (decided("11:00"), Quantity::from(4), risk("9.60 USD")),
+            (decided("12:00"), Quantity::from(5), risk("8.50 USD")),
         ]
     );
-    for (_, _, risk) in entries(&record).iter().take(2) {
-        let r = risk.unwrap().r.as_f64();
-        assert!((r - 9.6).abs() < 1e-6, "{r}");
-    }
-    let units: Vec<(f64, f64)> = units(&rows)
-        .into_iter()
-        .map(|(_, long, short)| (long.as_f64(), short.as_f64()))
-        .collect();
-    assert_eq!(units.len(), 2, "{units:?}");
-    for ((long, short), unit) in units.into_iter().zip([3.2, 2.4]) {
-        assert!((long - unit).abs() < 1e-6 && (short - unit).abs() < 1e-6);
-    }
+    let unit = |unit: &str| Money::from(unit);
+    let decision = |hour: &str| UnixNanos::from(decided(&format!("{hour}:00")));
+    assert_eq!(
+        units(&rows),
+        [
+            (decision("10"), unit("3.20 USD"), unit("3.20 USD")),
+            (decision("11"), unit("2.40 USD"), unit("2.40 USD")),
+        ]
+    );
 }
 
-/// At a reference stake of 3 USD of 10M, a stop of 3.00 buys exactly one
-/// ounce. The 09:00 decision's long loses 3.64 USD at 09:20, which on the
-/// dataset run's equity would leave 2.99999891 USD to stake at 10:00, under
-/// an ounce. The rows are sized at the balance, not the equity: the 10:00
-/// and 11:00 rows are one ounce, one R worth 3 USD, and the same row by row
-/// whether the replay started at 08:30, before that loss, or at 09:30,
-/// after it.
+/// At a reference stake of 3 USD of 10M, a stop of 3.00 buys exactly one ounce. The 09:00 long
+/// loses 3.64 USD at 09:20, which on the run's equity would leave under an ounce to stake at 10:00.
+/// Rows are sized at the balance, not the equity, whether the replay started at 08:30 or 09:30.
 #[rstest]
 fn the_rows_are_at_the_reference_stake_whatever_the_runs_pnl_and_its_start() {
     let config = ModelConfig {

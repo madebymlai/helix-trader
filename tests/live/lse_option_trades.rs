@@ -1,23 +1,18 @@
-//! End to end on LSE: a node streams the trades of AAPL's options of the
-//! week, `OPRA` contracts, for a minute through the LSE adapter's data
-//! client on data-ws, routed OPRA as the live node routes it, all of them
-//! through one subscription of AAPL's chain. The contracts are the calls
-//! and puts of the week's Friday expiry, the first on or after the run's
-//! UTC day, struck at 200 to 500 by 5, a band holding AAPL's listed
-//! strikes near the money (AAPL at about 355 in November 2026); a strike
-//! not listed simply never trades. Their definitions, which Databento gives
-//! in a live run, filled into the catalog, are written into the node's
-//! cache by hand as Nautilus' Databento decoder gives Databento's: priced
-//! to a cent, a multiplier of 1. It needs the LSE key, `LSE_API_KEY`, from
-//! the environment or `.env`; the free key streams US options, on one
-//! connection a key, so no other live run may hold data-ws meanwhile.
+//! Tests end to end on LSE that a node streams the trades of AAPL's options of the week, `OPRA`
+//! contracts, for a minute, through the LSE adapter's data client on data-ws, routed OPRA as the
+//! live node routes it, with one subscription to AAPL's chain. The contracts are the calls and puts
+//! of the week's Friday expiry, the first on or after the run's UTC day, struck at 200 to 500 by 5,
+//! a band that holds AAPL's listed strikes near the money (AAPL at about 355 in November 2026). A
+//! strike not listed never trades. Databento gives the definitions in a live run. The test writes
+//! them into the node's cache by hand, as Nautilus' Databento decoder gives them: priced to a cent,
+//! with a multiplier of 100.
 //!
-//! A chain sends no last prices, only its contracts' next trades, so run it
-//! while US options trade, 14:30 to 21:00 UTC on a trading day; at any
-//! other time no trade comes and it fails saying so.
+//! The test needs `LSE_API_KEY` from the environment or `.env`. The free key streams US options, on
+//! one connection a key, so no other live run may hold data-ws meanwhile.
 //!
-//! Gated as `lse_history.rs` is: the test returns at once, saying it was
-//! skipped, unless `NAUTILUS_LSE_RUN=1` is set in the shell. Run it with:
+//! A chain sends no last prices, only the next trades of its contracts. Run the test while US
+//! options trade, 14:30 to 21:00 UTC on a trading day. At any other time no trade comes, and the
+//! test fails saying so. It is gated as `lse_history.rs` is. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_LSE_RUN=1 cargo test --test live lse_option_trades:: -- --nocapture
@@ -38,18 +33,15 @@ use nautilus_live::{
 };
 use nautilus_model::{
     data::TradeTick,
-    enums::{AggressorSide, AssetClass, OptionKind},
+    enums::{AggressorSide, AssetClass, ExerciseStyle, OptionKind, SettlementType},
     identifiers::{InstrumentId, Symbol, TraderId},
     instruments::{Instrument, InstrumentAny, OptionContract},
     types::{Currency, Price, Quantity},
 };
 
-/// How long the trades stream.
 const STREAMED: Duration = Duration::from_secs(60);
 
-/// Whether the run is opted in: from the shell, before `.env` is read, so
-/// that the file cannot opt in.
-/// An opted-in run claims the process for this module (`claim_process`).
+/// Returns whether the run is opted in, reading the shell before `.env`, and claims the process.
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_LSE_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -60,11 +52,9 @@ fn opted_in(test: &str) -> bool {
     run
 }
 
-/// AAPL's calls and puts expiring on the week's Friday, the first on or
-/// after `now`'s UTC day, struck at 200 to 500 by 5, defined as Nautilus'
-/// Databento decoder defines an OPRA contract (`decode_option_contract`):
-/// an equity option in USD, priced to a cent, expiring at 16:00 New York,
-/// its multiplier and lot size 1, Databento giving neither.
+/// Returns AAPL's calls and puts of the week, defined as Nautilus' Databento decoder defines an
+/// OPRA contract (`decode_option_contract`). Databento gives neither the lot size, 1, nor the
+/// multiplier.
 fn contracts_of_the_week(now: Timestamp) -> Vec<InstrumentAny> {
     let today = now.to_zoned(TimeZone::UTC).date();
     let friday = (0..7)
@@ -98,8 +88,10 @@ fn contracts_of_the_week(now: Timestamp) -> Vec<InstrumentAny> {
                     .expiration_ns(UnixNanos::from(expiration))
                     .price_precision(2)
                     .price_increment(Price::from("0.01"))
-                    .multiplier(Quantity::from(1))
+                    .multiplier(Quantity::from(100))
                     .lot_size(Quantity::from(1))
+                    .exercise_style(ExerciseStyle::American)
+                    .settlement_type(SettlementType::Physical)
                     .ts_event(UnixNanos::from(now))
                     .ts_init(UnixNanos::from(now))
                     .build()
@@ -110,7 +102,6 @@ fn contracts_of_the_week(now: Timestamp) -> Vec<InstrumentAny> {
     contracts
 }
 
-/// Subscribes to the trades of each contract, recording each.
 #[derive(Debug)]
 struct Trades {
     core: DataActorCore,

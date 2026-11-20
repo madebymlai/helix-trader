@@ -1,65 +1,50 @@
-//! Meta-labeling: the side models pick the side of a trade, and a meta
-//! model decides whether to take it, the trade as the target sets it,
-//! staked by the strategy.
+//! Meta-labeling. The side models pick the side of a trade, and a meta model decides whether to
+//! take it.
 //!
-//! The side picked is the one the decision picks (`deciding`) among the
-//! side models of a `ModelConfig` with a meta section, on the expected R of
-//! each side, its calibrated expected R of the pair (`store::Pair::expect`,
-//! `payoff::pick`). The meta model decides only
-//! when a side is picked, on the decision's features, the strategy's
-//! without either side's payoff features, with the side picked and the
-//! decision's calibrated level and side call after them (`PICKED_FEATURES`),
-//! and learns, as a regression, the realized net R of the trade of the side
-//! picked, the target on that side, with exits or time only, its net P&L
-//! over its unit, read from its row as the side models read their trades
-//! (`dataset::DatasetRow`): a dataset row opens a long and a short at every
-//! decision, so the row has the trade of either side, and the meta's rows
-//! need no replay of their own. It takes the trade when the net R it
-//! expects of it, its calibrated expected R, clears its margin, in R
-//! (`holdout::MetaMargin`).
+//! `deciding` picks the side among the side models by each side's calibrated expected R
+//! (`store::Pair::expect`, `payoff::pick`). The meta decides only when a side is picked. Its
+//! input is the strategy's features without the payoff features of either side, then the side
+//! picked and the decision's calibrated level and side call (`PICKED_FEATURES`).
 //!
-//! The sides' rows are their dataset's, each decided by the pair of the
-//! sides in use at it through the code a strategy decides through
-//! (`deciding::DecidingModels`), of the strategy's model set
-//! (`store::ModelSet`) as its stores are when the rows are made, listed
-//! once, a read error failing them: the latest valid then, trained on
-//! rows settled by its valid-from, so every decision is out of sample; each
-//! side's row, its payoff features, is the row's own
-//! (`dataset::DatasetRow::sides`).
-//! A row before the sides' first pair has no decision: the meta's rows
-//! start there at the earliest, and with no pair of the sides before a
-//! train the meta waits (`schedule::Schedule::plan`). Never retrained, with
-//! neither in use, one train fits the sides as of the meta's window before
-//! it and the meta at it, on those sides' decisions over the window: the
-//! meta filters the very side models it learned from. A row no side is
-//! picked on is no row of the meta; a long-only strategy gives it buys
-//! alone.
+//! The meta learns the realized net R of the trade on the side picked, as a regression. That R is
+//! the trade's net P&L over its unit. The meta reads both from its row, as the side models do
+//! (`dataset::DatasetRow`). A row opens a long and a short at every decision, so the meta needs no
+//! replay of its own. It takes the trade when its calibrated expected R clears its margin
+//! (`earnings::MetaMargin`).
 //!
-//! Two levels at most: a meta section has no meta of its own (`config`).
-
-use jiff::Timestamp;
+//! The meta's rows come from its window, which reaches back from its train. Each row is decided
+//! through the code a strategy decides through (`deciding::DecidingModels::pick_among`). The
+//! decider is the out-of-fold pair that the train fits as of the window's start (`train`), so the
+//! rows are out of sample. No store holds the out-of-fold pair. The meta decides beside the sides
+//! that its train fits as of its own time, in the one model set the train publishes. A row with no
+//! side picked is not a row of the meta.
+//!
+//! There are two levels at most: a meta section has no meta of its own (`config`).
 
 use super::{
-    dataset::DatasetRow, deciding::DecidingModels, features::meta_row, holdout::Example,
-    store::ModelSet,
+    dataset::DatasetRow,
+    deciding::{Picked, SideRow},
+    earnings::Example,
+    features::meta_row,
+    targets::PerSide,
 };
 
-/// The meta's examples of the dataset `rows` of the sides, in time order:
-/// each row a side is picked on, its features with that side and the
-/// decision's level and side call, with the trade on that side and its unit,
-/// whose realized R the meta learns. The side picked on a row is the one
-/// `DecidingModels` picks, on each side's row (`DatasetRow::sides`), among the
-/// sides of the pair of `models` in use then, as its stores list them now,
-/// none before the first.
+/// Returns the meta's examples from the dataset `rows`, in time order.
+///
+/// Each row on which `pick` picks a side gives one example. It holds the row's features with that
+/// side and the decision's level and side call, and the trade on that side with its unit.
 ///
 /// # Errors
 ///
-/// Returns an error if a store cannot be read, or a model fails to predict.
-pub(super) fn examples(models: &ModelSet, rows: &[&DatasetRow]) -> anyhow::Result<Vec<Example>> {
-    let mut models = DecidingModels::new(models)?;
+/// Returns an error if `pick` fails.
+pub(super) fn examples(
+    rows: &[&DatasetRow],
+    mut pick: impl FnMut(&PerSide<SideRow>) -> anyhow::Result<Option<Picked>>,
+) -> anyhow::Result<Vec<Example>> {
     let mut examples = vec![];
+
     for row in rows {
-        let Some(picked) = models.pick(Timestamp::from(row.ts_event), &row.sides())? else {
+        let Some(picked) = pick(&row.sides())? else {
             continue;
         };
         examples.push(Example {
@@ -68,4 +53,87 @@ pub(super) fn examples(models: &ModelSet, rows: &[&DatasetRow]) -> anyhow::Resul
         });
     }
     Ok(examples)
+}
+
+#[cfg(test)]
+mod tests {
+    use jiff::SignedDuration;
+    use nautilus_core::UnixNanos;
+    use rstest::rstest;
+
+    use super::*;
+    use crate::{
+        model::{
+            calibration::Expected,
+            deciding::testing::at,
+            targets::{Exit, Side},
+        },
+        strategy::risk::R,
+    };
+
+    /// The decision at `time` on a mid of 0.7, settled an hour later. The long's stop is worth 2
+    /// USD and the short's 4.
+    fn row(time: &str) -> DatasetRow {
+        let ts = UnixNanos::from(at(time));
+        DatasetRow {
+            features: vec![0.7],
+            long_payoff: vec![0.07],
+            long_pnl: -2.2,
+            long_commission: 0.2,
+            long_exit: Exit::Stop.value(),
+            long_unit: 2.0,
+            short_payoff: vec![0.08],
+            short_pnl: -4.2,
+            short_commission: 0.2,
+            short_exit: Exit::Stop.value(),
+            short_unit: 4.0,
+            settled_at: UnixNanos::from(at(time) + SignedDuration::from_hours(1)),
+            ts_event: ts,
+            ts_init: ts,
+        }
+    }
+
+    fn picked(side: Side) -> Picked {
+        Picked {
+            side,
+            expected_r: R::new(0.4),
+            expected: Expected {
+                level: 0.4,
+                side_call: 0.0,
+            },
+        }
+    }
+
+    #[rstest]
+    fn the_metas_examples_carry_the_unit_of_their_sides_trade() {
+        let rows = [
+            row("2026-01-06T05:00:00Z"),
+            row("2026-01-06T08:00:00Z"),
+            row("2026-01-06T19:00:00Z"),
+        ];
+        let mut picks = [None, Some(picked(Side::Long)), Some(picked(Side::Short))].into_iter();
+
+        let examples = examples(&rows.iter().collect::<Vec<_>>(), |_| {
+            Ok(picks.next().unwrap())
+        })
+        .unwrap();
+
+        let sides_and_units: Vec<(f64, f64)> = examples
+            .iter()
+            .map(|example| (example.features[1], example.trade.unit))
+            .collect();
+        assert_eq!(sides_and_units, [(1.0, 2.0), (-1.0, 4.0)]);
+    }
+
+    #[rstest]
+    fn a_pick_failing_fails_the_metas_examples() {
+        let rows = [row("2026-01-06T08:00:00Z")];
+
+        let err = examples(&rows.iter().collect::<Vec<_>>(), |_| {
+            anyhow::bail!("the model fails to predict")
+        })
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("fails to predict"), "{err:#}");
+    }
 }

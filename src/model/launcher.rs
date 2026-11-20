@@ -1,50 +1,46 @@
-//! Live retraining: how a live node starts a train at a time, and keeps at
-//! most one running per strategy.
+//! Live retraining. A live node starts a train at a time through this module, keeping at most one
+//! running per strategy.
 //!
-//! A `Launcher` starts a train at `t` (`train::Training::train_at`) off the
-//! node's thread and hands back a `Running`, which the retrain actor asks
-//! without waiting: in production a child process, the binary's own
-//! `train` subcommand with `--at t` (`Launcher::process`), since a train
-//! replays the dataset days it lacks through a Nautilus node of its own,
-//! and Nautilus runs no second node in a process while the live node
-//! runs; in tests a thread of this process (`Launcher::in_process`). A
-//! backtest, holding no node while it trains, trains in its own process
-//! and starts no launcher (`backtest_on_models`, in `main.rs`). The
-//! child's exit status says what it did: success is a train that kept no
-//! model, each published or its current one in use; a failure, a current
-//! model kept, the reason the error it printed last (`train` exits with an
-//! error when it keeps a model).
+//! A `Launcher` starts a train at `t` (`train::Training::train_at`) off the node's thread and hands
+//! back a `Running`:
+//! - In production, it runs a child process of the binary's `train --at t` (`Launcher::process`).
+//!   A train replays the dataset days it lacks through a Nautilus node of its own, and Nautilus
+//!   runs no second node in a process while the live node runs.
+//! - In tests, it runs a thread of this process (`Launcher::in_process`).
 //!
-//! `RetrainActor` is a live node's retrains of one strategy, a Nautilus
-//! actor of its own beside the strategy, named after it (`RETRAIN-` and
-//! the strategy's id), so that a node holds one per strategy retrained,
-//! Nautilus refusing two actors of one id. Its timer, on the actor's own
-//! clock, set at the actor's start on an epoch-aligned time
-//! (`schedule::start`), fires at every multiple of the retrain interval
-//! since the epoch; a strategy never retrained has no actor
-//! (`RetrainActor::new`), so no timer is set and no train launched. Each
-//! firing launches a train at once, at the last time the catalog holds for
-//! every series the strategy reads (the earliest of their last stored
-//! timestamps, Nautilus' `ParquetDataCatalog::query_last_timestamp`),
-//! never past the grid time: live, the data up to the last daily
-//! promotion (`live::Recording`). A firing is skipped, with a warning, if
-//! the catalog holds nothing of a series read, if that time is not past
-//! the previous retrain's, the catalog having gained nothing since, or if
-//! the previous retrain is still running. A retrain logs what it did as it
-//! ends, on its own thread, waiting for no decision nor firing: as info
-//! when it succeeded, as an error with its reason when it kept a current
-//! model. The model a retrain publishes
-//! is the strategy's from its next decision, at which its model handle
-//! lists the store again (`handle`).
+//! A backtest holds no node while it trains, so it trains in its own process and starts no
+//! launcher.
 //!
-//! A child still running when the node stops runs on to its end: its model
-//! is published, written whole, for the next start.
+//! The child's exit status says what it did. A failure published nothing, and its reason is the
+//! last error the child printed. Each line the child prints is a log record of the node's process.
+//!
+//! `RetrainActor` runs a live node's retrains of one strategy. It is named `RETRAIN-` and the
+//! strategy's id, as Nautilus refuses two actors with one id. Its timer fires at every multiple of
+//! the retrain interval since the epoch (`schedule::start`). At its start, the actor also takes
+//! the latest grid time not after now, if the store holds no model set for that time. A strategy
+//! never retrained has no actor.
+//!
+//! A retrain at `t` trains as `train --at t` does, so live and a backtest of the same span share
+//! every model set. It waits until Nautilus' `ParquetDataCatalog::query_last_timestamp` returns an
+//! end at or after `t` for each bar source and tick series, even if the last row is earlier. Gaps
+//! in the window are not checked. The catalog is checked again every minute on a second timer, and
+//! the previous model set decides meanwhile.
+//!
+//! Retrains that overlap are skipped with a warning:
+//! - A retrain falling due while another waits takes its place, and the waiting one is skipped.
+//! - A retrain falling due while the previous retrain runs is skipped.
+//!
+//! A retrain logs its outcome as it ends: info on success, an error with its reason otherwise. A
+//! published model set is the strategy's from its next decision (`handle`). A skipped retrain time
+//! is trained later, if a backtest needs it, by `train` over its span.
+//!
+//! A child still running when the node stops runs on to its end and publishes its model set.
 
 use std::{
     collections::VecDeque,
     ffi::OsString,
     fmt::{Debug, Display},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader},
     path::PathBuf,
     process::{Command, Stdio},
     sync::{
@@ -60,24 +56,37 @@ use nautilus_common::{
     nautilus_actor,
     timer::TimeEvent,
 };
-use nautilus_core::UnixNanos;
+use nautilus_core::{DurationNanos, UnixNanos};
 use nautilus_model::identifiers::{ActorId, StrategyId};
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
 };
 
+#[cfg(test)]
+use super::train::Trained;
 use super::{
     schedule::{self, Retrain},
-    train::Trained,
+    store::ModelStore,
 };
 use crate::strategy::requirements::DataRequirements;
 
-/// The most lines of a child's standard error kept for the reason it
-/// failed: the error it printed last is at their end.
+/// The most standard error lines of a child kept for its failure reason.
 const STDERR_TAIL: usize = 32;
 
-/// The name of the retrain timer, on the retrain actor's own clock.
+/// The variable that holds Nautilus' logger spec (`LoggerConfig::from_spec`).
+const LOGGING: &str = "NAUTILUS_LOG";
+
 const TIMER: &str = "RETRAIN";
+
+/// The name of the timer on the retrain actor's clock. It checks again whether the catalog holds
+/// the data for a waiting retrain.
+const RECHECK: &str = "RETRAIN-RECHECK";
+
+/// How often a waiting retrain checks the catalog again.
+///
+/// A check lists the files of each series read. The data comes with the live recording's daily
+/// promotion (`live::Recording`), at no set time.
+const RECHECK_EVERY: SignedDuration = SignedDuration::from_mins(1);
 
 /// Starts trains at a time, off the node's thread.
 #[derive(Clone)]
@@ -95,19 +104,23 @@ pub struct Running {
 /// What a finished train did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Retrained {
-    /// It kept no model: each model it trained was published, valid from
-    /// its time, or its current one is in use.
+    /// The train published its model set, valid from its time, or the set was already published.
     Succeeded,
-    /// It kept the current model; why, or why it failed.
-    Kept(String),
+    /// The train failed and published nothing, so the current model set keeps deciding. Holds the
+    /// reason.
+    Failed(String),
 }
 
 impl Launcher {
-    /// Trains in a child process: `program` run with `args`, then `--at`
-    /// and the time. Its standard output is the node's, its standard error
-    /// too, line by line, its last lines kept for the reason it failed.
+    /// Trains in a child process.
+    ///
+    /// It runs `program` with `args`, then `--at` and the time. Each line of the child's output is
+    /// a log record of this process (`child`). The child's logger, set by `NAUTILUS_LOG`, writes
+    /// plain lines and no file.
     #[must_use]
     pub fn process(program: PathBuf, args: Vec<OsString>) -> Self {
+        let mut logging = std::env::var_os(LOGGING).unwrap_or_default();
+        logging.push(";is_colored=false;fileout=off");
         Self {
             train: Arc::new(move |at| {
                 let mut command = Command::new(&program);
@@ -115,15 +128,19 @@ impl Launcher {
                     .args(&args)
                     .arg("--at")
                     .arg(at.to_string())
+                    .env(LOGGING, &logging)
                     .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
                 child(&mut command)
             }),
         }
     }
 
-    /// Trains on a thread of this process, by `train`: for tests, which
-    /// hold no node on that thread or replay none.
+    /// Trains on a thread of this process, by `train`.
+    ///
+    /// It is for tests, which hold no node on that thread or replay none.
+    #[cfg(test)]
     #[must_use]
     pub fn in_process(train: impl Fn(Timestamp) -> Trained + Send + Sync + 'static) -> Self {
         Self {
@@ -132,7 +149,7 @@ impl Launcher {
                 if trained.succeeded() {
                     Retrained::Succeeded
                 } else {
-                    Retrained::Kept(trained.to_string())
+                    Retrained::Failed(trained.outcome.to_string())
                 }
             }),
         }
@@ -143,16 +160,14 @@ impl Launcher {
     pub fn launch(&self, at: Timestamp) -> Running {
         let (sender, finished) = mpsc::channel();
         let train = Arc::clone(&self.train);
+
         std::thread::spawn(move || {
-            // The receiver gone, nobody waits for the outcome.
+            // Nobody waits for the outcome once the receiver is gone
             let _ = sender.send(train(at));
         });
         Running { at, finished }
     }
 
-    /// This launcher, each of its trains logging what it did as it ends,
-    /// on its own thread: as info when it succeeded, as an error with its
-    /// reason when it kept a current model.
     fn logged(self) -> Self {
         let train = self.train;
         Self {
@@ -160,9 +175,11 @@ impl Launcher {
                 let retrained = train(at);
                 match &retrained {
                     Retrained::Succeeded => {
-                        log::info!("the retrain at {at} succeeded, its models published or in use");
+                        log::info!(
+                            "the retrain at {at} succeeded, its model set published or already published"
+                        );
                     }
-                    Retrained::Kept(why) => log::error!("the retrain at {at}: {why}"),
+                    Retrained::Failed(why) => log::error!("the retrain at {at}: {why}"),
                 }
                 retrained
             }),
@@ -170,33 +187,52 @@ impl Launcher {
     }
 }
 
-/// Runs the child of `command`, its standard error piped, to its end.
+/// Runs `command` with its output piped, until it ends.
+///
+/// Each line of standard output is logged as info, and each line of standard error as a warning.
+/// The last standard error lines are kept for the failure reason.
 fn child(command: &mut Command) -> Retrained {
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(e) => return Retrained::Kept(format!("the train could not start: {e}")),
+        Err(e) => return Retrained::Failed(format!("the train could not start: {e}")),
     };
+
+    // Read standard output beside standard error, so neither pipe fills while the other is read
+    let stdout = child.stdout.take().map(|stdout| {
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                log::info!("{line}");
+            }
+        })
+    });
     let mut tail = VecDeque::with_capacity(STDERR_TAIL);
     if let Some(stderr) = child.stderr.take() {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            // Passed on as it comes; a closed standard error loses it.
-            let _ = writeln!(std::io::stderr(), "{line}");
+            log::warn!("{line}");
+
             if tail.len() == STDERR_TAIL {
                 tail.pop_front();
             }
             tail.push_back(line);
         }
     }
+
+    // A reader that panicked has logged what it read before
+    if let Some(stdout) = stdout {
+        let _ = stdout.join();
+    }
+
     match child.wait() {
         Ok(status) if status.success() => Retrained::Succeeded,
-        Ok(status) => Retrained::Kept(failure(tail.make_contiguous(), &status.to_string())),
-        Err(e) => Retrained::Kept(format!("waiting for the train: {e}")),
+        Ok(status) => Retrained::Failed(failure(tail.make_contiguous(), &status.to_string())),
+        Err(e) => Retrained::Failed(format!("waiting for the train: {e}")),
     }
 }
 
-/// Why a child failed, from the last lines of its standard error, `tail`,
-/// and its exit `status`: the error it printed last (`Error: ` and what
-/// follows), else the status.
+/// Returns why a child failed.
+///
+/// The reason is the last error the child printed in `tail`, its last standard error lines
+/// (`Error: ` and what follows). Without one, the reason is its exit `status`.
 fn failure(tail: &[String], status: &str) -> String {
     match tail.iter().rposition(|line| line.starts_with("Error: ")) {
         Some(start) => tail[start..]
@@ -218,8 +254,9 @@ impl Running {
         self.at
     }
 
-    /// What the train did, once it finished; `None` while it runs. Asked
-    /// again after it answered, a train is kept, having no outcome left.
+    /// Returns what the train did once it finished, or `None` while it runs.
+    ///
+    /// Asked again after it answered, the train counts as failed, as it has no outcome left.
     #[must_use]
     pub fn finished(&self) -> Option<Retrained> {
         match self.finished.try_recv() {
@@ -229,46 +266,44 @@ impl Running {
         }
     }
 
-    /// Waits for the train to finish: what it did.
+    /// Waits for the train to finish, then returns what it did.
     #[must_use]
     pub fn wait(self) -> Retrained {
         self.finished.recv().unwrap_or_else(|_| ended())
     }
 }
 
-/// A train whose thread ended without an outcome: it panicked.
+/// The failure of a train whose thread panicked, so it ended without an outcome.
 fn ended() -> Retrained {
-    Retrained::Kept("the train ended without an outcome".to_string())
+    Retrained::Failed("the train ended without an outcome".to_string())
 }
 
-/// A live node's retrains of a strategy, a Nautilus actor: at most one
-/// running, launched by the timer on its own clock.
+/// A Nautilus actor that runs a live node's retrains of one strategy, with at most one running.
 #[derive(Debug)]
 pub struct RetrainActor {
     core: DataActorCore,
-    /// The retrain interval.
     every: SignedDuration,
     catalog: PathBuf,
     requirements: DataRequirements,
-    /// Launches trains that log what they did as they end
-    /// (`Launcher::logged`).
+    models: ModelStore,
     launcher: Launcher,
     running: Option<Running>,
-    /// The time the last retrain launched trains at.
-    previous: Option<Timestamp>,
+    /// The retrain time that is due but whose data the catalog lacks. It is checked again at each
+    /// `RECHECK`.
+    waiting: Option<Timestamp>,
 }
 
 impl RetrainActor {
-    /// The retrains of `strategy_id`, retrained as `retrain` says, of a
-    /// strategy of `requirements` reading the catalog at `catalog`,
-    /// launched by `launcher`; none never retrained, so that no timer is
-    /// set and no train launched.
+    /// Returns the actor for the retrains of `strategy_id`, as `retrain` says.
+    ///
+    /// Returns `None` for a strategy never retrained.
     #[must_use]
     pub fn new(
         strategy_id: StrategyId,
         retrain: Retrain,
         catalog: PathBuf,
         requirements: DataRequirements,
+        models: ModelStore,
         launcher: Launcher,
     ) -> Option<Self> {
         let Retrain::Every(every) = retrain else {
@@ -283,97 +318,143 @@ impl RetrainActor {
             every,
             catalog,
             requirements,
+            models,
             launcher: launcher.logged(),
             running: None,
-            previous: None,
+            waiting: None,
         })
     }
 
-    /// The time a retrain due at `due` trains at: the last time the
-    /// catalog holds for every series read at `due`, the earliest of their
-    /// last stored timestamps, or `due` if that is past it.
+    /// Handles the retrain at `at` falling due.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the catalog cannot be read, or holds nothing of
-    /// a series read.
-    fn stored_until(&self, due: Timestamp) -> anyhow::Result<Timestamp> {
-        let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
-        let mut until = due;
-        for slice in self.requirements.slices(due, due) {
-            let (data_type, identifier) = &slice.series;
-            let last = catalog
-                .query_last_timestamp(&data_type.clone().into(), Some(identifier))
-                .with_context(|| {
-                    format!(
-                        "reading the stored range of the {} of {identifier}",
-                        data_path_prefix(data_type)
-                    )
-                })?
-                .with_context(|| {
-                    format!(
-                        "the catalog holds no {} of {identifier}",
-                        data_path_prefix(data_type)
-                    )
-                })?;
-            until = until.min(Timestamp::from(UnixNanos::from(last)));
-        }
-        Ok(until)
-    }
-}
-
-impl DataActor for RetrainActor {
-    /// Starts the retrain timer on the actor's clock (`schedule::start`),
-    /// on the last grid time not after now, so it first fires on the next
-    /// one.
-    fn on_start(&mut self) -> anyhow::Result<()> {
-        schedule::start(&*self, TIMER, self.every)
-    }
-
-    /// Nothing to do at stop: a running child runs on to its end and
-    /// publishes, and Nautilus cancels the timer when the trader releases
-    /// the actor at dispose. Nautilus' own `on_stop` would warn at every
-    /// stop.
-    fn on_stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    /// Launches the retrain due at the grid time of `event`, the retrain
-    /// timer's, the one timer of the actor's clock, at the catalog's end
-    /// then (`stored_until`). Skipped, with a warning, if the catalog holds
-    /// nothing of a series read, if its end is not past the previous
-    /// retrain's time, or if the previous retrain is still running.
-    fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
-        let due = Timestamp::from(event.ts_event);
-        let at = match self.stored_until(due) {
-            Ok(at) => at,
-            Err(e) => {
-                log::warn!("the retrain at {due} skipped: {e:#}");
-                return Ok(());
-            }
-        };
-        if let Some(previous) = self.previous
-            && at <= previous
-        {
-            log::warn!(
-                "the retrain at {due} skipped: the catalog holds nothing past {previous}, \
-                 the previous retrain's time"
-            );
-            return Ok(());
-        }
+    /// The retrain is skipped if the previous one still runs. Otherwise it takes the place of a
+    /// waiting one (`check`).
+    fn due(&mut self, at: Timestamp) -> anyhow::Result<()> {
         if let Some(running) = &self.running
             && running.finished().is_none()
         {
             log::warn!(
-                "the retrain at {due} skipped: the retrain at {} is still running",
+                "the retrain at {at} skipped: the retrain at {} is still running",
                 running.at()
             );
             return Ok(());
         }
-        log::info!("retraining at {at}, the catalog's end, for the retrain due at {due}");
-        self.previous = Some(at);
-        self.running = Some(self.launcher.launch(at));
+
+        if let Some(waiting) = self.waiting {
+            log::warn!(
+                "the retrain at {waiting} skipped: the retrain at {at} is due before the catalog \
+                 held the data to {waiting}"
+            );
+        }
+        self.check(at)
+    }
+
+    /// Launches the retrain for `at` when `lacking` finds no series behind the cutoff.
+    ///
+    /// Otherwise `RECHECK` retries it. The actor logs the wait once and warns on each catalog read
+    /// error.
+    fn check(&mut self, at: Timestamp) -> anyhow::Result<()> {
+        match self.lacking(at) {
+            Ok(None) => {
+                if self.waiting.take().is_some() {
+                    self.clock().cancel_timer(RECHECK);
+                }
+                log::info!("retraining at {at}: every series read is stored to it");
+                self.running = Some(self.launcher.launch(at));
+                return Ok(());
+            }
+            Ok(Some(lacking)) => {
+                if self.waiting != Some(at) {
+                    log::info!(
+                        "the retrain at {at} waits for the data: {lacking}; checked again every \
+                         {RECHECK_EVERY:#}"
+                    );
+                }
+            }
+            Err(e) => log::warn!("the retrain at {at} waits: {e:#}"),
+        }
+
+        if self.waiting.replace(at).is_none() {
+            self.clock().set_timer_ns(
+                RECHECK,
+                DurationNanos::try_from(RECHECK_EVERY)?,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+            )?;
+        }
         Ok(())
+    }
+
+    /// Returns the first series that lacks data at `at`, with the end if known.
+    ///
+    /// It checks each bar source and tick series in `DataRequirements::slices(at, at)`. A series
+    /// lacks data if it has no catalog interval or one ending before `at`. Returns `None` if all
+    /// reach `at`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog cannot be read.
+    fn lacking(&self, at: Timestamp) -> anyhow::Result<Option<String>> {
+        let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
+
+        for slice in self.requirements.slices(at, at) {
+            let (data_type, identifier) = &slice.series.key();
+            let series = format!("the {} of {identifier}", data_path_prefix(data_type));
+            let last = catalog
+                .query_last_timestamp(&data_type.clone().into(), Some(identifier))
+                .with_context(|| format!("reading the stored range of {series}"))?
+                .map(|last| Timestamp::from(UnixNanos::from(last)));
+            match last {
+                Some(last) if last >= at => {}
+                Some(last) => return Ok(Some(format!("{series} are stored to {last}"))),
+                None => return Ok(Some(format!("the catalog holds none of {series}"))),
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl DataActor for RetrainActor {
+    /// Starts the retrain timer (`schedule::start`).
+    ///
+    /// It also treats the latest retrain time due now as falling due, if the store holds no model
+    /// set for it, as when the node was down then.
+    fn on_start(&mut self) -> anyhow::Result<()> {
+        schedule::start(&*self, TIMER, self.every)?;
+        let latest = Timestamp::from(schedule::last_grid_time(
+            self.clock().timestamp_ns(),
+            self.every,
+        )?);
+        let model_sets = self
+            .models
+            .model_sets()
+            .context("listing the model sets, of which the latest retrain time's is trained")?;
+        if model_sets.contains(&latest) {
+            return Ok(());
+        }
+        self.due(latest)
+    }
+
+    /// Does nothing at stop.
+    ///
+    /// A running child runs on to its end and publishes, and Nautilus cancels the timers at
+    /// dispose. Nautilus' own `on_stop` would warn at every stop.
+    fn on_stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
+        match event.name.as_str() {
+            TIMER => self.due(Timestamp::from(event.ts_event)),
+            RECHECK => match self.waiting {
+                Some(at) => self.check(at),
+                None => Ok(()),
+            },
+            name => anyhow::bail!("the retrain actor has no timer {name}"),
+        }
     }
 }
 
@@ -389,7 +470,7 @@ impl Display for Retrained {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Succeeded => write!(f, "succeeded"),
-            Self::Kept(why) => write!(f, "{why}"),
+            Self::Failed(why) => write!(f, "{why}"),
         }
     }
 }
@@ -407,9 +488,8 @@ mod tests {
     use nautilus_common::{
         actor::registry::deregister_actor,
         cache::Cache,
-        clock::{Clock, VirtualClock},
+        clock::VirtualClock,
         component::{Component, deregister_component, register_component_actor, start_component},
-        timer::TimeEventCallback,
     };
     use nautilus_model::{
         data::{NautilusDataType, QuoteTick},
@@ -423,39 +503,24 @@ mod tests {
     use crate::{
         log_capture,
         model::{
-            holdout::{Earnings, Holdout, Refusal},
-            score::ExpectedScore,
-            train::{Kept, Outcome},
+            deciding::testing::{baseline, store},
+            train::{Failure, Outcome},
         },
-        strategy::{requirements::TickSeries, risk::R},
+        strategy::requirements::TickSeries,
     };
 
     fn at(time: &str) -> Timestamp {
         time.parse().unwrap()
     }
 
-    /// A holdout of no trade.
-    fn holdout() -> Holdout {
-        Holdout {
-            earnings: Earnings::default(),
-            score: ExpectedScore {
-                rows: 2,
-                skill: Some(0.1),
-                ..ExpectedScore::default()
-            },
-        }
-    }
-
     fn published(at: Timestamp) -> Trained {
         Outcome::Published {
-            valid_from: at,
-            holdout: Box::new(holdout()),
+            model_set: PathBuf::from("models").join(at.to_string()),
         }
         .into()
     }
 
-    /// A child of `sh` running `script`, `--at` and the time its `$1` and
-    /// `$2`.
+    /// A child of `sh` that runs `script`, with `--at` as `$1` and the time as `$2`.
     fn shell(script: &str) -> Launcher {
         Launcher::process(
             PathBuf::from("sh"),
@@ -464,31 +529,13 @@ mod tests {
     }
 
     #[rstest]
-    fn a_panicking_in_process_train_is_kept() {
+    fn a_panicking_in_process_train_fails() {
         let launcher = Launcher::in_process(|_| panic!("the train panicked"));
 
-        assert!(matches!(
-            launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
-            Retrained::Kept(_)
-        ));
-    }
-
-    /// A train finding its model published at its time keeps it in use:
-    /// it kept no model, and succeeded.
-    #[rstest]
-    fn an_in_process_train_whose_model_is_in_use_succeeds() {
-        let launcher = Launcher::in_process(|at| {
-            Outcome::InUse {
-                valid_from: at,
-                retrain: Retrain::Every(SignedDuration::from_hours(24)),
-            }
-            .into()
-        });
-
-        assert_eq!(
-            launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
-            Retrained::Succeeded
-        );
+        let Retrained::Failed(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
+            panic!("a panicking train succeeded");
+        };
+        assert!(why.contains("without an outcome"), "{why}");
     }
 
     #[rstest]
@@ -502,42 +549,41 @@ mod tests {
     }
 
     #[rstest]
-    fn a_failing_child_is_kept_with_the_error_it_printed_last() {
+    fn a_failing_child_fails_with_the_error_it_printed_last() {
         let launcher = shell(
             "echo 'ERROR a log line of the replay' >&2; \
-             echo 'Error: kept the current model: holdout expectancy of the trades taken 0.480000R below the minimum 0.55R' >&2; \
+             echo 'Error: failed: 34 rows in the fit slice, fewer than min_rows 35' >&2; \
              exit 1",
         );
 
         assert_eq!(
             launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
-            Retrained::Kept(
-                "kept the current model: holdout expectancy of the trades taken 0.480000R below the minimum 0.55R".to_string()
+            Retrained::Failed(
+                "failed: 34 rows in the fit slice, fewer than min_rows 35".to_string()
             )
         );
     }
 
     #[rstest]
-    fn a_failing_child_printing_no_error_is_kept_with_its_status() {
+    fn a_failing_child_printing_no_error_fails_with_its_status() {
         let launcher = shell("exit 3");
 
-        let Retrained::Kept(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
+        let Retrained::Failed(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
             panic!("published");
         };
         assert!(why.contains('3'), "{why}");
     }
 
     #[rstest]
-    fn a_child_that_cannot_start_is_kept() {
+    fn a_child_that_cannot_start_fails() {
         let launcher = Launcher::process(PathBuf::from("/nonexistent/helix-trader"), vec![]);
 
-        let Retrained::Kept(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
+        let Retrained::Failed(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
             panic!("published");
         };
         assert!(why.contains("could not start"), "{why}");
     }
 
-    /// The event of the retrain timer at `time`.
     fn fired(time: &str) -> TimeEvent {
         let ns = UnixNanos::from(at(time));
         TimeEvent::new(TIMER.into(), nautilus_core::UUID4::new(), ns, ns)
@@ -546,10 +592,14 @@ mod tests {
     const AUD: &str = "AUD/USD.SIM";
     const EUR: &str = "EUR/USD.SIM";
 
-    /// Writes a quote of each of `quotes`, an instrument and its time, to
-    /// the catalog at `catalog`.
-    fn stored(catalog: &Path, quotes: &[(&str, &str)]) {
-        let catalog = ParquetDataCatalog::new(catalog, None, None, None, None);
+    fn catalog(dir: &Path) -> PathBuf {
+        dir.join("catalog")
+    }
+
+    fn stored(dir: &Path, quotes: &[(&str, &str)]) {
+        std::fs::create_dir_all(catalog(dir)).unwrap();
+        let catalog = ParquetDataCatalog::new(&catalog(dir), None, None, None, None);
+
         for (instrument_id, time) in quotes {
             let ts = UnixNanos::from(at(time));
             let quote = QuoteTick::new(
@@ -567,10 +617,13 @@ mod tests {
         }
     }
 
-    /// The retrains of `LIVE-001`, retrained as `retrain` says, of a
-    /// strategy reading the quotes of AUD/USD and EUR/USD from the catalog
-    /// at `catalog`, launched by `launcher`.
-    fn retrains(catalog: &Path, retrain: Retrain, launcher: Launcher) -> Option<RetrainActor> {
+    fn published_at(dir: &Path, valid_from: &str) {
+        store(&dir.join("models"))
+            .publish(&baseline(valid_from, 6))
+            .unwrap();
+    }
+
+    fn retrains(dir: &Path, retrain: Retrain, launcher: Launcher) -> Option<RetrainActor> {
         let quotes = |instrument_id| TickSeries {
             data: NautilusDataType::QuoteTick,
             instrument_id: InstrumentId::from(instrument_id),
@@ -578,29 +631,27 @@ mod tests {
         RetrainActor::new(
             StrategyId::from("LIVE-001"),
             retrain,
-            catalog.to_path_buf(),
+            catalog(dir),
             DataRequirements {
                 bar_types: vec![],
                 ticks: vec![quotes(AUD), quotes(EUR)],
                 custom: vec![],
                 warmup: SignedDuration::ZERO,
             },
+            store(&dir.join("models")),
             launcher,
         )
     }
 
-    /// The `retrains`, daily.
-    fn daily_on(catalog: &Path, launcher: Launcher) -> RetrainActor {
+    fn daily_on(dir: &Path, launcher: Launcher) -> RetrainActor {
         retrains(
-            catalog,
+            dir,
             Retrain::Every(SignedDuration::from_hours(24)),
             launcher,
         )
         .unwrap()
     }
 
-    /// `daily_on` a catalog holding both series well past every retrain
-    /// of the tests, kept in `dir`.
     fn daily(dir: &tempfile::TempDir, launcher: Launcher) -> RetrainActor {
         stored(
             dir.path(),
@@ -609,7 +660,12 @@ mod tests {
         daily_on(dir.path(), launcher)
     }
 
-    /// A launcher handing each time it trains at to `finish`.
+    fn trained(finished: &Receiver<Timestamp>) -> Timestamp {
+        finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("no train within a minute")
+    }
+
     fn sending(finish: mpsc::Sender<Timestamp>) -> Launcher {
         Launcher::in_process(move |at| {
             finish.send(at).unwrap();
@@ -617,19 +673,12 @@ mod tests {
         })
     }
 
-    /// A launcher handing each time it trains at to `finish`, each train
-    /// keeping the current model: the model fitted is refused, its holdout
-    /// expectancy below the minimum.
-    fn keeping(finish: mpsc::Sender<Timestamp>) -> Launcher {
+    fn failing(finish: mpsc::Sender<Timestamp>) -> Launcher {
         Launcher::in_process(move |at| {
             finish.send(at).unwrap();
-            Outcome::Kept(Kept::Refused {
-                why: Refusal::MinExpectancy {
-                    expectancy: 0.25,
-                    min_expectancy: R::new(0.5),
-                },
-                holdout: Box::new(holdout()),
-            })
+            Outcome::Failed(Failure::Error(
+                "34 rows in the fit slice, fewer than min_rows 35".to_string(),
+            ))
             .into()
         })
     }
@@ -650,8 +699,8 @@ mod tests {
         assert!(daily.is_some());
     }
 
-    /// Nautilus refuses two actors of one id: a node retraining two
-    /// strategies holds the actor of each, named after it.
+    /// Nautilus refuses two actors with one id, so each strategy's actor is named after the
+    /// strategy.
     #[rstest]
     fn a_strategys_retrain_actor_is_named_after_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -661,47 +710,7 @@ mod tests {
         assert_eq!(actor.actor_id(), ActorId::from("RETRAIN-LIVE-001"));
     }
 
-    /// Registers `actor` without a node at `now`, as the handle's tests
-    /// register their strategy: its clock.
-    fn registered(actor: &mut RetrainActor, now: &str) -> Rc<RefCell<VirtualClock>> {
-        let clock = Rc::new(RefCell::new(VirtualClock::new()));
-        clock
-            .borrow_mut()
-            .advance_time(UnixNanos::from(at(now)), true);
-        clock
-            .borrow_mut()
-            .register_default_handler(TimeEventCallback::from(|_: TimeEvent| {}));
-        actor
-            .core
-            .register(
-                TraderId::from("HELIX-001"),
-                clock.clone(),
-                Rc::new(RefCell::new(Cache::default())),
-            )
-            .unwrap();
-        clock
-    }
-
-    /// Started at 11:30 on 2026-10-22, a daily retrain's timer, on the
-    /// actor's own clock, first fires at the next midnight, 2026-10-23, a
-    /// whole number of days since the epoch.
-    #[rstest]
-    fn the_retrain_timer_is_the_actors_on_the_grid() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut actor = daily_on(dir.path(), Launcher::in_process(|_| unreachable!()));
-        let clock = registered(&mut actor, "2026-10-22T11:30:00Z");
-
-        DataActor::on_start(&mut actor).unwrap();
-
-        let next = clock.borrow().next_time_ns(TIMER).unwrap();
-        assert_eq!(Timestamp::from(next), at("2026-10-23T00:00:00Z"));
-    }
-
-    /// Adds `actor` at `now` as a node's trader adds an actor
-    /// (`Trader::add_actor`): registered on a clock of its own, whose
-    /// default handler hands the actor its time events, and kept in
-    /// Nautilus' registries; then starts it as the trader does. Its id and
-    /// its clock.
+    /// Adds `actor` at `now` as `Trader::add_actor` does, then starts it.
     fn added(mut actor: RetrainActor, now: &str) -> (Ustr, Rc<RefCell<VirtualClock>>) {
         let clock = Rc::new(RefCell::new(VirtualClock::new()));
         clock
@@ -720,30 +729,127 @@ mod tests {
         (id, clock)
     }
 
-    /// A daily retrain added and started at 11:30 on 2026-10-22 as a node
-    /// adds and starts an actor, on a catalog holding both series past
-    /// every retrain: its clock advanced past the next midnight, the event
-    /// of the retrain timer there, run through the handler Nautilus matches
-    /// it with, launches a train at 2026-10-23T00:00. The actor is released
-    /// then, as the trader releases it at dispose, its launcher with it, so
-    /// that a train never launched ends the wait.
-    #[rstest]
-    fn an_added_retrain_actor_trains_at_the_grid_time_its_clock_fires() {
-        let dir = tempfile::tempdir().unwrap();
-        let (finish, finished) = mpsc::channel();
-        let (id, clock) = added(daily(&dir, sending(finish)), "2026-10-22T11:30:00Z");
-
+    fn advanced(clock: &Rc<RefCell<VirtualClock>>, time: &str) {
         let events = clock
             .borrow_mut()
-            .advance_time(UnixNanos::from(at("2026-10-23T00:30:00Z")), true);
+            .advance_time(UnixNanos::from(at(time)), true);
         let handlers = clock.borrow().match_handlers(events);
         for handler in handlers {
             handler.callback.call(handler.event);
         }
-        deregister_component(&id);
-        deregister_actor(&id);
+    }
+
+    /// Releases the actor `id` as the trader does at dispose.
+    fn released(id: &Ustr) {
+        deregister_component(id);
+        deregister_actor(id);
+    }
+
+    #[rstest]
+    fn an_added_retrain_actor_trains_at_the_grid_time_its_clock_fires() {
+        let dir = tempfile::tempdir().unwrap();
+        published_at(dir.path(), "2026-10-22T00:00:00Z");
+        let (finish, finished) = mpsc::channel();
+        let (id, clock) = added(daily(&dir, sending(finish)), "2026-10-22T11:30:00Z");
+
+        advanced(&clock, "2026-10-23T00:30:00Z");
+        released(&id);
 
         assert_eq!(finished.recv(), Ok(at("2026-10-23T00:00:00Z")));
+    }
+
+    #[rstest]
+    #[case::of_an_empty_store(&[])]
+    #[case::of_a_store_holding_the_day_before(&["2026-10-21T00:00:00Z"])]
+    fn a_retrain_actor_started_after_a_retrain_time_without_its_model_set_trains_it_at_start(
+        #[case] model_sets: &[&str],
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        for valid_from in model_sets {
+            published_at(dir.path(), valid_from);
+        }
+        let (finish, finished) = mpsc::channel();
+
+        let (id, _clock) = added(daily(&dir, sending(finish)), "2026-10-22T11:30:00Z");
+        let first = trained(&finished);
+        released(&id);
+
+        assert_eq!(first, at("2026-10-22T00:00:00Z"));
+        assert_eq!(finished.recv(), Err(mpsc::RecvError));
+    }
+
+    #[rstest]
+    #[case::of_a_series_stored_before_it(&[(EUR, "2026-10-22T21:00:00Z")])]
+    #[case::of_a_series_not_stored(&[])]
+    fn a_retrain_due_before_every_series_read_is_stored_at_or_after_it_waits(
+        #[case] eur: &[(&str, &str)],
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        stored(dir.path(), &[(AUD, "2026-10-23T01:00:00Z")]);
+        stored(dir.path(), eur);
+        published_at(dir.path(), "2026-10-22T00:00:00Z");
+        let (finish, finished) = mpsc::channel();
+        let (id, clock) = added(
+            daily_on(dir.path(), sending(finish)),
+            "2026-10-22T11:30:00Z",
+        );
+
+        advanced(&clock, "2026-10-23T00:30:00Z");
+        released(&id);
+
+        assert_eq!(finished.recv(), Err(mpsc::RecvError));
+    }
+
+    #[rstest]
+    #[case::at_it("2026-10-23T00:00:00Z")]
+    #[case::after_it("2026-10-23T00:20:00Z")]
+    fn a_waiting_retrain_trains_at_its_time_once_every_series_read_is_stored_at_or_after_it(
+        #[case] eur: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        stored(
+            dir.path(),
+            &[(AUD, "2026-10-23T01:00:00Z"), (EUR, "2026-10-22T21:00:00Z")],
+        );
+        published_at(dir.path(), "2026-10-22T00:00:00Z");
+        let (finish, finished) = mpsc::channel();
+        let (id, clock) = added(
+            daily_on(dir.path(), sending(finish)),
+            "2026-10-22T11:30:00Z",
+        );
+        advanced(&clock, "2026-10-23T00:30:00Z");
+        stored(dir.path(), &[(EUR, eur)]);
+
+        advanced(&clock, "2026-10-23T00:31:00Z");
+        let first = trained(&finished);
+        released(&id);
+
+        assert_eq!(first, at("2026-10-23T00:00:00Z"));
+    }
+
+    #[rstest]
+    fn a_retrain_due_while_one_waits_for_its_data_takes_its_place() {
+        let dir = tempfile::tempdir().unwrap();
+        stored(
+            dir.path(),
+            &[(AUD, "2026-10-25T00:00:00Z"), (EUR, "2026-10-22T21:00:00Z")],
+        );
+        published_at(dir.path(), "2026-10-22T00:00:00Z");
+        let (finish, finished) = mpsc::channel();
+        let (id, clock) = added(
+            daily_on(dir.path(), sending(finish)),
+            "2026-10-22T11:30:00Z",
+        );
+        advanced(&clock, "2026-10-23T00:30:00Z");
+        advanced(&clock, "2026-10-24T00:30:00Z");
+        stored(dir.path(), &[(EUR, "2026-10-24T01:00:00Z")]);
+
+        advanced(&clock, "2026-10-24T01:31:00Z");
+        let first = trained(&finished);
+        released(&id);
+
+        assert_eq!(first, at("2026-10-24T00:00:00Z"));
+        assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
     #[rstest]
@@ -766,32 +872,34 @@ mod tests {
         release.send(()).unwrap();
         release.send(()).unwrap();
 
-        assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
-        // Released twice, a second train would send its time before its
-        // launcher is dropped.
+        assert_eq!(trained(&finished), at("2026-10-22T00:00:00Z"));
+
+        // If released twice, a second train would send its time before its launcher is dropped
         drop(actor);
         assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
-    /// Waits until the train `actor` runs finished, so that its next
-    /// firing is not skipped as running. A train's outcome is sent just
-    /// after the train returns, off this thread, so it may come after the
-    /// time the train sent.
+    /// Waits until the train that `actor` runs has finished. Panics after a minute.
     fn waited_to_its_end(actor: &RetrainActor) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+
         while actor
             .running
             .as_ref()
             .is_some_and(|running| running.finished().is_none())
         {
+            assert!(
+                Instant::now() < deadline,
+                "the train is still running a minute on"
+            );
             std::thread::yield_now();
         }
     }
 
-    /// Fires the retrain timer of `actor` at `time` until a train sends
-    /// its time to `finished`: that time. The outcome of a train is sent
-    /// just after the train sent its time, so a retrain fired right after
-    /// may be skipped as running. Panics after a minute, so that a retrain
-    /// never launched fails rather than hangs.
+    /// Fires the retrain timer at `time` until a train sends its time, and returns that time.
+    ///
+    /// The outcome follows the time, so a retrain fired at once may be skipped as running. Panics
+    /// after a minute.
     fn fire_until_launched(
         actor: &mut RetrainActor,
         finished: &Receiver<Timestamp>,
@@ -811,133 +919,30 @@ mod tests {
     }
 
     #[rstest]
-    fn a_finished_retrain_makes_way_for_the_next() {
+    #[case::published(sending)]
+    #[case::failed(failing)]
+    fn a_finished_retrain_makes_way_for_the_next(
+        #[case] launcher: fn(mpsc::Sender<Timestamp>) -> Launcher,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (finish, finished) = mpsc::channel();
-        let mut actor = daily(&dir, sending(finish));
+        let mut actor = daily(&dir, launcher(finish));
         actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-        assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
+        assert_eq!(trained(&finished), at("2026-10-22T00:00:00Z"));
 
         let second = fire_until_launched(&mut actor, &finished, "2026-10-23T00:00:00Z");
 
         assert_eq!(second, at("2026-10-23T00:00:00Z"));
     }
 
-    /// A retrain that kept the current model, which the strategy trades
-    /// on still, leaves the next retrain free to launch, as one that
-    /// published does.
-    #[rstest]
-    fn a_retrain_keeping_the_model_makes_way_for_the_next() {
-        let dir = tempfile::tempdir().unwrap();
-        let (finish, finished) = mpsc::channel();
-        let mut actor = daily(&dir, keeping(finish));
-        actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-        assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
-
-        let second = fire_until_launched(&mut actor, &finished, "2026-10-23T00:00:00Z");
-
-        assert_eq!(second, at("2026-10-23T00:00:00Z"));
+    fn logged(lines: &[String], level: &str, facts: &[&str]) -> bool {
+        lines.iter().any(|line| {
+            line.split_once(' ').is_some_and(|(logged_at, message)| {
+                logged_at == level && facts.iter().all(|fact| message.contains(fact))
+            })
+        })
     }
 
-    #[rstest]
-    fn a_retrain_trains_at_its_time_when_the_catalog_holds_past_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let (finish, finished) = mpsc::channel();
-        let mut actor = daily(&dir, sending(finish));
-
-        actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-
-        assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
-    }
-
-    #[rstest]
-    fn a_retrain_trains_at_the_catalogs_end_when_it_ends_before_its_time() {
-        let dir = tempfile::tempdir().unwrap();
-        stored(
-            dir.path(),
-            &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T13:00:00Z")],
-        );
-        let (finish, finished) = mpsc::channel();
-        let mut actor = daily_on(dir.path(), sending(finish));
-
-        actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-
-        assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
-    }
-
-    #[rstest]
-    fn the_catalogs_end_is_the_earliest_last_time_of_the_series_read() {
-        let dir = tempfile::tempdir().unwrap();
-        stored(
-            dir.path(),
-            &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T09:30:00Z")],
-        );
-        let (finish, finished) = mpsc::channel();
-        let mut actor = daily_on(dir.path(), sending(finish));
-
-        actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-
-        assert_eq!(finished.recv().unwrap(), at("2026-10-21T09:30:00Z"));
-    }
-
-    #[rstest]
-    fn a_retrain_is_skipped_when_the_catalog_holds_nothing_of_a_series_read() {
-        let dir = tempfile::tempdir().unwrap();
-        stored(dir.path(), &[(AUD, "2026-10-21T13:00:00Z")]);
-        let (finish, finished) = mpsc::channel();
-        let mut actor = daily_on(dir.path(), sending(finish));
-
-        actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-        drop(actor);
-
-        assert_eq!(finished.recv(), Err(mpsc::RecvError));
-    }
-
-    #[rstest]
-    fn a_retrain_is_skipped_when_the_catalog_gained_nothing_since_the_previous() {
-        let dir = tempfile::tempdir().unwrap();
-        stored(
-            dir.path(),
-            &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T13:00:00Z")],
-        );
-        let (finish, finished) = mpsc::channel();
-        let mut actor = daily_on(dir.path(), sending(finish));
-        actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-        assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
-        waited_to_its_end(&actor);
-
-        actor.on_time_event(&fired("2026-10-23T00:00:00Z")).unwrap();
-        drop(actor);
-
-        assert_eq!(finished.recv(), Err(mpsc::RecvError));
-    }
-
-    #[rstest]
-    fn a_retrain_trains_at_what_the_catalog_gained_since_the_previous() {
-        let dir = tempfile::tempdir().unwrap();
-        stored(
-            dir.path(),
-            &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T13:00:00Z")],
-        );
-        let (finish, finished) = mpsc::channel();
-        let mut actor = daily_on(dir.path(), sending(finish));
-        actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-        assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
-        stored(
-            dir.path(),
-            &[(AUD, "2026-10-22T13:00:00Z"), (EUR, "2026-10-22T13:00:00Z")],
-        );
-
-        let second = fire_until_launched(&mut actor, &finished, "2026-10-23T00:00:00Z");
-
-        assert_eq!(second, at("2026-10-22T13:00:00Z"));
-    }
-
-    /// Two retrain actors, each fired once at midnight and then left
-    /// alone, no decision nor firing after: the train that published logs
-    /// its success as info, and the child that kept the current model,
-    /// printing why last (`Error: ` and the reason), logs that reason as an
-    /// error, each as its train ends.
     #[rstest]
     fn a_finished_retrain_logs_its_outcome_as_it_ends() {
         if !log_capture::alone(
@@ -952,7 +957,7 @@ mod tests {
         let mut refused = daily_on(
             dir.path(),
             shell(
-                "echo 'Error: kept the current model: holdout expectancy of the trades taken 0.480000R below the minimum 0.55R' >&2; \
+                "echo 'Error: failed: 34 rows in the fit slice, fewer than min_rows 35' >&2; \
                  exit 1",
             ),
         );
@@ -964,22 +969,64 @@ mod tests {
             .on_time_event(&fired("2026-10-22T00:00:00Z"))
             .unwrap();
 
-        let outcomes = [
-            "INFO the retrain at 2026-10-22T00:00:00Z succeeded, its models published or in use",
-            "ERROR the retrain at 2026-10-22T00:00:00Z: kept the current model: holdout \
-             expectancy of the trades taken 0.480000R below the minimum 0.55R",
-        ];
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let logged = log_capture::lines();
-            if outcomes
-                .iter()
-                .all(|outcome| logged.iter().any(|line| line == outcome))
-            {
-                break;
-            }
-            assert!(Instant::now() < deadline, "{logged:#?}");
-            std::thread::sleep(Duration::from_millis(10));
+        // Each train logs its outcome before it hands it over
+        waited_to_its_end(&succeeding);
+        waited_to_its_end(&refused);
+        let lines = log_capture::lines();
+
+        assert!(
+            logged(&lines, "INFO", &["2026-10-22T00:00:00Z", "succeeded"]),
+            "{lines:#?}"
+        );
+        assert!(
+            logged(
+                &lines,
+                "ERROR",
+                &[
+                    "2026-10-22T00:00:00Z",
+                    "failed: 34 rows in the fit slice, fewer than \
+                     min_rows 35",
+                ]
+            ),
+            "{lines:#?}"
+        );
+    }
+
+    /// Output lines are logged: standard output as info, standard error as a warning.
+    #[rstest]
+    fn the_output_lines_of_a_child_are_logged_through_the_logger() {
+        if !log_capture::alone(
+            module_path!(),
+            "the_output_lines_of_a_child_are_logged_through_the_logger",
+        ) {
+            return;
         }
+        log_capture::capture(log::LevelFilter::Info);
+        let launcher = shell(
+            "echo 'a line of the replay'; \
+             echo 'a warning of the replay' >&2; \
+             echo \"logging: $NAUTILUS_LOG\"",
+        );
+
+        let retrained = launcher.launch(at("2026-10-22T00:00:00Z")).wait();
+        let lines = log_capture::lines();
+
+        assert_eq!(retrained, Retrained::Succeeded);
+        assert!(
+            logged(&lines, "INFO", &["a line of the replay"]),
+            "{lines:#?}"
+        );
+        assert!(
+            logged(&lines, "WARN", &["a warning of the replay"]),
+            "{lines:#?}"
+        );
+        assert!(
+            logged(
+                &lines,
+                "INFO",
+                &["logging: ", "is_colored=false", "fileout=off"]
+            ),
+            "{lines:#?}"
+        );
     }
 }

@@ -16,6 +16,12 @@ ignore = [
   { id = "RUSTSEC-2026-0391", reason = "zstd borrowed streaming contexts are not used by Arrow IPC or Parquet" },
   { id = "RUSTSEC-2026-0398", reason = "zstd-safe seekable feature is disabled" },
   { id = "RUSTSEC-2026-0403", reason = "zstd-safe streaming decompression is not used by Arrow IPC or Parquet; bulk API is unaffected" },
+  # Unmaintained, transitive through Nautilus' persistence stack (Arrow,
+  # DataFusion, object_store), which none of helix's own code chooses; an
+  # unused ignore fails the check once they move off them
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, transitive via Arrow and DataFusion" },
+  { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained, transitive via arrow-array and datafusion-functions" },
+  { id = "RUSTSEC-2026-0542", reason = "humantime unmaintained, transitive via object_store" },
 ]
 
 [licenses]

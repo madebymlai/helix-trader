@@ -1,21 +1,21 @@
-//! The time-range requests of Nautilus' data engine (`time_range_generator`,
-//! `crates/data/src/engine/time_range.rs`): it asks a data client for one
-//! window of a long request at a time, hands each answer on as it comes, and
-//! ends the request with an empty envelope, of which it logs a warning.
-//! Windows start at the request's start and end at each multiple of the
-//! window from it, the next starting 1 ns later.
+//! Mirrors Nautilus' time-range requests (`time_range_generator`,
+//! `crates/data/src/engine/time_range.rs`).
+//!
+//! The data engine asks for one window at a time and ends the request with an empty envelope,
+//! logging a warning. Each window ends at a multiple of the window length from the request's
+//! start, and the next starts 1 ns later.
 
 use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
 
-/// The params making a request over `[from, to]` one in windows of `window`.
+/// Returns the params that split a request over `[from, to]` into windows of `window`.
 ///
-/// `durations_seconds` holds the window once per window the span can hold:
-/// the data engine takes the next duration after an empty window, the first
-/// again after one with data, and ends the request, reporting success, when
-/// they run out. One per window carries the request across any run of empty
-/// windows. Nautilus documents neither `durations_seconds` nor this walk;
-/// `node_fill` and `node_warmup` test it.
+/// `durations_seconds` holds the window once for each window the span can hold. The data engine:
+/// - Takes the next duration after an empty window.
+/// - Takes the first duration again after a window with data.
+/// - Ends the request, reporting success, when the durations run out.
+///
+/// Nautilus documents none of this. `node_fill` and `node_warmup` test it.
 pub(crate) fn params(
     from: Timestamp,
     to: Timestamp,

@@ -1,63 +1,55 @@
-//! The client of an LSE exchange stream, CME Globex's or Nasdaq
-//! TotalView's, which speak one protocol (LSE's WebSocket documentation,
-//! "The CME Group stream": the Nasdaq stream "sends the same messages for
-//! stocks"): an outer client and the handler task that owns Nautilus'
-//! `WebSocketClient`, as Nautilus' adapter guide lays one out ("WebSocket
-//! client patterns"). Its contracts are the stream's instruments, a CME
-//! contract or a Nasdaq stock.
+//! The client of an LSE exchange stream for CME Globex or Nasdaq TotalView. Both streams use one
+//! protocol (LSE's WebSocket documentation, "The CME Group stream").
 //!
-//! A connection carries one subscription, of one level: the contracts by
-//! their names at LSE at Level 1, 2 or 3, which the handler sends first on
-//! each connection (`send_text_on_connection`, never replayed on another),
-//! from the contracts subscribed (Nautilus' `SubscriptionState`, topics:
-//! the names). The handler connects once it has a contract to name, those
-//! it was started with or the first subscribed, and its first subscription
-//! names them and every contract subscribed by then; no subscription
-//! overtakes the connection, each waiting in the handler's commands. A
-//! contract it was started with is named on the first connection alone,
-//! for LSE to check it, unless subscribed: a later connection names only
-//! the contracts subscribed, so that one never taken, once expired, does
-//! not have LSE refuse the whole subscription, and a connection with none
-//! to name sends no subscription. The key of the
-//! exchange's plan goes in the `X-API-Key` header of the opening request, a
-//! reconnect's too. LSE
-//! answers with `hello`, then opens each contract, with its last best bid
-//! and offer at Level 1, its last ten levels at Level 2 and no record at
-//! Level 3, and streams its records; it refuses a subscription by closing
-//! the connection with 1008 and a reason, such as `symbol unavailable:
-//! NGZ6`, or `CME Levels 2 and 3 need CME Standard or above` for a level
-//! the key's plan lacks. The answer to the first subscription, `hello` or
-//! the refusal, goes to the connection's opening. `connect` returns once
-//! LSE says `hello`, or fails with LSE's close.
+//! The client is an outer client plus the handler task that owns Nautilus' `WebSocketClient`
+//! ("WebSocket client patterns" in Nautilus' adapter guide).
 //!
-//! The handler passes each contract's records on with their sequence, the
-//! opening ones marked, and keeps each contract's sequence. A sequence
-//! beyond the last but one is a gap, passed on and left: the records
-//! between did not come, as when the stream drops what a slow reader could
-//! not take; a record not beyond the last is passed over, as is an opening
-//! that brings nothing new. A contract subscribed that the connection does
-//! not carry is carried on a new connection: the handler asks Nautilus'
-//! transport to
-//! reconnect (`request_reconnect`), and the new connection's subscription
-//! names it too, LSE taking no second subscription on a connection. A new
-//! subscriber of a contract carried already is passed on in its place
-//! among the records, for whoever keeps the contract's latest record to
-//! open it again. A contract carried no longer is left out of the next
-//! connection's subscription, the current one carrying it on, LSE taking
-//! no unsubscription: an expired contract named there would have LSE
-//! refuse the whole subscription.
+//! A connection carries one subscription at one level. Nautilus' `SubscriptionState` holds the
+//! subscribed contracts, and its topics are their names at LSE. The client sends the subscription
+//! first on each connection and never replays it on another (`send_text_on_connection`).
 //!
-//! Nautilus' transport reconnects a dropped connection with backoff. On the
-//! new one each contract opens again: an opening beyond the contract's
-//! last record is passed on, and the records between are a gap. A new
-//! `epoch` in `hello` is a reset of LSE's feed: its sequences start again,
-//! so each contract's is forgotten, and what came between is a gap left as
-//! it is. A close for a refusal a new connection would not lift, 1008 (the
-//! subscription refused) or 4001 (the key replaced or revoked, or its plan
-//! ended), is not reconnected, and stops the handler, whose contracts a
-//! new client carries; every other is reconnected (LSE's documentation,
-//! "Refusals and closes": 4003 the account's connections held, 1012 the
-//! feed's connection reset, 1013 a contract not ready).
+//! The handler names contracts like this:
+//! - It connects once it has a contract to name.
+//! - Its first subscription names the contracts it was started with and every contract subscribed
+//!   by then.
+//! - The first connection alone names a contract it was started with, for LSE to check it.
+//! - A later connection names only the contracts subscribed. An expired contract that was never
+//!   taken then does not make LSE refuse the whole subscription.
+//! - With no contract to name, the handler sends no subscription.
+//!
+//! The key goes in the `X-API-Key` header of the opening request and of every reconnect.
+//!
+//! LSE answers with `hello`, then opens each contract and streams its records. An opening is the
+//! last best bid and offer at Level 1, the last ten levels at Level 2, and no record at Level 3.
+//! LSE refuses a subscription by closing with 1008 and a reason, such as `symbol unavailable:
+//! NGZ6` or `CME Levels 2 and 3 need CME Standard or above`. `connect` returns once LSE says
+//! `hello`, or fails with LSE's close.
+//!
+//! The client passes records on with their sequence and marks openings. It treats sequences like
+//! this:
+//! - A sequence beyond the last but one is a gap. The client passes it on and leaves it. The
+//!   records between did not come, as when the stream drops what a slow reader could not take.
+//! - A record not beyond the last is passed over.
+//! - An opening that brings nothing new is passed over.
+//!
+//! LSE takes no second subscription and no unsubscription on a connection, so:
+//! - The handler requests a new connection (`request_reconnect`) to carry a contract that is
+//!   subscribed but not carried.
+//! - A new subscriber of a carried contract gets `Reopen`, for whoever keeps the latest record to
+//!   open it again.
+//! - The next connection's subscription leaves out a contract no longer carried.
+//!
+//! After a reconnect each contract opens again. The client passes on an opening beyond the last
+//! record, and the records between are a gap. A new `epoch` in `hello` means LSE reset the feed.
+//! Sequences start again, so the client forgets each one, and what came between is a gap left as
+//! it is.
+//!
+//! A close that a new connection would not lift stops the handler and is not reconnected. Those
+//! closes are 1008 and 4001 (key replaced or revoked, or plan ended). Every other close is
+//! reconnected (LSE's documentation, "Refusals and closes"):
+//! - 4003: the account's connections are held.
+//! - 1012: the feed's connection was reset.
+//! - 1013: a contract is not ready.
 
 use std::sync::Arc;
 
@@ -83,69 +75,55 @@ use crate::{
     },
 };
 
-/// How long LSE may take to answer the subscription.
+/// The longest LSE may take to answer the subscription.
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How often the client pings: as often as LSE pings it, every 15 s; a
-/// connection silent for three pings is replaced.
+/// LSE pings every 15 s, and so does the client. A connection silent for three pings is replaced.
 const PING_SECS: u64 = 15;
 
-/// The closes of a refusal a new connection would not lift: the
-/// subscription refused (1008), the key replaced or revoked, or its plan
-/// ended (4001).
 const TERMINAL: [u16; 2] = [1008, 4001];
 
-/// The delimiter of the subscription state's topics, which no contract's
-/// name holds: a topic is one name.
+/// A delimiter that no contract's name contains, so a topic is one name.
 const TOPIC_DELIMITER: char = ':';
 
-/// The header the key goes in.
 const API_KEY_HEADER: &str = "X-API-Key";
 
 /// What the client passes on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExchangeWsMessage {
-    /// A record of the contract `symbol`, of the connection's level, at its
-    /// `sequence`; `opening` if it opens the contract, LSE's last best bid
-    /// and offer or ten levels, and so carries no event of its own.
+    /// A record of the contract `symbol`. An `opening` is LSE's last best bid and offer or last ten
+    /// levels, and it carries no event of its own.
     Record {
         symbol: String,
         sequence: u64,
         record: ExchangeRecord,
         opening: bool,
     },
-    /// The records of `symbol` from `from` to `to`, both included, did not
-    /// come.
+    /// The records of `symbol` from `from` to `to`, both included, did not come.
     Gap { symbol: String, from: u64, to: u64 },
-    /// A new subscriber of the contract `symbol`, carried already, after
-    /// the records passed on before it: the contract's latest record opens
-    /// it for the subscriber.
+    /// A new subscriber joined the carried contract `symbol`. Its latest record opens the contract
+    /// for them.
     Reopen { symbol: String },
 }
 
-/// The answer to a connection's first subscription: `Ok` once LSE says
-/// `hello`, or why it did not, LSE's refusal with its close's code and
-/// reason among them.
+/// The answer to a connection's first subscription: `Ok` once LSE says `hello`, else the reason it
+/// did not.
 pub type ExchangeOpening = tokio::sync::oneshot::Receiver<Result<(), String>>;
 
-/// What the transport passes the handler: a frame of a connection, or the
-/// close of one, with its code and reason if LSE gave them.
 enum Inbound {
     Frame(u64, Message),
     Closed(Option<(u16, String)>),
 }
 
-/// A connection to an LSE exchange stream at one level, carrying the
-/// contracts subscribed.
+/// A connection to an LSE exchange stream at one level. It carries the subscribed contracts.
 #[derive(Debug)]
 pub struct ExchangeStreamClient {
     exchange: LseExchange,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<HandlerCommand>,
-    /// The handler task, explicitly singular: `disconnect` joins it.
     handler: TaskSlot<()>,
 }
 
-/// Subscribes contracts on a connection: cloned to whoever subscribes.
+/// Subscribes contracts on a connection. Each subscriber gets a clone.
 #[derive(Debug, Clone)]
 pub struct ExchangeSubscriber {
     exchange: LseExchange,
@@ -153,19 +131,16 @@ pub struct ExchangeSubscriber {
 }
 
 impl ExchangeStreamClient {
-    /// Starts the client of `exchange`'s stream at `url` with the key of
-    /// `credential`, at `level`, passing the records and gaps of its
-    /// contracts to `out`: its handler connects once it has a contract to
-    /// name, `symbols`, by their names at LSE, or the first subscribed
-    /// (`ExchangeSubscriber::subscribe`), and its first subscription names
-    /// `symbols` and every contract subscribed by then. A later connection
-    /// names only the contracts subscribed, `symbols` among them only if
-    /// subscribed. The opening returned gets LSE's answer.
+    /// Starts the client for `exchange`'s stream at `url` and `level`, using the key in
+    /// `credential`.
+    ///
+    /// The client passes the records and gaps of its contracts to `out`. The handler connects once
+    /// it has a contract to name, from `symbols` or the first one subscribed. The opening returned
+    /// gets LSE's answer.
     ///
     /// # Errors
     ///
-    /// Returns an error if the transport's config is refused or the handler
-    /// does not start.
+    /// Returns an error if the transport refuses its config or the handler does not start.
     pub fn start(
         exchange: LseExchange,
         url: &str,
@@ -177,7 +152,7 @@ impl ExchangeStreamClient {
         let (raw_tx, raw_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
         let closes = raw_tx.clone();
         let messages: EpochMessageHandler = Arc::new(move |epoch, message| {
-            // The receiver is gone only once the handler has stopped.
+            // The receiver is gone only once the handler has stopped
             let _ = raw_tx.send(Inbound::Frame(epoch, message));
         });
         let closed: CloseHandler = Arc::new(move |frame| {
@@ -238,18 +213,14 @@ impl ExchangeStreamClient {
         ))
     }
 
-    /// Connects to `exchange`'s stream at `url` with the key of
-    /// `credential`, its first subscription naming the contracts `symbols`,
-    /// by their names at LSE, at `level`, which LSE checks, and passing their
-    /// records and gaps to `out`; a later connection names those subscribed
-    /// alone (see `start`).
+    /// Connects as `start` does, and the first subscription names `symbols` for LSE to check.
     ///
     /// # Errors
     ///
-    /// Returns an error if the connection fails (a key LSE does not take is
-    /// refused with HTTP 401), or if LSE refuses the subscription, with
-    /// its close's code and reason, or does not answer it within
-    /// `OPEN_TIMEOUT`.
+    /// Returns an error if:
+    /// - The connection fails. LSE refuses a key it does not take with HTTP 401.
+    /// - LSE refuses the subscription, with the code and reason of its close.
+    /// - LSE does not answer the subscription within `OPEN_TIMEOUT`.
     pub async fn connect(
         exchange: LseExchange,
         url: &str,
@@ -274,7 +245,7 @@ impl ExchangeStreamClient {
         anyhow::bail!(refused)
     }
 
-    /// Who subscribes contracts on the connection.
+    /// Returns the subscriber for contracts on the connection.
     pub fn subscriber(&self) -> ExchangeSubscriber {
         ExchangeSubscriber {
             exchange: self.exchange,
@@ -282,33 +253,29 @@ impl ExchangeStreamClient {
         }
     }
 
-    /// Whether the handler has stopped, on a close a new connection would
-    /// not lift, such as LSE's refusal of the subscription: no contract is
-    /// carried on it any more.
+    /// Returns whether the handler stopped on a close a new connection would not lift.
     pub fn is_closed(&self) -> bool {
         self.cmd_tx.is_closed()
     }
 
-    /// Closes the connection, joining the handler within
-    /// `DISCONNECT_TIMEOUT`, then aborting it.
+    /// Closes the connection. It joins the handler within `DISCONNECT_TIMEOUT`, then aborts it.
     pub async fn disconnect(mut self) {
-        // The handler is gone once it has stopped.
         let _ = self.cmd_tx.send(HandlerCommand::Disconnect);
         finish_handler(&mut self.handler, &format!("{} stream", self.exchange)).await;
     }
 }
 
 impl ExchangeSubscriber {
-    /// Has the connection carry the contract `symbol`, its name at LSE, on
-    /// this connection and every later one: if it carries it already and
-    /// `reopen`, the new subscriber is passed on (`ExchangeWsMessage::Reopen`);
-    /// if not, the connection's first subscription names it, if not sent
-    /// yet, or a new connection carries it, opening it.
+    /// Has the connection carry the contract `symbol`, its name at LSE, now and on every later
+    /// connection.
+    ///
+    /// If the contract is already carried and `reopen` is set, the client passes on the new
+    /// subscriber (`ExchangeWsMessage::Reopen`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the client is disconnected, or stopped on a
-    /// close a new connection would not lift (see `is_closed`).
+    /// Returns an error if the client is disconnected, or stopped on a close that a new connection
+    /// would not lift (see `is_closed`).
     pub fn subscribe(&self, symbol: &str, reopen: bool) -> anyhow::Result<()> {
         self.cmd_tx
             .send(HandlerCommand::Subscribe {
@@ -319,70 +286,53 @@ impl ExchangeSubscriber {
             .with_context(|| format!("the connection to LSE's {} stream is closed", self.exchange))
     }
 
-    /// Has the connection carry the contract `symbol` no longer: the next
-    /// connection's subscription leaves it out, LSE refusing a whole
-    /// subscription that names a contract it does not carry, such as one
-    /// expired. LSE takes no unsubscription on a connection, so this one
-    /// carries it on until replaced. A stopped handler carries nothing.
+    /// Has the connection stop carrying `symbol`.
+    ///
+    /// The next connection's subscription leaves it out. LSE takes no unsubscription, so this
+    /// connection carries it until replaced. A stopped handler carries nothing.
     pub fn unsubscribe(&self, symbol: &str) {
-        // The handler is gone once it has stopped.
         let _ = self.cmd_tx.send(HandlerCommand::Unsubscribe {
             symbol: symbol.to_owned(),
         });
     }
 }
 
-/// Commands from the outer client to the handler.
 enum HandlerCommand {
     Subscribe { symbol: String, reopen: bool },
     Unsubscribe { symbol: String },
     Disconnect,
 }
 
-/// What the handler connects the transport with.
 struct Transport {
     config: WebSocketConfig,
     messages: EpochMessageHandler,
     closed: CloseHandler,
 }
 
-/// The handler task: the one owner of the `WebSocketClient`.
 struct ExchangeHandler {
-    /// The exchange whose stream it is.
     exchange: LseExchange,
-    /// The level the connection's subscription asks.
     level: ExchangeLevel,
-    /// What the transport connects with, until it does.
     transport: Option<Transport>,
     client: Option<WebSocketClient>,
     cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
     raw_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     out: tokio::sync::mpsc::UnboundedSender<ExchangeWsMessage>,
-    /// Where the first `hello`, or the refusal of the first subscription,
-    /// goes, until it comes.
     opening: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    /// The contracts the first connection's subscription names beside those
-    /// subscribed, until it is sent.
+    /// The contracts the first subscription names in addition to those subscribed, until it is
+    /// sent.
     first: Vec<String>,
-    /// The contracts subscribed, by their names at LSE, which every
-    /// connection's subscription names.
     subscriptions: SubscriptionState,
-    /// The contracts the connection's subscription named, which it carries.
     carried: AHashSet<String>,
-    /// The transport's connection the handler speaks on: 0, then each
-    /// replacement's.
+    /// The number of the transport connection the handler speaks on: 0, then one more for each
+    /// replacement.
     epoch: u64,
     /// The feed's epoch, as the last `hello` gave it.
     feed: Option<u64>,
-    /// The sequence of each contract's last record, by its name.
     sequences: AHashMap<String, u64>,
-    /// The contracts' names by the stream's number for them.
     names: AHashMap<u32, String>,
 }
 
 impl ExchangeHandler {
-    /// Runs until disconnected, the outer client dropped, or a close a new
-    /// connection would not lift.
     async fn run(mut self) {
         if self.open().await {
             loop {
@@ -412,11 +362,9 @@ impl ExchangeHandler {
         }
     }
 
-    /// Connects once it has a contract to name, and sends the subscription
-    /// of the contracts it was started with and those subscribed by then,
-    /// while it connected among them. Whether it did: not if disconnected
-    /// first, nor if the transport does not connect, which the opening is
-    /// told.
+    /// Connects once it has a contract to name and sends the first subscription.
+    ///
+    /// Returns whether it did. If the transport does not connect, it tells the opening.
     async fn open(&mut self) -> bool {
         while self.first.is_empty() && self.subscriptions.is_empty() {
             match self.cmd_rx.recv().await {
@@ -470,7 +418,7 @@ impl ExchangeHandler {
 
     async fn receive(&mut self, epoch: u64, message: Message) {
         if epoch < self.epoch {
-            // Of a connection replaced.
+            // The frame is from a replaced connection
             return;
         }
         if epoch > self.epoch {
@@ -480,7 +428,7 @@ impl ExchangeHandler {
             Message::Text(text) if &text[..] == RECONNECTED.as_bytes() => {}
             Message::Text(text) => match serde_json::from_slice::<ExchangeText>(&text) {
                 Ok(text) => self.text(text),
-                // A type the client does not read.
+                // The client does not read this type
                 Err(e) => log::debug!(
                     "a frame of LSE's {} stream not read ({} bytes): {e}",
                     self.exchange,
@@ -528,8 +476,6 @@ impl ExchangeHandler {
         }
     }
 
-    /// Passes `frame`'s record on, if it is beyond its contract's last,
-    /// and the gap before it, if one.
     fn record(&mut self, frame: ExchangeRecordFrame) {
         let Some(symbol) = self.names.get(&frame.instrument_id).cloned() else {
             log::warn!(
@@ -551,8 +497,8 @@ impl ExchangeHandler {
                 }
                 return;
             }
-            // An opening stands for its own record, whose trade, if one,
-            // did not come.
+
+            // An opening stands for its own record, and that record's trade, if any, did not come
             let to = if frame.snapshot {
                 frame.sequence
             } else {
@@ -575,14 +521,10 @@ impl ExchangeHandler {
         });
     }
 
-    /// Carries `symbol` on every connection: if carried already and
-    /// `reopen`, the new subscriber is passed on; if not, a new connection
-    /// carries it.
     fn subscribe(&self, symbol: String, reopen: bool) {
         let newly = self.subscriptions.try_mark_subscribe(&symbol);
         if newly && self.carried.contains(&symbol) {
-            // Named on this connection, the first, before it was subscribed:
-            // its opening came, or comes, here.
+            // The first connection named it before it was subscribed, so its opening comes there
             self.subscriptions.confirm_subscribe(&symbol);
         } else if newly {
             log::info!(
@@ -600,16 +542,11 @@ impl ExchangeHandler {
         }
     }
 
-    /// Carries `symbol` no longer: the subscription of the next connection
-    /// leaves it out (Nautilus' `SubscriptionState`). LSE takes no
-    /// unsubscription on a connection, so none is sent.
     fn unsubscribe(&self, symbol: &str) {
         self.subscriptions.mark_unsubscribe(symbol);
         self.subscriptions.confirm_unsubscribe(symbol);
     }
 
-    /// The transport replaced the connection with that of `epoch`, a later
-    /// one: the subscription is sent on it.
     async fn reconnected(&mut self, epoch: u64) {
         log::warn!(
             "LSE's {} stream reconnected: subscribing again",
@@ -620,10 +557,11 @@ impl ExchangeHandler {
         self.send_subscription(symbols).await;
     }
 
-    /// The transport's connection closed: before LSE answered the first
-    /// subscription, its refusal goes to the opening; else it is logged.
-    /// Whether the handler goes on: not after a close a new connection would
-    /// not lift, which the transport does not reconnect.
+    /// Sends a refusal to the opening if LSE has not yet answered the first subscription, else
+    /// logs it.
+    ///
+    /// Returns whether the handler goes on. It does not after a close that a new connection would
+    /// not lift.
     fn closed(&mut self, close: Option<&(u16, String)>) -> bool {
         let described = close.map_or_else(
             || "no close frame".to_string(),
@@ -654,11 +592,9 @@ impl ExchangeHandler {
         !terminal
     }
 
-    /// Sends the subscription of `symbols` on the connection, if it is
-    /// still the transport's and live, and takes them as what it carries;
-    /// none if there are none, a later subscription carrying its contract
-    /// on a new connection. One not sent never is: the next connection
-    /// sends its own.
+    /// Sends the subscription to `symbols` if the connection is live, and records them as carried.
+    ///
+    /// A subscription that is not sent is never sent later. The next connection sends its own.
     async fn send_subscription(&mut self, mut symbols: Vec<String>) {
         self.carried = symbols.iter().cloned().collect();
         if symbols.is_empty() {

@@ -1,34 +1,33 @@
-//! A strategy trading on its models (`model::handle`): the probe of
-//! `common::dataset` decides every hour on the last mid of IC's gold,
-//! trading in a backtest on the models of a store. On a fixed list of
-//! baseline long models of a strategy trading the long alone, each
-//! predicting its own R whatever the row, its calibration leaving it as it
-//! is, each decision's level names the model it used: the latest valid at
-//! or before it. A LightGBM model fitted on the dataset's long rows'
-//! realized R and published as a train would, reloaded in the node,
-//! predicts on the decisions of its probe rows exactly as when fitted; and
-//! one splitting on the payoff features alone predicts on every decision
-//! as on the long's row the dataset holds for it, the row a decision reads
-//! being the dataset's. The probe sends its
-//! trades: on the hand-worked targets' quotes (`backtest_targets`), each
-//! trade of a model of either side realizes the P&L the dataset row of
-//! its decision recorded of that side.
+//! A strategy trades on its models (`model::handle`). The probe of `common::dataset` decides every
+//! hour on the last mid of IC's gold, using the models of a store. The tests cover three cases:
+//! - On baseline long models, each predicting its own R whatever the row, each decision's level
+//!   names the model it used: the latest valid at or before it.
+//! - A LightGBM model published as a train would, then reloaded in the node, predicts on its probe
+//!   rows exactly as when fitted. One splitting on the payoff features alone predicts on every
+//!   decision as on the dataset's row for it.
+//! - On the hand-worked quotes (`backtest_targets`), each trade of a model of either side realizes
+//!   the P&L its dataset row recorded for that side.
 
-use std::path::Path;
+use std::{any::Any, cell::RefCell, path::Path, rc::Rc};
 
 use helix_trader::{
     model::{
         config::{Margins, ModelConfig},
         dataset::DatasetRow,
+        decide::DecisionRule,
         learner::{LearnerConfig, LightGbmConfig, TrainingSet},
-        store::{ModelStore, Probe},
-        targets::{BracketSpec, Distance, Side, Target, TargetConfig},
+        store::{Probe, StoredModel},
+        targets::{BracketSpec, Distance, Exit, Side, Target, TargetConfig},
     },
     strategy::risk::R,
 };
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
+use nautilus_common::{
+    messages::execution::TradingCommand,
+    msgbus::{self, BusTap, Endpoint, MStr, MessagingSwitchboard, Topic},
+};
 use nautilus_core::UnixNanos;
-use nautilus_model::types::Money;
+use nautilus_model::types::{Money, Price};
 use rstest::rstest;
 use rust_decimal::Decimal;
 
@@ -36,27 +35,23 @@ use crate::{
     backtest_targets::hand_worked_quotes,
     common::{
         dataset::{
-            baseline_of, blueprint, config, features, r, replay, replay_of, target, trade, walk,
+            baseline_of, blueprint, config, features, hourly_trades, model_set, r, replay_of,
+            requirements, target, trade, walk,
         },
         ic,
     },
 };
 
-fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
+fn publish(models: &Path, config: &ModelConfig, valid_from: Timestamp, model: StoredModel) {
     blueprint(features(), config.clone())
-        .model_set(models)
+        .model_store(models)
         .unwrap()
-        .side(side)
-        .unwrap()
-        .store()
-        .clone()
+        .publish(&model_set(config, valid_from, vec![model], None))
+        .unwrap();
 }
 
-/// Decisions from midnight of the 21st to 06:00, on the hour, 10 ms late,
-/// of a strategy trading the long alone; models valid from 02:00 (of 7
-/// tenths, 0.2R), 04:00 (8), 04:30 (9) and 09:00 (after the run), each
-/// decision's level its model's R, the strategy's one side calibrated to
-/// the bit as it is. Before 02:00 no model is valid: no trade.
+/// Decisions are hourly from midnight of the 21st to 06:00. Models are valid from 02:00, 04:00,
+/// 04:30 and 09:00 (after the run), so nothing trades before 02:00.
 #[rstest]
 fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     let catalog = walk(
@@ -70,24 +65,21 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
             long: Some(R::new(0.0)),
             short: None,
         },
-        ..config()
+        ..hourly_trades()
     };
-    let store = store(models.path(), &config, Side::Long);
+
     for (valid_from, tenths) in [
         ("02:00:00", 7),
         ("04:00:00", 8),
         ("04:30:00", 9),
         ("09:00:00", 9),
     ] {
-        store
-            .publish(&baseline_of(
-                &features(),
-                &config,
-                Side::Long,
-                ic::at(valid_from),
-                tenths,
-            ))
-            .unwrap();
+        publish(
+            models.path(),
+            &config,
+            ic::at(valid_from),
+            baseline_of(&features(), &config, Side::Long, tenths),
+        );
     }
 
     let record = trade(
@@ -121,17 +113,9 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     );
 }
 
-/// A LightGBM model fitted on the long's rows of the 72 hours before t
-/// (16:00 of the 25th) but its last 12, enough for its leaves of 20 rows to
-/// split, on each long's realized R, published as a train would, valid from
-/// the last 12 hours, whose decisions' long rows are its probe rows and its
-/// predictions on them; it then trades over them, each decision's level, the
-/// strategy's one side calibrated as it is, its prediction to the bit. The
-/// walk puts those mids on both sides of the fitted ones' split, so the
-/// probes fall in different leaves: the check is that the trees reloaded in
-/// the node give the bits they gave when fitted, on several predictions. The
-/// walk has no edge to earn, so no train would publish it: it is published
-/// straight.
+/// The model is fitted on the long's rows of the 72 hours before t (16:00 of the 25th) but the last
+/// 12, and published straight, as the walk has no edge for a train to publish. The mids fall on
+/// both sides of the split, so the probes fall in different leaves.
 #[rstest]
 fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let catalog = walk(
@@ -149,17 +133,16 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let config = ModelConfig {
         learner: learner.clone(),
         window: SignedDuration::from_hours(72),
-        // Every decision a long, to record its prediction.
         margins: Margins {
             long: Some(R::new(f64::MIN)),
             short: None,
         },
-        ..config()
+        ..hourly_trades()
     };
-    let holdout = t - config.holdout;
+    let holdout = t - config.calibration;
     let rows = std::thread::scope(|scope| {
         scope
-            .spawn(|| replay(&catalog, t - config.window, t).unwrap())
+            .spawn(|| replay_of(&catalog, features(), &config, t - config.window, t).unwrap())
             .join()
             .unwrap()
     });
@@ -179,7 +162,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     )
     .unwrap();
     let fitted = learner.fit(&set).unwrap();
-    let mut model = baseline_of(&features(), &config, Side::Long, holdout, 5);
+    let mut model = baseline_of(&features(), &config, Side::Long, 5);
     model.manifest.learner = learner;
     model.manifest.probes = held_out
         .iter()
@@ -189,9 +172,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
         })
         .collect();
     model.model = fitted.save().unwrap();
-    store(models.path(), &config, Side::Long)
-        .publish(&model)
-        .unwrap();
+    publish(models.path(), &config, holdout, model.clone());
 
     let record = trade(&catalog, holdout, t, &config, models.path());
 
@@ -201,7 +182,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     predictions.dedup();
     assert!(predictions.len() > 1, "{probes:?}");
     for probe in probes {
-        // The decision whose mid is the probe's first feature.
+        // The decision whose mid is the probe's first feature
         let row = record
             .rows
             .iter()
@@ -220,16 +201,9 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     }
 }
 
-/// A decision reads each side's row as the dataset holds it for the same
-/// decision: the decision's features, then the side's payoff features. A
-/// LightGBM model of the long's rows of the 72 hours before t (16:00 of the
-/// 25th), their first feature, the mid, zeroed so that its trees split on
-/// the payoff features alone, learning whether the take profit's R is above
-/// its median, 1 or nought, is published straight; trading over the last 12
-/// hours, every decision with a dataset row has for its level the model's
-/// prediction on the long's row of that dataset row, to the bit, and the
-/// predictions are not all one, so what they read of the payoff is what the
-/// rows hold.
+/// A decision reads each side's row as the dataset holds it: the decision's features, then the
+/// side's payoff features. The model's mid is zeroed, so its trees split on the payoff features
+/// alone (whether the take profit's R is above its median).
 #[rstest]
 fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     let catalog = walk(
@@ -247,25 +221,25 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     let config = ModelConfig {
         learner: learner.clone(),
         window: SignedDuration::from_hours(72),
-        // Every decision a long, to record its prediction.
+        // Every decision a long, to record its prediction
         margins: Margins {
             long: Some(R::new(f64::MIN)),
             short: None,
         },
-        ..config()
+        ..hourly_trades()
     };
-    let holdout = t - config.holdout;
+    let holdout = t - config.calibration;
     let rows: Vec<DatasetRow> = std::thread::scope(|scope| {
         scope
-            .spawn(|| replay(&catalog, t - config.window, t).unwrap())
+            .spawn(|| replay_of(&catalog, features(), &config, t - config.window, t).unwrap())
             .join()
             .unwrap()
     })
     .iter()
     .map(DatasetRow::of)
     .collect();
-    // A long's row: the mid, then its take profit's R, its stop's nominal
-    // loss and its entry cost.
+
+    // A long's row: the mid, then its take profit's R, its stop's nominal loss and its entry cost
     let long_rows: Vec<Vec<f64>> = rows
         .iter()
         .map(|row| row.side(Side::Long).features)
@@ -286,13 +260,11 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     )
     .unwrap();
     let fitted = learner.fit(&set).unwrap();
-    let mut model = baseline_of(&features(), &config, Side::Long, holdout, 5);
+    let mut model = baseline_of(&features(), &config, Side::Long, 5);
     model.manifest.learner = learner;
     model.manifest.probes.clear();
     model.model = fitted.save().unwrap();
-    store(models.path(), &config, Side::Long)
-        .publish(&model)
-        .unwrap();
+    publish(models.path(), &config, holdout, model);
 
     let record = trade(&catalog, holdout, t, &config, models.path());
 
@@ -315,11 +287,8 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     assert!(read.len() > 1, "{read:?}");
 }
 
-/// The hand-worked targets' bracket (`backtest_targets`): 7.5 bps of the
-/// decision's mid away on both sides, 3.00 USD on the one ounce of gold the
-/// reference stake buys (`common::dataset::RISK`),
-/// closed after 45 minutes, inside the hourly cadence; trading `side` alone
-/// at every decision.
+/// The hand-worked bracket of `backtest_targets`: 7.5 bps of the decision's mid on both sides,
+/// closing after 45 minutes, trading `side` alone at every decision.
 pub(crate) fn hand_worked(side: Side) -> ModelConfig {
     let traded = Some(R::new(f64::MIN));
     let margins = match side {
@@ -351,15 +320,205 @@ pub(crate) fn hand_worked(side: Side) -> ModelConfig {
     }
 }
 
-/// Worked by hand on the quotes of the hand-worked targets: a dip at
-/// 09:20, a spike at 10:45:00.010 and a rise from 11:20. Over 08:30 to
-/// 12:30 a model of one side, trading every decision on its bracket,
-/// realizes at the decisions of 09:00, 10:00 and 11:00 the P&L the
-/// dataset row of that decision recorded of that side: the long stopped
-/// (-3.64 USD), taking profit (2.66) and closed by time (0.56), the short
-/// taking profit (2.66), stopped (-3.64) and closed by time (-1.44). The
-/// 12:00 decision's trade is still open at the end, as its row is
-/// unsettled.
+/// Observes the bracket commands before the venue fills one leg and cancels the other, as a fill
+/// price alone cannot identify a stop.
+#[derive(Default)]
+struct BracketSubmissions(RefCell<Vec<(UnixNanos, Price, Price)>>);
+
+impl BusTap for BracketSubmissions {
+    fn on_publish(&self, _: MStr<Topic>, _: &dyn Any) {}
+
+    fn on_send(&self, endpoint: MStr<Endpoint>, message: &dyn Any) {
+        if endpoint == MessagingSwitchboard::risk_engine_queue_execute()
+            && let Some(TradingCommand::SubmitOrderList(list)) = message.downcast_ref()
+        {
+            let stop = list
+                .order_inits
+                .iter()
+                .find_map(|o| o.trigger_price)
+                .unwrap();
+            let take = list.order_inits.iter().find_map(|o| o.price).unwrap();
+            self.0.borrow_mut().push((list.ts_init, stop, take));
+        }
+    }
+}
+
+/// The quarter hours ending at 10:00 and 10:15 give a two-bar simple ATR of 3. The spike after
+/// 10:15 makes the forming bar's range 10, yet at 10:16 the distance is still 3 around the new
+/// 4010.10 mid.
+#[rstest]
+fn minute_decisions_label_and_submit_brackets_on_completed_quarter_hours() {
+    let mut config = hand_worked(Side::Long);
+    config.decision = DecisionRule::Every(SignedDuration::from_mins(1));
+    config.target.spec = toml::from_str(
+        r#"
+        limit = "45s"
+        [bracket]
+        take_profit = { atr = 1 }
+        stop = { atr = 1 }
+        atr = { period = 2, ma_type = "SIMPLE", bar_interval = "15m" }
+    "#,
+    )
+    .unwrap();
+    let (from, to) = (ic::at("09:45:00"), ic::at("10:16:40"));
+    let quotes = [
+        ("09:45:01", "4000.00", "4000.20"),
+        ("09:50:00", "4002.00", "4002.20"),
+        ("09:59:30", "4000.00", "4000.20"),
+        ("10:05:00", "4004.00", "4004.20"),
+        ("10:13:30", "4000.00", "4000.20"),
+        ("10:14:59", "4000.00", "4000.20"),
+        ("10:15:30", "4010.00", "4010.20"),
+        ("10:16:30", "4006.90", "4007.10"),
+        ("10:16:40", "4006.90", "4007.10"),
+    ];
+    let catalog = ic::catalog_of(
+        quotes.map(|(t, b, a)| ic::quote(ic::at(t), b, a)).to_vec(),
+        from,
+        to,
+    );
+    let rows = std::thread::scope(|scope| {
+        scope
+            .spawn(|| replay_of(&catalog, features(), &config, from, to))
+            .join()
+            .unwrap()
+            .unwrap()
+    });
+    let models = tempfile::tempdir().unwrap();
+    publish(
+        models.path(),
+        &config,
+        ic::at("10:15:00"),
+        baseline_of(&features(), &config, Side::Long, 8),
+    );
+    let submitted = Rc::new(BracketSubmissions::default());
+    msgbus::set_bus_tap(submitted.clone());
+    trade(&catalog, from, to, &config, models.path());
+    msgbus::clear_bus_tap();
+
+    let ns = |time| UnixNanos::from(ic::at(time));
+    let close = ns("10:15:00.010");
+    let between = ns("10:16:00.010");
+    let unit = Money::from("3 USD");
+    let outcomes: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.decision.ts_event,
+                row.settled_at,
+                row.outcomes.long.exit,
+                row.outcomes.short.exit,
+                row.outcomes.long.unit,
+                row.outcomes.short.unit,
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (
+                close,
+                ns("10:15:30"),
+                Exit::TakeProfit,
+                Exit::Stop,
+                unit,
+                unit
+            ),
+            (
+                between,
+                ns("10:16:30"),
+                Exit::Stop,
+                Exit::TakeProfit,
+                unit,
+                unit
+            ),
+        ]
+    );
+    assert_eq!(
+        submitted.0.take(),
+        [
+            (close, Price::from("3997.10"), Price::from("4003.10")),
+            (between, Price::from("4007.10"), Price::from("4013.10")),
+        ]
+    );
+}
+
+/// Both minutes buy and sell one ounce in the dataset. In execution, the constant long signal waits
+/// for the rise that settles 10:00, not the five-minute limit, to be eligible again at 10:02.
+#[rstest]
+fn overlapping_decisions_settle_independently_but_executable_entries_wait_until_flat() {
+    let mut config = hand_worked(Side::Long);
+    config.decision = DecisionRule::Every(SignedDuration::from_mins(1));
+    config.target.spec.limit = SignedDuration::from_mins(5);
+    config.validate(&requirements()).unwrap();
+
+    let (from, to) = (ic::at("09:59:59"), ic::at("10:02:01"));
+    let quotes = [
+        ("09:59:59", "4000.00", "4000.20"),
+        ("10:01:00", "4001.00", "4001.20"),
+        ("10:01:10", "3998.00", "3998.20"),
+        ("10:01:20", "3997.80", "3998.00"),
+        ("10:01:30", "4003.20", "4003.40"),
+        ("10:02:01", "4003.20", "4003.40"),
+    ];
+    let catalog = ic::catalog_of(
+        quotes.map(|(t, b, a)| ic::quote(ic::at(t), b, a)).to_vec(),
+        from,
+        to,
+    );
+    let rows = std::thread::scope(|scope| {
+        scope
+            .spawn(|| replay_of(&catalog, features(), &config, from, to))
+            .join()
+            .unwrap()
+            .unwrap()
+    });
+    let ns = |t| UnixNanos::from(ic::at(t));
+    let outcomes: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            let side = |o: helix_trader::model::targets::Outcome| (o.exit, o.pnl);
+            (
+                row.decision.ts_event,
+                row.settled_at,
+                side(row.outcomes.long),
+                side(row.outcomes.short),
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (
+                ns("10:01:00.010"),
+                ns("10:01:20"),
+                (Exit::Stop, Money::from("-3.44 USD")),
+                (Exit::TakeProfit, Money::from("2.66 USD"))
+            ),
+            (
+                ns("10:00:00.010"),
+                ns("10:01:30"),
+                (Exit::TakeProfit, Money::from("2.66 USD")),
+                (Exit::Stop, Money::from("-3.64 USD"))
+            ),
+        ]
+    );
+
+    let models = tempfile::tempdir().unwrap();
+    publish(
+        models.path(),
+        &config,
+        from,
+        baseline_of(&features(), &config, Side::Long, 8),
+    );
+    let record = trade(&catalog, from, to, &config, models.path());
+    let entries: Vec<_> = record.entries.iter().map(|entry| entry.0).collect();
+    assert_eq!(entries, [ns("10:00:00.010"), ns("10:02:00.010")]);
+}
+
+/// The hand-worked quotes have a dip at 09:20, a spike at 10:45:00.010, and a rise from 11:20.
+/// Over 08:30 to 12:30, a model of one side trades every decision on its bracket. The 12:00 trade
+/// is still open at the end, and its row is unsettled.
 #[rstest]
 fn a_model_strategy_realizes_per_trade_the_pnl_its_dataset_row_recorded() {
     let catalog = ic::catalog_of(hand_worked_quotes(), ic::at("08:00:00"), ic::at("13:00:00"));
@@ -379,9 +538,12 @@ fn a_model_strategy_realizes_per_trade_the_pnl_its_dataset_row_recorded() {
     ] {
         let config = hand_worked(side);
         let models = tempfile::tempdir().unwrap();
-        store(models.path(), &config, side)
-            .publish(&baseline_of(&features(), &config, side, from, 8))
-            .unwrap();
+        publish(
+            models.path(),
+            &config,
+            from,
+            baseline_of(&features(), &config, side, 8),
+        );
         let record = std::thread::scope(|scope| {
             scope
                 .spawn(|| trade(&catalog, from, to, &config, models.path()))

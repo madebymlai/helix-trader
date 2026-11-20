@@ -1,6 +1,6 @@
-//! PerpetualBooster: gradient-boosted trees on squared loss that stop by a
-//! budget instead of tuned settings. Its budget stands in for LightGBM's
-//! settings, which it has no equivalent of.
+//! PerpetualBooster trains gradient-boosted trees on squared loss. It stops at a budget, not at
+//! tuned settings. The budget stands in for LightGBM's settings, which PerpetualBooster has no
+//! equivalent of.
 
 use anyhow::Context;
 use perpetual::{Matrix, PerpetualBooster, booster::config::BoosterIO, objective::Objective};
@@ -8,22 +8,22 @@ use serde::{Deserialize, Serialize};
 
 use super::{Learner, Predictor, SavedModel, TrainingSet};
 
-/// PerpetualBooster's settings, each named and meant as in the library.
+/// PerpetualBooster's settings, named and meant as in the library.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct PerpetualConfig {
-    /// The memory a fit may take, in GB. Required: unbounded, a fit grows
-    /// until the machine runs out, past 8 GB on a modest set. A fit refuses
-    /// a limit of zero or less, on which the library panics.
+    /// The memory a fit may take, in GB.
+    ///
+    /// Required, because unbounded a fit grows past 8 GB on a modest set. A fit refuses zero or
+    /// less, which makes the library panic.
     pub memory_limit: f32,
-    /// How far boosting goes: a higher budget fits more and finer trees.
+    /// How far boosting goes. A higher budget fits more and finer trees.
     #[serde(default = "default_budget")]
     #[builder(default = default_budget())]
     pub budget: f32,
-    /// The most boosting rounds, below the budget's own stop; none if
-    /// unset.
+    /// The most boosting rounds, applied below the budget's own stop. No limit if unset.
     pub iteration_limit: Option<usize>,
-    /// The seed of every draw.
+    /// The seed for every draw.
     #[serde(default = "default_seed")]
     #[builder(default = default_seed())]
     pub seed: u64,
@@ -37,16 +37,14 @@ const fn default_seed() -> u64 {
     1
 }
 
-/// The metadata key under which a saved model keeps the width of its rows,
-/// which PerpetualBooster does not record itself.
+/// The metadata key for the row width of a saved model. PerpetualBooster does not record the width.
 const WIDTH: &str = "width";
 
 impl PerpetualConfig {
-    /// A booster with these settings, fitting squared loss. It fits on one
-    /// thread, as LightGBM does, so its results do not depend on the
-    /// machine's cores, and its splits give missing values a branch of their
-    /// own, so a missing feature is learned apart from every value, as in
-    /// LightGBM.
+    /// Builds a booster of squared loss.
+    ///
+    /// It fits on one thread, as LightGBM does, so results do not depend on the cores. Its splits
+    /// give missing values a branch of their own.
     fn booster(&self) -> PerpetualBooster {
         PerpetualBooster::default()
             .set_objective(Objective::SquaredLoss)
@@ -68,7 +66,8 @@ impl Learner for PerpetualConfig {
         );
         let width = set.width();
         let rows: Vec<&[f64]> = set.rows().collect();
-        // PerpetualBooster reads a matrix column after column.
+
+        // PerpetualBooster reads a matrix column by column
         let columns: Vec<f64> = (0..width)
             .flat_map(|column| rows.iter().map(move |row| row[column]))
             .collect();
@@ -90,7 +89,6 @@ impl Learner for PerpetualConfig {
     }
 }
 
-/// A PerpetualBooster of squared loss and the width of its rows.
 struct Perpetual {
     booster: PerpetualBooster,
     width: usize,
@@ -139,9 +137,6 @@ mod tests {
         PerpetualConfig::builder().memory_limit(1.0).build()
     }
 
-    /// 300 rows of two features whose label is 1 exactly where the first
-    /// feature is missing, and 0 elsewhere, where the feature runs from 0 to
-    /// 1, zero included.
     fn missing_is_one() -> TrainingSet {
         let mut features = Vec::new();
         let mut labels = Vec::new();
@@ -158,10 +153,7 @@ mod tests {
         TrainingSet::new(2, features, labels).unwrap()
     }
 
-    /// A model that cannot tell the missing feature from a value predicts
-    /// the training mean of `missing_is_one`'s labels, a third, throughout:
-    /// learned apart, the missing feature is predicted above it, toward its
-    /// label of 1, and every value below it, toward their 0.
+    /// A model blind to the missing feature predicts the mean label, a third, for every row.
     #[rstest]
     fn a_missing_feature_is_learned_apart_from_every_value() {
         let model = LearnerConfig::Perpetual(config())
@@ -174,8 +166,6 @@ mod tests {
         }
     }
 
-    /// 600 rows of one feature, 0.0 to 0.9 by 0.1, labeled 2 below 0.5
-    /// and -1 from it.
     fn step() -> TrainingSet {
         let features: Vec<f64> = (0..600_u32).map(|i| f64::from(i % 10) / 10.0).collect();
         let labels = features
@@ -195,22 +185,23 @@ mod tests {
     }
 
     #[rstest]
-    fn a_memory_limit_of_nothing_is_refused_at_fit() {
-        for memory_limit in [0.0, -1.0] {
-            let config = PerpetualConfig::builder()
-                .memory_limit(memory_limit)
-                .build();
-            assert!(
-                LearnerConfig::Perpetual(config)
-                    .fit(&missing_is_one())
-                    .is_err(),
-                "{memory_limit}"
-            );
-        }
+    #[case::of_nought(0.0, "0 GB")]
+    #[case::below_nought(-1.0, "-1 GB")]
+    fn a_memory_limit_of_nothing_is_refused_at_fit(#[case] memory_limit: f32, #[case] limit: &str) {
+        let config = PerpetualConfig::builder()
+            .memory_limit(memory_limit)
+            .build();
+
+        let err = LearnerConfig::Perpetual(config)
+            .fit(&missing_is_one())
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains(limit), "{err}");
     }
 
-    // PerpetualBooster draws only on a large set, where it fits each tree
-    // on a sample of the rows: 50,000 rows of 6 features are one.
+    // PerpetualBooster draws only on a large set, where each tree fits a sample of the rows, and
+    // 50,000 rows of 6 features are a large set.
     #[rstest]
     fn the_seed_reaches_perpetual() {
         let set = TrainingSet::new(

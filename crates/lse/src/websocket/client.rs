@@ -1,31 +1,25 @@
-//! The client of one LSE socket: an outer client and the handler task
-//! that owns Nautilus' `WebSocketClient`, as Nautilus' adapter guide lays
-//! one out ("WebSocket client patterns").
+//! The client of one LSE socket, made of an outer client and the handler task that owns Nautilus'
+//! `WebSocketClient` ("WebSocket client patterns" in Nautilus' adapter guide).
 //!
-//! `connect` opens the socket, and the handler answers LSE's welcome with
-//! the key; the client is connected once LSE authenticates it, keeping the
-//! symbols the socket lists to the key and the subscriptions it allows a
-//! connection, or fails with LSE's refusal (`INVALID_KEY`,
-//! `TOO_MANY_CONNECTIONS`, ...). The handler tracks the subscriptions in
-//! Nautilus' `SubscriptionState`, a symbol's ticks, as the socket spells
-//! the symbol, or an underlying's chain's, every listed contract of its
-//! options in one subscription (`Topic`), sends each once the connection is
-//! authenticated, has LSE's acknowledgement confirm it, and passes LSE's
-//! refusal of one on with its symbol or underlying: LSE answers
-//! subscriptions and unsubscriptions in turn, and its error names neither.
-//! Ticks are passed on as they come.
+//! The client is connected once LSE authenticates the key. It keeps the symbols the socket lists
+//! to the key and the subscriptions the socket allows a connection. If LSE refuses the key,
+//! connecting fails with LSE's refusal (`INVALID_KEY`, `TOO_MANY_CONNECTIONS`, ...).
 //!
-//! Nautilus' transport reconnects a dropped connection with backoff; on
-//! the new one the handler authenticates again, sends every subscription
-//! again (`reset_after_reconnect`), and passes on the gap: when the last
-//! frame of the dropped connection came, and when the new one was
-//! authenticated. Nothing is fetched to fill it. A connection LSE closes
-//! for a refusal that a new connection cannot lift (`TERMINAL`) is not
-//! reconnected. Every frame is bound to the connection it is meant for
-//! (`send_text_on_connection`), so none reaches a connection before its
-//! authentication; one not sent waits in the subscription state for the
-//! next. The application keepalive LSE asks for (`{"action": "ping"}`)
-//! is the transport's heartbeat, as often as LSE's Python client sends it.
+//! The handler tracks subscriptions in Nautilus' `SubscriptionState`. A subscription covers either
+//! a symbol's ticks or every listed contract of an underlying's chain (`Topic`). The handler sends
+//! each subscription once the connection is authenticated. It passes LSE's refusal on with its
+//! symbol or underlying, because LSE answers subscriptions and unsubscriptions in turn and its
+//! error names neither.
+//!
+//! Nautilus' transport reconnects a dropped connection with backoff. The handler then
+//! authenticates and sends every subscription again (`reset_after_reconnect`). It passes on the
+//! gap from the dropped connection's last frame to the new connection's authentication, and does
+//! not fetch it. A connection that LSE closes for a refusal a new connection cannot lift
+//! (`TERMINAL`) is not reconnected.
+//!
+//! Every frame is bound to its connection (`send_text_on_connection`). So no frame reaches a
+//! connection before its authentication, and a frame not sent waits in the subscription state. The
+//! transport's heartbeat is the keepalive LSE asks for (`{"action": "ping"}`).
 
 use std::{
     collections::VecDeque,
@@ -51,24 +45,17 @@ use super::{
 };
 use crate::common::{consts::LseSocket, credential::LseCredential};
 
-/// How long LSE may take to authenticate the key.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How often the keepalive goes: as LSE's Python client sends it, which
-/// keeps a connection open on every socket (LSE's WebSocket
-/// documentation, "The Python client").
-pub const KEEPALIVE_SECS: u64 = 25;
+// As often as LSE's Python client sends it, which keeps every socket open ("The Python client")
+const KEEPALIVE_SECS: u64 = 25;
 
-/// The close code LSE refuses a connection with (LSE's WebSocket
-/// documentation, "Error codes").
+// LSE's WebSocket documentation, "Error codes"
 const POLICY_VIOLATION: u16 = 1008;
 
-/// LSE's refusals closing a connection that a new one would not lift
-/// ("Error codes"): a newer connection took its slot, the key is in use
-/// elsewhere or revoked, or the month's streaming is used up. The others
-/// closing one (`TOO_MANY_CONNECTIONS` and those of the address) clear
-/// once a connection LSE still counts is gone, so the transport goes on
-/// reconnecting with backoff.
+// Refusals that a new connection would not lift ("Error codes"): a newer connection took the slot,
+// the key is in use elsewhere or revoked, or the month's streaming is used up. The others clear
+// once a connection that LSE still counts is gone, so the transport keeps reconnecting.
 const TERMINAL: [&str; 4] = [
     "CONNECTION_REPLACED",
     "KEY_IN_USE",
@@ -76,31 +63,27 @@ const TERMINAL: [&str; 4] = [
     "QUOTA_EXCEEDED",
 ];
 
-/// The delimiter of the subscription state's topics, which no LSE symbol
-/// holds: a symbol's topic is the symbol, a chain's the channel `options`
-/// and its underlying (`Topic`).
+// No LSE symbol holds it: a chain's topic is the channel `options` and its underlying (`Topic`)
 const TOPIC_DELIMITER: char = ':';
 
-/// The channel of the chains' topics.
 const OPTIONS_CHANNEL: &str = "options";
 
 /// What the client passes on.
 #[derive(Debug, Clone)]
 pub enum LseWsMessage {
     Tick(LseTick),
-    /// LSE refused the subscription of `symbol`.
+    /// LSE refused the subscription to `symbol`.
     Refused {
         symbol: String,
         refusal: LseWsRefusal,
     },
-    /// LSE refused the subscription of the chain of `underlying`.
+    /// LSE refused the subscription to the chain of `underlying`.
     OptionsRefused {
         underlying: String,
         refusal: LseWsRefusal,
     },
-    /// The connection dropped and its replacement is authenticated, its
-    /// subscriptions sent again: nothing came from `last`, the dropped
-    /// connection's last frame, if one came, to `at`.
+    /// The connection dropped and its replacement is authenticated, with its subscriptions sent
+    /// again. Nothing came from `last`, the dropped connection's last frame, to `at`.
     Reconnected {
         last: Option<UnixNanos>,
         at: UnixNanos,
@@ -112,36 +95,36 @@ pub enum LseWsMessage {
 pub struct LseWebSocketClient {
     socket: LseSocket,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<HandlerCommand>,
-    /// The handler task, explicitly singular: `disconnect` joins it.
+    // `disconnect` joins it
     handler: TaskSlot<()>,
-    /// The symbols the socket lists to the key, in capitals: LSE matches
-    /// them in any case.
+    // In capitals: LSE matches symbols in any case
     listed: AHashSet<String>,
     max_subscriptions: Option<usize>,
 }
 
 impl LseWebSocketClient {
-    /// Connects to `socket` at `url` and authenticates with the key of
-    /// `credential`, sending the keepalive every `keepalive_secs`, and
-    /// passing ticks, refusals and reconnects to `out`.
+    /// Connects to `socket` at `url` and authenticates with the key of `credential`.
+    ///
+    /// Sends the keepalive every `KEEPALIVE_SECS`, and passes ticks, refusals and reconnects to
+    /// `out`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the connection fails, or if LSE refuses the key
-    /// (with its code, message and details, such as the connections it
-    /// allows) or does not authenticate it within `AUTH_TIMEOUT`.
+    /// Returns an error if:
+    /// - The connection fails.
+    /// - LSE refuses the key (with its code, message and details).
+    /// - LSE does not authenticate the key within `AUTH_TIMEOUT`.
     pub async fn connect(
         socket: LseSocket,
         url: &str,
         credential: &LseCredential,
-        keepalive_secs: u64,
         out: tokio::sync::mpsc::UnboundedSender<LseWsMessage>,
     ) -> anyhow::Result<Self> {
         let name = socket.name();
         let (raw_tx, raw_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, Message)>();
-        // The last refusal's code, read on the transport's reader task as
-        // it comes, so that its close, which follows it there, is judged by
-        // it (`TERMINAL`).
+
+        // The last refusal's code, read on the reader task so that the close that follows is judged
+        // by it (`TERMINAL`).
         let refused: Arc<Mutex<Option<String>>> = Arc::default();
         let seen = Arc::clone(&refused);
         let message_handler: EpochMessageHandler = Arc::new(move |epoch, message| {
@@ -150,7 +133,8 @@ impl LseWebSocketClient {
             {
                 *seen.lock().expect("not poisoned") = Some(refusal.code);
             }
-            // The receiver is gone only once the handler has stopped.
+
+            // The receiver is gone once the handler has stopped
             let _ = raw_tx.send((epoch, message));
         });
         let close_handler: CloseHandler = Arc::new(move |frame| {
@@ -167,7 +151,7 @@ impl LseWebSocketClient {
         });
         let config = WebSocketConfig::builder()
             .url(url.to_owned())
-            .heartbeat_interval_secs(keepalive_secs)
+            .heartbeat_interval_secs(KEEPALIVE_SECS)
             .heartbeat_payload(LseWsAction::Ping.to_json())
             .reconnect_delay_initial_ms(RECONNECT_DELAY_INITIAL_MS)
             .reconnect_delay_max_ms(RECONNECT_DELAY_MAX_MS)
@@ -231,22 +215,22 @@ impl LseWebSocketClient {
         anyhow::bail!(refused)
     }
 
-    /// Whether the socket lists `symbol` to the key, in any case: LSE
-    /// accepts a subscription to a symbol it does not list, and sends
-    /// nothing.
+    /// Returns whether the socket lists `symbol` to the key, in any case. LSE accepts a
+    /// subscription to an unlisted symbol and sends nothing.
     pub fn lists(&self, symbol: &str) -> bool {
         self.listed.contains(&symbol.to_ascii_uppercase())
     }
 
-    /// The symbols one connection of the key may stream at once, as LSE
-    /// stated it when it authenticated the key.
+    /// Returns the symbols one connection may stream at once, as LSE stated on authenticating.
     pub fn max_subscriptions(&self) -> Option<usize> {
         self.max_subscriptions
     }
 
-    /// Subscribes to the ticks of `symbol`, as the socket spells it, for
-    /// the rest of the connection, reconnects included. LSE's answer comes
-    /// after this returns: its refusal is passed on (`Refused`).
+    /// Subscribes to the ticks of `symbol`, as the socket spells it.
+    ///
+    /// The subscription lasts for the rest of the connection, including reconnects.
+    ///
+    /// LSE's refusal comes after this returns (`Refused`).
     ///
     /// # Errors
     ///
@@ -255,8 +239,7 @@ impl LseWebSocketClient {
         self.command(HandlerCommand::Subscribe(Topic::Symbol(symbol.to_owned())))
     }
 
-    /// Ends the subscription of `symbol`. LSE may still send a tick or
-    /// two of it.
+    /// Ends the subscription of `symbol`. LSE may still send a tick or two of it.
     ///
     /// # Errors
     ///
@@ -267,11 +250,12 @@ impl LseWebSocketClient {
         )))
     }
 
-    /// Subscribes to the ticks of every listed contract of `underlying`'s
-    /// options, its chain, in one subscription, for the rest of the
-    /// connection, reconnects included. LSE sends no last prices of a
-    /// chain: its first ticks are its contracts' next trades. Its refusal
-    /// is passed on (`OptionsRefused`).
+    /// Acquires one reference to the ticks of every listed option contract of `underlying`.
+    ///
+    /// Balance each successful call with one `unsubscribe_options`. Only the first reference
+    /// subscribes on the wire. Success means queued, not confirmed. An `OptionsRefused` leaves the
+    /// chain wanted for replay after authentication on reconnect. Another acquisition is not a
+    /// retry. LSE sends no last prices, so the first ticks are the contracts' next trades.
     ///
     /// # Errors
     ///
@@ -282,7 +266,9 @@ impl LseWebSocketClient {
         )))
     }
 
-    /// Ends the subscription of `underlying`'s chain.
+    /// Releases one reference to `underlying`'s chain.
+    ///
+    /// Only the final release unsubscribes on the wire, and an unmatched release does nothing.
     ///
     /// # Errors
     ///
@@ -300,27 +286,22 @@ impl LseWebSocketClient {
             .with_context(|| format!("the connection to LSE's {} is closed", self.socket.name()))
     }
 
-    /// Closes the connection, joining the handler within
-    /// `DISCONNECT_TIMEOUT`, then aborting it.
+    /// Closes the connection, joining the handler within `DISCONNECT_TIMEOUT`, then aborting it.
     pub async fn disconnect(mut self) {
-        // The handler is gone once it has stopped.
+        // The handler is gone once it has stopped
         let _ = self.cmd_tx.send(HandlerCommand::Disconnect);
         finish_handler(&mut self.handler, self.socket.name()).await;
     }
 }
 
-/// Commands from the outer client to the handler.
 enum HandlerCommand {
-    /// The connected client; the first command, queued before the command
-    /// sender is shared, so no subscription can overtake it.
+    // The first command, queued before the sender is shared, so no subscription overtakes it
     SetClient(WebSocketClient),
     Subscribe(Topic),
     Unsubscribe(Topic),
     Disconnect,
 }
 
-/// A subscription of a connection: the ticks of a symbol, as the socket
-/// spells it, or of an underlying's chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Topic {
     Symbol(String),
@@ -328,7 +309,6 @@ enum Topic {
 }
 
 impl Topic {
-    /// The topic `topic` of the subscription state names.
     fn of(topic: &str) -> Self {
         match topic.split_once(TOPIC_DELIMITER) {
             Some((OPTIONS_CHANNEL, underlying)) => Self::Options(underlying.to_owned()),
@@ -336,7 +316,6 @@ impl Topic {
         }
     }
 
-    /// Its topic in the subscription state.
     fn topic(&self) -> String {
         match self {
             Self::Symbol(symbol) => symbol.clone(),
@@ -344,7 +323,6 @@ impl Topic {
         }
     }
 
-    /// The frame subscribing it.
     fn subscribe(&self) -> String {
         match self {
             Self::Symbol(symbol) => LseWsAction::Subscribe { symbol }.to_json(),
@@ -352,7 +330,6 @@ impl Topic {
         }
     }
 
-    /// The frame ending it.
     fn unsubscribe(&self) -> String {
         match self {
             Self::Symbol(symbol) => LseWsAction::Unsubscribe { symbol }.to_json(),
@@ -361,27 +338,21 @@ impl Topic {
     }
 }
 
-/// A subscription or unsubscription sent and not answered yet.
 enum Unanswered {
     Subscribe(Topic),
     Unsubscribe(Topic),
 }
 
-/// The gap a reconnect opens: from the dropped connection's last frame to
-/// the new connection's authentication.
+// From the dropped connection's last frame to the new connection's authentication
 #[derive(Default)]
 enum Gap {
-    /// No connection dropped, or the last one's replacement is
-    /// authenticated.
     #[default]
     Closed,
-    /// A connection dropped and its replacement is not authenticated yet:
-    /// nothing came after `last`, the dropped connection's last frame, if
-    /// one came.
+    /// `last` is the dropped connection's last frame, if one came.
     Open { last: Option<UnixNanos> },
 }
 
-/// The handler task: the one owner of the `WebSocketClient`.
+// The one owner of the `WebSocketClient`
 struct LseWsHandler {
     socket: LseSocket,
     credential: LseCredential,
@@ -389,25 +360,18 @@ struct LseWsHandler {
     cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
     raw_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, Message)>,
     out: tokio::sync::mpsc::UnboundedSender<LseWsMessage>,
-    /// Where the first authentication's outcome goes, until it comes.
     authenticating: Option<tokio::sync::oneshot::Sender<Result<LseWsAuthenticated, LseWsRefusal>>>,
     subscriptions: SubscriptionState,
-    /// The connection the handler speaks on: 0, then each replacement's.
+    // The connection the handler speaks on: 0, then each replacement's
     epoch: u64,
-    /// Whether LSE authenticated the key on that connection.
     authenticated: bool,
-    /// The subscriptions and unsubscriptions sent on that connection and
-    /// not answered yet, in the order sent, which LSE answers them in.
+    // Sent on that connection and unanswered, in the order LSE answers them
     unanswered: VecDeque<Unanswered>,
-    /// When the last frame came.
     last_frame: Option<UnixNanos>,
-    /// The gap of a reconnect, open until the new connection's
-    /// authentication.
     gap: Gap,
 }
 
 impl LseWsHandler {
-    /// Runs until disconnected or the outer client is dropped.
     async fn run(mut self) {
         loop {
             tokio::select! {
@@ -415,13 +379,23 @@ impl LseWsHandler {
                 command = self.cmd_rx.recv() => match command {
                     Some(HandlerCommand::SetClient(client)) => self.client = Some(client),
                     Some(HandlerCommand::Subscribe(topic)) => {
-                        self.subscriptions.mark_subscribe(&topic.topic());
+                        let key = topic.topic();
+                        if matches!(topic, Topic::Options(_)) && !self.subscriptions.add_reference(&key) {
+                            continue;
+                        }
+                        self.subscriptions.mark_subscribe(&key);
+
                         if self.authenticated {
                             self.send_subscribe(topic).await;
                         }
                     }
                     Some(HandlerCommand::Unsubscribe(topic)) => {
-                        self.subscriptions.mark_unsubscribe(&topic.topic());
+                        let key = topic.topic();
+                        if matches!(topic, Topic::Options(_)) && !self.subscriptions.remove_reference(&key) {
+                            continue;
+                        }
+                        self.subscriptions.mark_unsubscribe(&key);
+
                         if self.authenticated && self.send(topic.unsubscribe()).await {
                             self.unanswered.push_back(Unanswered::Unsubscribe(topic));
                         }
@@ -443,14 +417,15 @@ impl LseWsHandler {
         let Message::Text(text) = message else {
             return;
         };
-        // A replacement's frames can come before the transport's
-        // `RECONNECTED`, its welcome among them: whichever comes first
-        // starts the new connection.
+
+        // A replacement's frames, including its welcome, can come before the transport's
+        // `RECONNECTED`, and whichever comes first starts the new connection.
         if epoch > self.epoch {
             self.reconnected(epoch);
         }
+
         if &text[..] == RECONNECTED.as_bytes() || epoch < self.epoch {
-            // Its connection started, or replaced.
+            // Its connection started, or replaced
             return;
         }
         self.last_frame = Some(get_atomic_clock_realtime().get_time_ns());
@@ -498,9 +473,6 @@ impl LseWsHandler {
         }
     }
 
-    /// The key is authenticated on the connection: the first time, the
-    /// client is connected; after a reconnect, the gap is passed on. Then
-    /// every subscription is sent.
     async fn authenticated(&mut self, authenticated: LseWsAuthenticated) {
         self.authenticated = true;
         if let Some(waiting) = self.authenticating.take() {
@@ -517,8 +489,6 @@ impl LseWsHandler {
         }
     }
 
-    /// LSE refused the key, before it was authenticated, or else the
-    /// oldest subscription or unsubscription not answered yet.
     fn refused(&mut self, refusal: LseWsRefusal) {
         let name = self.socket.name();
         if !self.authenticated {
@@ -532,7 +502,7 @@ impl LseWsHandler {
         }
         match self.unanswered.pop_front() {
             Some(Unanswered::Subscribe(topic)) => {
-                // Kept for the next connection.
+                // Kept for the next connection
                 self.subscriptions.mark_failure(&topic.topic());
                 self.pass(match topic {
                     Topic::Symbol(symbol) => LseWsMessage::Refused { symbol, refusal },
@@ -553,8 +523,6 @@ impl LseWsHandler {
         }
     }
 
-    /// The transport replaced the connection with that of `epoch`, a later
-    /// one, which LSE welcomes: the key is authenticated on it again.
     fn reconnected(&mut self, epoch: u64) {
         log::warn!(
             "LSE's {} reconnected: authenticating the key again",
@@ -576,10 +544,9 @@ impl LseWsHandler {
         }
     }
 
-    /// Sends `frame` on the connection, if it is still the transport's
-    /// and live; whether it was sent. One not sent never is: the
-    /// subscriptions wait in their state for the next connection, which
-    /// LSE welcomes again. The frame is not logged: an auth holds the key.
+    // Returns whether `frame` was sent, where a frame not sent is never sent later, since
+    // subscriptions wait in their state for the next connection. The frame is not logged, since an
+    // auth frame holds the key.
     async fn send(&self, frame: String) -> bool {
         let Some(client) = self.client.as_ref().filter(|client| client.is_active()) else {
             return false;
@@ -597,7 +564,7 @@ impl LseWsHandler {
     }
 
     fn pass(&self, message: LseWsMessage) {
-        // The receiver is gone once the client stopped listening.
+        // The receiver is gone once the client stopped listening
         let _ = self.out.send(message);
     }
 }

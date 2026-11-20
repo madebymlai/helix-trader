@@ -1,10 +1,8 @@
-//! The data requirements of a strategy (`DataRequirements`), stated by its
-//! config: the bar types, the tick series (`TickSeries`) and the custom
-//! series (`CustomSeries`) it reads, and
-//! the catalog series its bars are built from and its ticks are
-//! (`CatalogSeries`, keyed in the catalog by `CatalogSeries::key`), each
-//! over the slices its contracts stand for its instruments (`SeriesSlice`).
-//! Filling the catalog, backtesting and going live all read them from here.
+//! Defines the data a strategy needs, as its config states it.
+//!
+//! The requirements list the series the strategy reads and the catalog series those are built
+//! from. Each catalog series is read over the slices its contracts stand for. Filling the catalog,
+//! backtesting and going live all read the requirements from here.
 
 use std::{fmt::Display, str::FromStr};
 
@@ -18,83 +16,46 @@ use nautilus_model::{
 use nautilus_persistence::common::{
     coverage::merge_closed_intervals, paths::urisafe_instrument_id,
 };
-use serde::{Deserialize, Deserializer, de};
 
 use crate::rolls::{self, Slice, Transition, TransitionTable, front};
 
-/// What a strategy needs from data, stated by its config: filling the
-/// catalog, backtesting and going live all read it from here.
+/// What a strategy needs from data, stated by its config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataRequirements {
-    /// The bar types the strategy reads and warms up on, internal bars
-    /// Nautilus builds and, of a pair it converts through read as bars, the
-    /// pair's own (an IB pair's 1-minute BID and ASK bars,
-    /// `venues::rate_series`, `StandardConfig::data_requirements`): their
-    /// instruments are those it
-    /// reads (see `instrument_ids`), and a live node sizes its cache to hold
-    /// their warmup (see `warmup::Warmup::cache_config`).
+    /// The bar types read and warmed up on.
+    ///
+    /// This includes a conversion pair's own bar type if it is read as bars
+    /// (`venues::rate_series`).
     pub bar_types: Vec<BarType>,
-    /// The tick series the strategy reads as they are, beside or instead
-    /// of bars, book deltas among them (see `TickSeries`), those of its
-    /// harness among them (a traded instrument's quotes when no series
-    /// prices it, `StandardConfig::data_requirements`), and the quotes of
-    /// a `[trade] conversions` pair read as quotes (a cTrader pair's,
-    /// `venues::rate_series`): fetched by fill-catalog from their
-    /// instrument's source, which must serve them (`venues::serves`), and
-    /// replayed in a backtest as declared. Their instruments are read too:
-    /// live sets up their clients, which load them, but subscribes to none
-    /// of the ticks: the strategy subscribes to each from its start
-    /// through its subscriptions (`strategy::subscriptions`, a model
-    /// strategy's handle's), a live start refusing one its venue's live
-    /// data does not stream (`venues::streams`), and warms up on each its
-    /// venue's history serves (`warmup::Warmup`).
+    /// The tick series read as they are.
+    ///
+    /// This includes book deltas and a conversion pair's quotes (`venues::rate_series`). Live
+    /// subscribes to none at start. The strategy subscribes (`strategy::subscriptions`) and refuses
+    /// one its venue does not stream (`venues::streams`).
     pub ticks: Vec<TickSeries>,
-    /// The custom series the strategy reads (see `CustomSeries`), a
-    /// reference series such as LSE's daily bond yields among them, each
-    /// as its config gives it in `[data] series`: routed by its type's row
-    /// alone, whatever its identifier (`venues::serves_custom`), fetched by
-    /// fill-catalog from its type's history source, with no definition,
-    /// or, of a type with no row or one with no history source, the
-    /// catalog's, written into it from outside helix and fetched by
-    /// nothing; replayed in a backtest over its slices of the run's window
-    /// (`custom_slices`), the strategy's subscriptions subscribing to each
-    /// from its start (`strategy::subscriptions`), each by its data type as
-    /// read then (`CustomSeries::at`); a live run reading any its type's
-    /// live data does not stream is refused (`venues::streams_custom`),
-    /// none streaming any yet, nor anything the catalog's. Under a root's
-    /// id, each rolls contract by contract, as the root's other series do;
-    /// any other stands for itself, an instrument's id among them. They
-    /// bring no instrument.
+    /// The custom series read, such as LSE's daily bond yields.
+    ///
+    /// - Only its type's row routes a series (`venues::serves_custom`), whatever its identifier.
+    /// - A series whose type has no row or no history source is written into the catalog from
+    ///   outside helix.
+    /// - A live run refuses a series whose type's live data does not stream
+    ///   (`venues::streams_custom`).
+    /// - A custom series brings no instrument.
     pub custom: Vec<CustomSeries>,
-    /// How far back before a live start the warmup history starts: a
-    /// backtest requests none.
+    /// How far back before a live start the warmup history starts. A backtest requests none.
     pub warmup: SignedDuration,
 }
 
-/// A series a strategy reads as it is: the data of one Nautilus data type
-/// (`NautilusDataType`) of one instrument,
-/// `{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }` in a TOML
-/// config. `data` is a name Nautilus parses (`NautilusDataType::from_str`)
-/// of quotes (`"quotes"`), trades (`"trades"`), book depth snapshots
-/// (`"order_book_depths"`) or book deltas (`"order_book_deltas"`). Custom
-/// data is no tick series, an instrument's included: it is a custom
-/// series (`CustomSeries`), keyed by its identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A series a strategy reads as it is: one Nautilus data type of one instrument.
+///
+/// In `[data] series` it is written `{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }`.
+/// `data` is `"quotes"`, `"trades"`, `"order_book_depths"` or `"order_book_deltas"` (`tick_data`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickSeries {
-    #[serde(deserialize_with = "series_data")]
     pub data: NautilusDataType,
     pub instrument_id: InstrumentId,
 }
 
-/// The data of a tick series: a Nautilus data type by any name Nautilus
-/// parses, one of those a strategy reads as they are (see `TickSeries`).
-fn series_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NautilusDataType, D::Error> {
-    tick_data(&String::deserialize(deserializer)?).map_err(de::Error::custom)
-}
-
-/// The Nautilus data type `name` parses to, if a strategy reads it as it
-/// is (see `TickSeries`), or why not.
 pub(super) fn tick_data(name: &str) -> Result<NautilusDataType, String> {
     let data = NautilusDataType::from_str(name).map_err(|e| e.to_string())?;
     match data {
@@ -109,34 +70,26 @@ pub(super) fn tick_data(name: &str) -> Result<NautilusDataType, String> {
     }
 }
 
-/// A custom series: the custom data of one Nautilus data type
-/// (`DataType`), its type's name, the identifier keying it in the catalog
-/// and on the message bus, and its metadata, if any, saying what its
-/// source asks for, `{ data = "Custom:LseRow", identifier = "US10Y",
-/// metadata = { source = "bond_yields", symbol = "US10Y" } }` in `[data]
-/// series`. Built only through `new`, which holds it to what makes it one
-/// series of the catalog. Its data type is the one Nautilus subscribes,
-/// caches, requests and stores it by, as the config names it; under a
-/// root's id (`root`), that of the contract standing for the root at a
-/// time (`at`), the contract's id its identifier, its type and metadata
-/// kept, as every series on a root is read.
+/// A custom series: custom data of one Nautilus data type.
+///
+/// The data sits under an identifier that keys it in the catalog and on the message bus. It
+/// carries the metadata its source asks for. In `[data] series` it is written `{ data =
+/// "Custom:LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" }
+/// }`. It is built only through `new`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomSeries(DataType);
 
 impl CustomSeries {
-    /// The series of `type_name` under `identifier`, of `metadata`: empty
-    /// metadata is none, as Nautilus' data type of either has one topic,
-    /// which keys its points in the cache and on the message bus.
+    /// Returns the series of `type_name` under `identifier` with `metadata`.
+    ///
+    /// Empty metadata counts as none. Nautilus' data type has one topic for either.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - `metadata` holds the key Nautilus reserves for the identifier,
-    ///   Nautilus' error (`DataType::try_new`).
-    /// - `identifier`, which it names, holds a backslash, or its catalog
-    ///   folder (`catalog_folder`) is empty or blank, which Nautilus'
-    ///   correctness check refuses (`check_valid_string_utf8`): an empty
-    ///   folder is its type's own, which no series keys.
+    /// - `metadata` holds the key Nautilus reserves for the identifier.
+    /// - `identifier` holds a backslash, or its catalog folder is empty or blank
+    ///   (`check_valid_string_utf8`). An empty folder is its type's own.
     pub fn new(
         type_name: &str,
         identifier: String,
@@ -160,19 +113,19 @@ impl CustomSeries {
         )?))
     }
 
-    /// Its data type as the config names it.
+    /// Returns the data type as the config names it.
     #[must_use]
     pub fn data_type(&self) -> &DataType {
         &self.0
     }
 
-    /// Its type's name, which routes it (`venues::serves_custom`).
+    /// Returns the name of its type, which routes the series.
     #[must_use]
     pub fn type_name(&self) -> &str {
         self.0.type_name()
     }
 
-    /// The identifier keying it in the catalog.
+    /// Returns the identifier that keys it in the catalog.
     #[must_use]
     pub fn identifier(&self) -> &str {
         self.0
@@ -180,22 +133,20 @@ impl CustomSeries {
             .expect("a custom series is built with an identifier")
     }
 
-    /// The folder Nautilus' catalog stores it under, below its type's
-    /// folder, and reads it back from (`ParquetDataCatalog::
-    /// make_path_custom_data`, `filter_identifier_files`): its identifier
-    /// made URI-safe (`urisafe_instrument_id`: `/` removed, `^` made `_`).
-    /// Of an identifier holding a backslash alone, the write would make it
-    /// a folder separator and the read keep it, which `new` refuses.
+    /// Returns the folder Nautilus' catalog stores it under, below its type's folder.
+    ///
+    /// The catalog builds the folder (`ParquetDataCatalog::make_path_custom_data`) from the
+    /// identifier made URI-safe (`urisafe_instrument_id`). A backslash would be written as a
+    /// separator and read back as a character, so `new` refuses it.
     #[must_use]
     pub fn catalog_folder(&self) -> String {
         urisafe_instrument_id(self.identifier())
     }
 
-    /// The root of the roll calendar its identifier names, if it names
-    /// one (`GC.GLBX`, see `rolls`): the series then rolls, read on the
-    /// contract standing for the root, as every series on a root is. Any
-    /// other identifier stands for itself: a contract's (`GCZ26.GLBX`), a
-    /// plain instrument's, or one naming no instrument (`US10Y`).
+    /// Returns the root of the roll calendar its identifier names (`GC.GLBX`), if any.
+    ///
+    /// Any other identifier stands for itself: a contract's, a plain instrument's, or none
+    /// (`US10Y`).
     #[must_use]
     pub fn root(&self) -> Option<InstrumentId> {
         InstrumentId::from_str(self.identifier())
@@ -203,20 +154,18 @@ impl CustomSeries {
             .filter(|&id| Transition::after(id, Timestamp::UNIX_EPOCH).is_some())
     }
 
-    /// The series read at `time`: on a root, that of the contract standing
-    /// for it then (`rolls::front`); itself otherwise.
+    /// Returns the series read at `time`.
+    ///
+    /// On a root, this is the series of the contract in front (`rolls::front`). Otherwise it is the
+    /// series itself.
     #[must_use]
     pub fn at(&self, time: Timestamp) -> Self {
         self.root()
             .map_or_else(|| self.clone(), |root| self.on(front(root, time)))
     }
 
-    /// The series of `contract`: its type and metadata under the
-    /// contract's id, which keys it in the catalog, on the message bus
-    /// and in the cache, as Nautilus' Databento client keys its custom
-    /// data of a contract (`custom_data_for_instrument`). The metadata
-    /// passed `new` already, and a contract of the roll calendar keys a
-    /// folder of its own.
+    /// Returns the series of `contract`, keyed as Nautilus' Databento client keys custom data for a
+    /// contract (`custom_data_for_instrument`).
     pub(crate) fn on(&self, contract: InstrumentId) -> Self {
         Self(DataType::new(
             self.type_name(),
@@ -225,15 +174,12 @@ impl CustomSeries {
         ))
     }
 
-    /// The contract whose catalog folder it and `other`, of its type,
-    /// share through a root, if they do: one of them on a root (`root`),
-    /// the other stored under the folder of a contract standing for that
-    /// root at some time (`rolls::root_of`), where the root's series is
-    /// stored on the contract (`on`), so a fill and a replay would take the
-    /// folder for two series. The other being the root's series on the
-    /// contract is one series, read once
-    /// (`DataRequirements::custom_slices`). A contract of the roll
-    /// calendar names its own folder, holding no `/` or `^`.
+    /// Returns the contract whose catalog folder this series and `other` share through a root, if
+    /// any.
+    ///
+    /// A fill and a replay would take that folder for two series: one is on a root and the other is
+    /// stored under a contract standing for it. The root's series on that contract is one series. A
+    /// roll calendar contract holds no `/` or `^`, so its folder names it.
     #[must_use]
     pub fn contract_folder_shared_with(&self, other: &Self) -> Option<InstrumentId> {
         let through = |on_root: &Self, series: &Self| {
@@ -249,10 +195,10 @@ impl CustomSeries {
         through(self, other).or_else(|| through(other, self))
     }
 
-    /// Its slices over `[start, end]`: on a root, the series of each
-    /// contract over the slice it stands for the root, in time order
-    /// (`rolls::TransitionTable::slices`); itself over the window
-    /// otherwise.
+    /// Returns the slices over `[start, end]`.
+    ///
+    /// On a root, these are each contract's series over the slice it stands for, in time order.
+    /// Otherwise the only slice is the series itself.
     #[must_use]
     pub fn slices(&self, start: Timestamp, end: Timestamp) -> Vec<CustomSlice> {
         let Some(root) = self.root() else {
@@ -274,21 +220,18 @@ impl CustomSeries {
     }
 }
 
-/// A custom series over the part of a window it is read in, both ends
-/// included, as the catalog's ranges are: on a root, a contract's series
-/// over the slice the contract stands for the root (see
-/// `CustomSeries::slices`).
+/// A custom series over the part of a window it is read in.
+///
+/// Both ends are included, as the catalog's ranges are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomSlice {
-    /// The series read, a root's on the contract.
+    /// The series read. For a root, this is the root's series on the contract.
     pub series: CustomSeries,
     pub from: Timestamp,
     pub to: Timestamp,
 }
 
-/// The series by its data type as Nautilus writes it, its topic of its
-/// type's name, metadata and identifier
-/// (`LseRow.source=bond_yields.symbol=US10Y.identifier=US10Y`).
+/// Writes the data type as Nautilus writes it (`LseRow.source=bond_yields.symbol=US10Y.identifier=US10Y`).
 impl Display for CustomSeries {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -296,8 +239,7 @@ impl Display for CustomSeries {
 }
 
 impl DataRequirements {
-    /// The instruments read, whose history the catalog stores: those of
-    /// the bar types, then those of the ticks, each once, in order.
+    /// Returns the instruments read: those of the bar types, then those of the ticks.
     #[must_use]
     pub fn instrument_ids(&self) -> Vec<InstrumentId> {
         let bars = self.bar_types.iter().map(BarType::instrument_id);
@@ -311,8 +253,7 @@ impl DataRequirements {
         ids
     }
 
-    /// These requirements on `instrument_ids` alone: their bar types and
-    /// their ticks.
+    /// Returns these requirements restricted to `instrument_ids`: their bar types and ticks.
     #[must_use]
     pub fn of_instruments(&self, instrument_ids: &[InstrumentId]) -> Self {
         Self {
@@ -333,9 +274,7 @@ impl DataRequirements {
         }
     }
 
-    /// The keys in the catalog of the series read (`catalog_series`):
-    /// those the bars are built from (see the free `catalog_keys`) and the
-    /// ticks, each once, sorted as the free `catalog_keys` sorts.
+    /// Returns the catalog keys of `catalog_series`.
     #[must_use]
     pub fn catalog_keys(&self) -> Vec<(NautilusDataType, String)> {
         self.catalog_series()
@@ -344,9 +283,7 @@ impl DataRequirements {
             .collect()
     }
 
-    /// The external bars read, stored as they are: the source bars of the
-    /// composite bar types (see `catalog_series`), each once, sorted as
-    /// `catalog_series` sorts.
+    /// Returns the source bars of the composite bar types.
     #[must_use]
     pub fn source_bars(&self) -> Vec<BarType> {
         self.catalog_series()
@@ -358,15 +295,10 @@ impl DataRequirements {
             .collect()
     }
 
-    /// The catalog series read over `[start, end]`, contract by contract:
-    /// each of `catalog_series`, in its order, split into the slices of its
-    /// instrument's transition table (see `rolls::TransitionTable`), in
-    /// time order, on the slice's contract. A series of a plain instrument
-    /// is one slice over the span on that instrument. The slices of one
-    /// series from several tables (a root's and its contract's own) are
-    /// merged where they overlap or touch, so nothing is read twice. Bars
-    /// on a root are built from its contracts' trades, as the config's
-    /// load requires (see `DataConfig`).
+    /// Returns the catalog series read over `[start, end]`, contract by contract, in time order.
+    ///
+    /// Slices are merged so nothing is read twice. Bars on a root are built from the trades of its
+    /// contracts, as the config's load requires (see `DataConfig`).
     #[must_use]
     pub fn slices(&self, start: Timestamp, end: Timestamp) -> Vec<SeriesSlice> {
         let slices = self.catalog_series().into_iter().flat_map(|source| {
@@ -374,19 +306,18 @@ impl DataRequirements {
                 .slices()
                 .into_iter()
                 .map(move |slice| SeriesSlice {
-                    series: source.on(slice.instrument_id).key(),
-                    slice,
+                    series: source.on(slice.instrument_id),
+                    from: slice.from,
+                    to: slice.to,
                 })
         });
         SeriesSlice::merged(slices)
     }
 
-    /// The contracts standing for the instruments read over `[start, end]`,
-    /// each with its slices of their transition tables (see
-    /// `rolls::TransitionTable`), merged where they overlap or touch: those
-    /// of a root and of a contract read beside it are one. A plain
-    /// instrument is one slice over the span on itself. In the order of
-    /// `instrument_ids`, then time.
+    /// Returns the contracts standing for the instruments read over `[start, end]`.
+    ///
+    /// Each contract's slices are merged. A root's slices and those of a contract read beside it
+    /// are one.
     #[must_use]
     pub fn contract_slices(&self, start: Timestamp, end: Timestamp) -> Vec<Slice> {
         let keyed = self.instrument_ids().into_iter().flat_map(|id| {
@@ -405,10 +336,9 @@ impl DataRequirements {
             .collect()
     }
 
-    /// The custom series read over `[start, end]`, contract by contract:
-    /// the slices of each (`CustomSeries::slices`), in the order listed,
-    /// then time, those of one series merged where they overlap or touch,
-    /// so a contract's series listed beside its root's is read once.
+    /// Returns the custom series read over `[start, end]`, contract by contract.
+    ///
+    /// Slices are merged per series, so a contract's series listed beside its root's is read once.
     #[must_use]
     pub fn custom_slices(&self, start: Timestamp, end: Timestamp) -> Vec<CustomSlice> {
         let keyed = self.custom.iter().flat_map(|series| {
@@ -423,19 +353,12 @@ impl DataRequirements {
             .collect()
     }
 
-    /// The catalog series read: those the bars are built from
-    /// (`bar_sources`) and the ticks, each once, sorted as the free
-    /// `catalog_keys` sorts their keys.
     pub(crate) fn catalog_series(&self) -> Vec<CatalogSeries> {
         let ticks = self.ticks.iter().cloned().map(CatalogSeries::Ticks);
         sorted_sources(bar_sources(&self.bar_types).chain(ticks))
     }
 }
 
-/// The windows `[from, to]` of `keyed`, those of one key merged where they
-/// overlap or touch (Nautilus' `merge_closed_intervals`), each key's in
-/// time order, the keys in the order they first come. A key is of one
-/// contract.
 fn merged<K: PartialEq + Clone>(
     keyed: impl IntoIterator<Item = (K, Timestamp, Timestamp)>,
 ) -> Vec<(K, Timestamp, Timestamp)> {
@@ -464,44 +387,28 @@ fn merged<K: PartialEq + Clone>(
         .collect()
 }
 
-/// A catalog series over the slice its contract stands for its root.
+/// A catalog series over the slice where its contract stands for its root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesSlice {
-    /// The series of the slice's contract: its Nautilus data type and
-    /// catalog identifier, as `catalog_keys` gives them.
-    pub series: (NautilusDataType, String),
-    pub slice: Slice,
+    /// The resolved source, on the contract storing it.
+    pub series: CatalogSeries,
+    pub from: Timestamp,
+    pub to: Timestamp,
 }
 
 impl SeriesSlice {
-    /// `slices`, those of one series merged where they overlap or touch,
-    /// each series' in time order, the series in the order they first
-    /// come: no part of a series is read twice.
+    /// Returns `slices` merged per series where they overlap or touch.
     #[must_use]
     pub fn merged(slices: impl IntoIterator<Item = Self>) -> Vec<Self> {
-        let keyed = slices.into_iter().map(|of| {
-            (
-                (of.series, of.slice.instrument_id),
-                of.slice.from,
-                of.slice.to,
-            )
-        });
+        let keyed = slices.into_iter().map(|of| (of.series, of.from, of.to));
         merged(keyed)
             .into_iter()
-            .map(|((series, instrument_id), from, to)| Self {
-                series,
-                slice: Slice {
-                    instrument_id,
-                    from,
-                    to,
-                },
-            })
+            .map(|(series, from, to)| Self { series, from, to })
             .collect()
     }
 }
 
-/// The ticks by their Nautilus data type and instrument,
-/// `QuoteTick of XAUUSD.ICMARKETS`.
+/// Writes the ticks as their Nautilus data type and instrument, `QuoteTick of XAUUSD.ICMARKETS`.
 impl Display for TickSeries {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} of {}", self.data, self.instrument_id)
@@ -509,21 +416,21 @@ impl Display for TickSeries {
 }
 
 impl TickSeries {
-    /// The catalog series of these ticks: their Nautilus data type, keyed
-    /// by the instrument id.
+    /// Returns the key of these ticks: their data type and the instrument id.
     #[must_use]
     pub fn catalog_key(&self) -> (NautilusDataType, String) {
         (self.data.clone(), self.instrument_id.to_string())
     }
 }
 
-/// The keys in the catalog of the series the bars of `bar_types` are built
-/// from, as Nautilus' data engine builds them: a key is a Nautilus data
-/// type and its catalog identifier, the instrument id for ticks and the bar
-/// type for bars. External bars are their own series; a composite bar type is built
-/// from its source bars (`BarType::composite`), and internal bars from the
-/// trades of their instrument if priced LAST, from its quotes otherwise.
-/// Each series comes once, sorted by instrument, then identifier.
+/// Returns the catalog keys of the series `bar_types` are built from, as Nautilus' data engine
+/// builds them.
+///
+/// - A composite bar type comes from its source bars.
+/// - Internal bars come from their instrument's trades if priced LAST, and from its quotes
+///   otherwise.
+///
+/// Each key comes once, sorted by instrument, then identifier.
 #[must_use]
 pub fn catalog_keys(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> {
     sorted_sources(bar_sources(bar_types))
@@ -532,15 +439,15 @@ pub fn catalog_keys(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> {
         .collect()
 }
 
-/// What a catalog series holds: external bars, or the ticks of an
-/// instrument. A venue's history serves some (`venues::serves`).
+/// Either external bars or the ticks of an instrument.
+///
+/// A venue's history serves some of them (`venues::serves`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CatalogSeries {
+pub enum CatalogSeries {
     Bars(BarType),
     Ticks(TickSeries),
 }
 
-/// The bars by their bar type, the ticks as `TickSeries` names them.
 impl Display for CatalogSeries {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -551,14 +458,14 @@ impl Display for CatalogSeries {
 }
 
 impl CatalogSeries {
-    pub(crate) fn instrument_id(&self) -> InstrumentId {
+    #[must_use]
+    pub fn instrument_id(&self) -> InstrumentId {
         match self {
             Self::Bars(bar_type) => bar_type.instrument_id(),
             Self::Ticks(tick) => tick.instrument_id,
         }
     }
 
-    /// The same series on `instrument_id`.
     fn on(&self, instrument_id: InstrumentId) -> Self {
         match self {
             Self::Bars(bar_type) => Self::Bars(BarType::new(
@@ -573,9 +480,9 @@ impl CatalogSeries {
         }
     }
 
-    /// Its key in the catalog: its Nautilus data type and catalog
-    /// identifier.
-    pub(crate) fn key(&self) -> (NautilusDataType, String) {
+    /// Returns its key in the catalog: its data type and catalog identifier.
+    #[must_use]
+    pub fn key(&self) -> (NautilusDataType, String) {
         match self {
             Self::Bars(bar_type) => (NautilusDataType::Bar, bar_type.to_string()),
             Self::Ticks(tick) => tick.catalog_key(),
@@ -583,8 +490,6 @@ impl CatalogSeries {
     }
 }
 
-/// The catalog series each of `bar_types` is built from (see
-/// `catalog_keys`).
 pub(super) fn bar_sources(bar_types: &[BarType]) -> impl Iterator<Item = CatalogSeries> {
     bar_types.iter().map(|bar_type| {
         let source = if bar_type.is_composite() {
@@ -609,8 +514,6 @@ pub(super) fn bar_sources(bar_types: &[BarType]) -> impl Iterator<Item = Catalog
     })
 }
 
-/// `sources`, each once, sorted by instrument, then identifier, in the
-/// order given otherwise.
 fn sorted_sources(sources: impl Iterator<Item = CatalogSeries>) -> Vec<CatalogSeries> {
     let mut unique: Vec<CatalogSeries> = Vec::new();
     for source in sources {
@@ -618,7 +521,13 @@ fn sorted_sources(sources: impl Iterator<Item = CatalogSeries>) -> Vec<CatalogSe
             unique.push(source);
         }
     }
-    unique.sort_by_cached_key(|source| (source.instrument_id(), source.key().1));
+    unique.sort_by_cached_key(|source| {
+        let spec = match source {
+            CatalogSeries::Ticks(_) => None,
+            CatalogSeries::Bars(bar) => Some(bar.spec().to_string()),
+        };
+        (source.instrument_id(), spec)
+    });
     unique
 }
 
@@ -628,50 +537,6 @@ mod tests {
 
     use super::*;
 
-    #[rstest]
-    fn the_instruments_are_those_of_the_bar_types_each_once_in_order() {
-        let requirements = DataRequirements {
-            bar_types: vec![
-                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
-                BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
-                BarType::from("SXR8.IBIS-1-DAY-MID-INTERNAL"),
-            ],
-            ticks: vec![],
-            custom: vec![],
-            warmup: SignedDuration::from_hours(720),
-        };
-        assert_eq!(
-            requirements.instrument_ids(),
-            [
-                InstrumentId::from("SXR8.IBIS"),
-                InstrumentId::from("EUNL.IBIS")
-            ]
-        );
-    }
-
-    #[rstest]
-    fn requirements_on_some_instruments_keep_their_bar_types_and_the_warmup() {
-        let requirements = DataRequirements {
-            bar_types: vec![
-                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
-                BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL"),
-            ],
-            ticks: vec![],
-            custom: vec![],
-            warmup: SignedDuration::from_hours(720),
-        };
-        let okx = requirements.of_instruments(&[InstrumentId::from("BTC-USDT-SWAP.OKX")]);
-        assert_eq!(
-            okx,
-            DataRequirements {
-                bar_types: vec![BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL")],
-                ticks: vec![],
-                custom: vec![],
-                warmup: SignedDuration::from_hours(720),
-            }
-        );
-    }
-
     fn tick(data: NautilusDataType, instrument_id: &str) -> TickSeries {
         TickSeries {
             data,
@@ -679,8 +544,6 @@ mod tests {
         }
     }
 
-    /// Hour bars of IC's gold, and IC's gold quotes, CME gold's trades and
-    /// book depth as ticks.
     fn gold() -> DataRequirements {
         DataRequirements {
             bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
@@ -694,46 +557,80 @@ mod tests {
         }
     }
 
-    #[rstest]
-    fn the_instruments_of_ticks_follow_those_of_the_bar_types_each_once() {
-        assert_eq!(
-            gold().instrument_ids(),
-            [
-                InstrumentId::from("XAUUSD.ICMARKETS"),
-                InstrumentId::from("GC.v.0.GLBX")
-            ]
-        );
+    fn ibis() -> DataRequirements {
+        DataRequirements {
+            bar_types: vec![
+                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
+                BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
+                BarType::from("SXR8.IBIS-1-DAY-MID-INTERNAL"),
+            ],
+            ticks: vec![],
+            custom: vec![],
+            warmup: SignedDuration::from_hours(720),
+        }
     }
 
     #[rstest]
-    fn requirements_without_bar_types_read_the_instruments_of_their_ticks() {
-        let requirements = DataRequirements {
-            bar_types: vec![],
+    #[case::of_bar_types(ibis(), &["SXR8.IBIS", "EUNL.IBIS"])]
+    #[case::of_ticks_after_bar_types(
+        DataRequirements {
+            ticks: vec![
+                tick(NautilusDataType::TradeTick, "GC.v.0.GLBX"),
+                tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS"),
+            ],
             ..gold()
-        };
-        assert_eq!(
-            requirements.instrument_ids(),
-            [
-                InstrumentId::from("XAUUSD.ICMARKETS"),
-                InstrumentId::from("GC.v.0.GLBX")
-            ]
-        );
+        },
+        &["XAUUSD.ICMARKETS", "GC.v.0.GLBX"],
+    )]
+    #[case::of_ticks_alone(
+        DataRequirements { bar_types: vec![], ..gold() },
+        &["XAUUSD.ICMARKETS", "GC.v.0.GLBX"],
+    )]
+    fn the_instruments_are_those_of_the_bar_types_then_of_the_ticks_each_once_in_order(
+        #[case] requirements: DataRequirements,
+        #[case] expected: &[&str],
+    ) {
+        let expected: Vec<InstrumentId> =
+            expected.iter().map(|&id| InstrumentId::from(id)).collect();
+
+        assert_eq!(requirements.instrument_ids(), expected);
     }
 
     #[rstest]
-    fn requirements_on_some_instruments_keep_their_ticks() {
-        let glbx = gold().of_instruments(&[InstrumentId::from("GC.v.0.GLBX")]);
+    #[case::bar_types(
+        DataRequirements {
+            bar_types: vec![
+                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
+                BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL"),
+            ],
+            ..ibis()
+        },
+        "BTC-USDT-SWAP.OKX",
+        DataRequirements {
+            bar_types: vec![BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL")],
+            ..ibis()
+        },
+    )]
+    #[case::ticks(
+        gold(),
+        "GC.v.0.GLBX",
+        DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                tick(NautilusDataType::TradeTick, "GC.v.0.GLBX"),
+                tick(NautilusDataType::OrderBookDepth, "GC.v.0.GLBX"),
+            ],
+            ..gold()
+        },
+    )]
+    fn requirements_on_some_instruments_keep_their_bar_types_their_ticks_and_the_warmup(
+        #[case] requirements: DataRequirements,
+        #[case] instrument_id: &str,
+        #[case] expected: DataRequirements,
+    ) {
         assert_eq!(
-            glbx,
-            DataRequirements {
-                bar_types: vec![],
-                ticks: vec![
-                    tick(NautilusDataType::TradeTick, "GC.v.0.GLBX"),
-                    tick(NautilusDataType::OrderBookDepth, "GC.v.0.GLBX"),
-                ],
-                custom: vec![],
-                warmup: SignedDuration::ZERO,
-            }
+            requirements.of_instruments(&[InstrumentId::from(instrument_id)]),
+            expected
         );
     }
 
@@ -749,52 +646,6 @@ mod tests {
         );
     }
 
-    #[rstest]
-    fn a_tick_series_loads_from_toml() {
-        #[derive(Deserialize)]
-        struct Config {
-            ticks: Vec<TickSeries>,
-        }
-        let config: Config = toml::from_str(
-            r#"ticks = [
-                { data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },
-                { data = "trades", instrument_id = "GC.v.0.GLBX" },
-                { data = "order_book_depths", instrument_id = "GC.v.0.GLBX" },
-            ]"#,
-        )
-        .unwrap();
-        assert_eq!(config.ticks, gold().ticks);
-    }
-
-    /// Bars are no tick series, and neither is custom data, an
-    /// instrument's included: it is a custom series, keyed by its
-    /// identifier (see `CustomSeries`).
-    #[rstest]
-    fn rejects_an_unknown_tick_data_type() {
-        for data in ["bars", "Custom:Imbalance"] {
-            let err = toml::from_str::<TickSeries>(&format!(
-                r#"data = "{data}"
-                instrument_id = "GC.v.0.GLBX""#
-            ))
-            .unwrap_err();
-            assert!(err.to_string().contains(data), "{err}");
-        }
-    }
-
-    #[rstest]
-    fn book_deltas_load_from_toml_as_a_nautilus_data_type() {
-        let ticks: TickSeries = toml::from_str(
-            r#"data = "order_book_deltas"
-            instrument_id = "GC.v.0.GLBX""#,
-        )
-        .unwrap();
-        assert_eq!(ticks, tick(NautilusDataType::OrderBookDelta, "GC.v.0.GLBX"));
-    }
-
-    /// The book deltas of one gold contract and the imbalances of
-    /// another, a custom series under its id: the deltas are a catalog
-    /// series of their instrument, the imbalances neither bring their
-    /// contract nor are a catalog series of it.
     #[rstest]
     fn a_custom_series_under_an_instruments_id_brings_no_instrument_and_no_catalog_series() {
         let requirements = DataRequirements {
@@ -817,26 +668,45 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// One nanosecond before `time`.
     fn before(time: &str) -> Timestamp {
         at(time) - SignedDuration::from_nanos(1)
     }
 
     fn series_slice(
         data_type: NautilusDataType,
-        identifier: &str,
         instrument_id: &str,
         from: Timestamp,
         to: Timestamp,
     ) -> SeriesSlice {
         SeriesSlice {
-            series: (data_type, identifier.to_string()),
-            slice: Slice {
-                instrument_id: InstrumentId::from(instrument_id),
-                from,
-                to,
-            },
+            series: CatalogSeries::Ticks(tick(data_type, instrument_id)),
+            from,
+            to,
         }
+    }
+
+    #[rstest]
+    fn bar_windows_merge_only_for_the_same_full_bar_type_without_a_gap() {
+        let bid = CatalogSeries::Bars(BarType::from("GCZ26.GLBX-1-MINUTE-BID-EXTERNAL"));
+        let ask = CatalogSeries::Bars(BarType::from("GCZ26.GLBX-1-MINUTE-ASK-EXTERNAL"));
+        let window = |series, from: u64, to: u64| SeriesSlice {
+            series,
+            from: UnixNanos::from(from).into(),
+            to: UnixNanos::from(to).into(),
+        };
+        assert_eq!(
+            SeriesSlice::merged([
+                window(bid.clone(), 9, 12),
+                window(ask.clone(), 2, 14),
+                window(bid.clone(), 2, 3),
+                window(bid.clone(), 4, 7),
+            ]),
+            [
+                window(bid.clone(), 2, 7),
+                window(bid, 9, 12),
+                window(ask, 2, 14)
+            ]
+        );
     }
 
     #[rstest]
@@ -854,24 +724,14 @@ mod tests {
         assert_eq!(
             requirements.slices(start, end),
             [
-                series_slice(
-                    NautilusDataType::TradeTick,
-                    "GCZ26.GLBX",
-                    "GCZ26.GLBX",
-                    start,
-                    end
-                ),
-                series_slice(
-                    NautilusDataType::QuoteTick,
-                    "XAUUSD.ICMARKETS",
-                    "XAUUSD.ICMARKETS",
-                    start,
-                    end
-                ),
+                series_slice(NautilusDataType::TradeTick, "GCZ26.GLBX", start, end),
+                series_slice(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS", start, end),
             ]
         );
     }
 
+    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026 (`rolls/calendar.toml`,
+    /// `rolls/README.md`).
     #[rstest]
     fn the_ticks_of_a_root_are_its_contracts_ticks_over_their_slices() {
         let requirements = DataRequirements {
@@ -891,27 +751,18 @@ mod tests {
                 series_slice(
                     NautilusDataType::TradeTick,
                     "GCQ26.GLBX",
-                    "GCQ26.GLBX",
                     start,
                     before(roll)
                 ),
-                series_slice(
-                    NautilusDataType::TradeTick,
-                    "GCZ26.GLBX",
-                    "GCZ26.GLBX",
-                    at(roll),
-                    end
-                ),
+                series_slice(NautilusDataType::TradeTick, "GCZ26.GLBX", at(roll), end),
                 series_slice(
                     NautilusDataType::OrderBookDepth,
-                    "GCQ26.GLBX",
                     "GCQ26.GLBX",
                     start,
                     before(roll)
                 ),
                 series_slice(
                     NautilusDataType::OrderBookDepth,
-                    "GCZ26.GLBX",
                     "GCZ26.GLBX",
                     at(roll),
                     end
@@ -936,49 +787,14 @@ mod tests {
                 series_slice(
                     NautilusDataType::TradeTick,
                     "GCQ26.GLBX",
-                    "GCQ26.GLBX",
                     start,
                     before(roll)
                 ),
-                series_slice(
-                    NautilusDataType::TradeTick,
-                    "GCZ26.GLBX",
-                    "GCZ26.GLBX",
-                    at(roll),
-                    end
-                ),
+                series_slice(NautilusDataType::TradeTick, "GCZ26.GLBX", at(roll), end),
             ]
         );
     }
 
-    /// The slices of `bar_type` over July and August 2026, across GC's
-    /// roll of 29 July.
-    fn bar_slices(bar_type: &str) -> Vec<SeriesSlice> {
-        DataRequirements {
-            bar_types: vec![BarType::from(bar_type)],
-            ticks: vec![],
-            custom: vec![],
-            warmup: SignedDuration::ZERO,
-        }
-        .slices(at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"))
-    }
-
-    #[rstest]
-    fn bars_on_a_contract_need_not_be_built_from_trades() {
-        assert_eq!(
-            bar_slices("GCZ26.GLBX-1-MINUTE-MID-INTERNAL"),
-            [series_slice(
-                NautilusDataType::QuoteTick,
-                "GCZ26.GLBX",
-                "GCZ26.GLBX",
-                at("2026-07-01T00:00Z"),
-                at("2026-08-31T00:00Z")
-            )]
-        );
-    }
-
-    /// GCQ26.GLBX stands for GC.GLBX up to the roll of 29 July and is read
-    /// as itself over the whole span.
     #[rstest]
     fn a_contract_read_beside_its_root_is_one_slice_of_each_series_over_both() {
         let requirements = DataRequirements {
@@ -994,16 +810,9 @@ mod tests {
         assert_eq!(
             requirements.slices(start, end),
             [
+                series_slice(NautilusDataType::TradeTick, "GCQ26.GLBX", start, end),
                 series_slice(
                     NautilusDataType::TradeTick,
-                    "GCQ26.GLBX",
-                    "GCQ26.GLBX",
-                    start,
-                    end
-                ),
-                series_slice(
-                    NautilusDataType::TradeTick,
-                    "GCZ26.GLBX",
                     "GCZ26.GLBX",
                     at("2026-07-29T00:00Z"),
                     end
@@ -1035,13 +844,10 @@ mod tests {
         );
     }
 
-    /// The imbalances under `identifier`, a custom series of no metadata.
     fn imbalances(identifier: &str) -> CustomSeries {
         CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
     }
 
-    /// LSE's 10-year US yields under `identifier`, a custom series of
-    /// metadata.
     fn yields(identifier: &str) -> CustomSeries {
         let metadata = Params::new(
             [
@@ -1057,9 +863,6 @@ mod tests {
         CustomSlice { series, from, to }
     }
 
-    /// An identifier naming a root of the roll calendar rolls; one naming a
-    /// contract, an instrument the calendar does not roll, or no
-    /// instrument at all, stands for itself.
     #[rstest]
     fn a_custom_series_has_a_root_only_under_a_root_s_identifier() {
         let roots = ["GC.GLBX", "GCZ26.GLBX", "XAUUSD.ICMARKETS", "US10Y"]
@@ -1071,10 +874,6 @@ mod tests {
         );
     }
 
-    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026
-    /// (`rolls/README.md`): its series is GCQ26's up to the last nanosecond
-    /// before, GCZ26's from the roll on, its type and metadata kept, the
-    /// contract's id its identifier.
     #[rstest]
     fn a_custom_series_on_a_root_is_at_each_time_the_series_of_the_contract_in_front() {
         let series = yields("GC.GLBX");
@@ -1091,17 +890,13 @@ mod tests {
         );
     }
 
-    /// A contract's series and one of no instrument are themselves at any
-    /// time.
     #[rstest]
-    fn a_custom_series_of_no_root_is_itself_at_any_time() {
-        for series in [yields("GCQ26.GLBX"), yields("US10Y")] {
-            assert_eq!(series.at(at("2026-07-29T00:00Z")), series);
-        }
+    #[case::of_a_contract(yields("GCQ26.GLBX"))]
+    #[case::of_no_instrument(yields("US10Y"))]
+    fn a_custom_series_of_no_root_is_itself_at_any_time(#[case] series: CustomSeries) {
+        assert_eq!(series.at(at("2026-07-29T00:00Z")), series);
     }
 
-    /// Over July and August 2026, across GC's roll of 29 July: GCQ26's
-    /// series up to 1 ns before the roll, GCZ26's from it.
     #[rstest]
     fn the_slices_of_a_custom_series_on_a_root_are_its_contracts_series_over_their_slices() {
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
@@ -1117,20 +912,17 @@ mod tests {
     }
 
     #[rstest]
-    fn a_custom_series_of_no_root_is_one_slice_over_the_window() {
+    #[case::of_a_contract(yields("GCQ26.GLBX"))]
+    #[case::of_no_instrument(yields("US10Y"))]
+    fn a_custom_series_of_no_root_is_one_slice_over_the_window(#[case] series: CustomSeries) {
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
 
-        for series in [yields("GCQ26.GLBX"), yields("US10Y")] {
-            assert_eq!(
-                series.slices(start, end),
-                [custom_slice(series, start, end)]
-            );
-        }
+        assert_eq!(
+            series.slices(start, end),
+            [custom_slice(series, start, end)]
+        );
     }
 
-    /// GCQ26's imbalances listed beside GC's are read once over the whole
-    /// window, the root's GCQ26 slice within it; the yields under US10Y
-    /// over the window too.
     #[rstest]
     fn a_contract_s_custom_series_listed_beside_its_root_s_is_one_slice_over_both() {
         let requirements = DataRequirements {
@@ -1155,56 +947,39 @@ mod tests {
         );
     }
 
-    /// The series of each bar type, as `(data type, identifier)` strings.
     fn series_of(bar_types: &[&str]) -> Vec<(NautilusDataType, String)> {
         let bar_types: Vec<BarType> = bar_types.iter().map(|&s| BarType::from(s)).collect();
         catalog_keys(&bar_types)
     }
 
     #[rstest]
-    fn bars_built_from_quotes_need_the_quotes_of_their_instrument() {
-        assert_eq!(
-            series_of(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]),
-            [(NautilusDataType::QuoteTick, "SXR8.IBIS".to_string())]
-        );
-    }
+    #[case::internal_bars_of_quotes(
+        "SXR8.IBIS-1-HOUR-MID-INTERNAL",
+        (NautilusDataType::QuoteTick, "SXR8.IBIS")
+    )]
+    #[case::internal_bars_of_trades(
+        "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL",
+        (NautilusDataType::TradeTick, "BTC-USDT-SWAP.OKX")
+    )]
+    #[case::composite_bars(
+        "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+        (NautilusDataType::Bar, "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL")
+    )]
+    #[case::composite_bars_of_internal_source_bars(
+        "SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-INTERNAL",
+        (NautilusDataType::QuoteTick, "SXR8.IBIS")
+    )]
+    #[case::external_bars(
+        "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL",
+        (NautilusDataType::Bar, "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL")
+    )]
+    fn bars_need_the_series_they_are_built_from(
+        #[case] bar_type: &str,
+        #[case] expected: (NautilusDataType, &str),
+    ) {
+        let (data, identifier) = expected;
 
-    #[rstest]
-    fn bars_built_from_trades_need_the_trades_of_their_instrument() {
-        assert_eq!(
-            series_of(&["BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL"]),
-            [(NautilusDataType::TradeTick, "BTC-USDT-SWAP.OKX".to_string())]
-        );
-    }
-
-    #[rstest]
-    fn composite_bars_need_their_source_bars() {
-        assert_eq!(
-            series_of(&["BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"]),
-            [(
-                NautilusDataType::Bar,
-                "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()
-            )]
-        );
-    }
-
-    #[rstest]
-    fn composite_bars_of_internal_source_bars_need_what_those_are_built_from() {
-        assert_eq!(
-            series_of(&["SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-INTERNAL"]),
-            [(NautilusDataType::QuoteTick, "SXR8.IBIS".to_string())]
-        );
-    }
-
-    #[rstest]
-    fn external_bars_are_their_own_series() {
-        assert_eq!(
-            series_of(&["BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"]),
-            [(
-                NautilusDataType::Bar,
-                "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()
-            )]
-        );
+        assert_eq!(series_of(&[bar_type]), [(data, identifier.to_string())]);
     }
 
     #[rstest]

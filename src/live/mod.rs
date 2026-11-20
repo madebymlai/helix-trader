@@ -1,19 +1,15 @@
-//! Runs the strategy on a Nautilus live node.
+//! Runs the strategy on a Nautilus live node (build step 3: paper, then live). Each process runs
+//! one node.
 //!
-//! Build step 3: paper, then live. One node per process. The clients are
-//! those of the instruments' live data sources, each the broker of its
-//! instruments too, several if the instruments span several, and of the
-//! custom series' live data sources, which the venues module sets up
-//! (`venues::live_clients`). Each source's data client serves the warmup
-//! of its instruments and custom series up to now.
-//! The node registers the catalog fill-catalog fills and backtests read:
-//! the warmup comes from it first, from the venues for what it lacks, and
-//! the answers of the clients that certify them are written back to it
-//! (see `strategy::warmup`). A futures root's instruments are its contract in
-//! front at the start and the one it rolls into next (see
-//! `rolls::Transition::after`); the strategy's roller loads each later one
-//! before switching to it (see `rolls::Roller::live`), so the node rolls
-//! without a restart; bars on a root are refused.
+//! The clients are the live data sources of the instruments and the custom series. Each client
+//! is also the broker of its instruments (`venues::live_clients`).
+//!
+//! The warmup comes from the catalog first, then from the venues. The venues' certified answers
+//! are written back (see `strategy::warmup`).
+//!
+//! A futures root has two instruments: its front contract and the next one (see
+//! `rolls::Transition::after`). The roller loads each later contract before switching to it (see
+//! `rolls::Roller::live`), so the node rolls without a restart. Bars on a root are refused.
 
 pub mod node;
 mod recording;
@@ -44,56 +40,43 @@ use crate::{
     venues::{self, LiveVenueArgs},
 };
 
-/// One live run: the strategy trades each instrument on its live broker,
-/// with the venues' settings `venues`; on bars the node builds, warmed up
-/// from the venues.
+/// One live run: the strategy trades each instrument on its live broker.
 #[derive(Debug, Clone)]
 pub struct Live {
-    /// The node's trader. The node's cache in Redis is the trader's, so a
-    /// restart under the same trader loads what the last run left.
+    /// The node's trader. A restart loads the trader's cache from Redis.
     pub trader_id: TraderId,
-    /// The venues' settings of the run, the live command's venue flags,
-    /// handed to the venues module with the instruments (see
-    /// `venues::live_clients`).
+    /// The venue flags of the live command.
     pub venues: LiveVenueArgs,
-    /// The Nautilus logger, installed for the start and kept by the node.
+    /// The Nautilus logger config.
     pub logging: LoggerConfig,
-    /// The catalog directory, fill-catalog's and the backtests': it serves
-    /// the warmup, keeps the history the venues certify complete (see
-    /// `node::run`), and holds the definitions a venue checks its account
-    /// against (see `venues::live_clients`). Created if missing.
+    /// The catalog directory, created if missing.
+    ///
+    /// It serves the warmup and keeps the history that venues certify complete (see `node::run`).
+    /// It also holds the definitions that a venue checks its account against.
     pub catalog: PathBuf,
-    /// Where the node stages the data it streams into the catalog, which it
-    /// promotes there daily; also keeps the trader's instance id.
+    /// Where the node stages the data it streams.
     pub recording: Recording,
 }
 
 impl Live {
-    /// Sets up the clients of the instruments of `requirements` (see
-    /// `venues::live_clients`), then runs `strategy` on a live node until
-    /// SIGINT or SIGTERM, claiming the external orders its config claims,
-    /// the instruments it trades (`[trade] instruments`) and no other it
-    /// reads (see `node::run`), beside `retraining`, the actor of its retrains if
-    /// it is retrained (`RetrainActor`), its cache sized for `warmup`, the
-    /// strategy's (see `Warmup::cache_config`). The strategy's warmup
-    /// requests go to the data clients. A root's instruments are its
-    /// contract in front at the start and the next one (see `README.md`,
-    /// "Rolled roots"). The node is built, and what the last run left
-    /// staged promoted (`promote_staged`), before it runs.
+    /// Sets up the clients for the instruments in `requirements` (see `venues::live_clients`), then
+    /// runs `strategy` on a live node until SIGINT or SIGTERM.
+    ///
+    /// The node claims external orders for the instruments the strategy trades, and for no other
+    /// instrument it reads. The run first promotes what the last run left staged.
     ///
     /// # Errors
     ///
-    /// Returns an error if a bar type is on a root (live builds no
-    /// continuous bars), if the cache cannot hold the warmup bars of a bar
-    /// type the warmup builds (see `Warmup::cache_config`), if the catalog
-    /// cannot be created or its path is not UTF-8, if the staging directory is inside the
-    /// catalog, the trader's instance id cannot be kept (see `Recording`),
-    /// if what the last run left staged cannot be promoted
-    /// (`promote_staged`), if the clients cannot be set up (see
-    /// `venues::live_clients`, a venue's environment read before anything
-    /// connects), if Redis cannot be started (see `redis::start`), or if
-    /// the node fails (see
-    /// `node::build`, `node::run`).
+    /// Returns an error if:
+    /// - A bar type is on a root (live builds no continuous bars).
+    /// - The cache cannot hold the warmup bars (see `Warmup::cache_config`).
+    /// - The catalog cannot be created or its path is not UTF-8.
+    /// - The staging directory is inside the catalog.
+    /// - The trader's instance id cannot be kept (see `Recording`).
+    /// - What the last run left staged cannot be promoted (`promote_staged`).
+    /// - The clients cannot be set up (see `venues::live_clients`).
+    /// - Redis cannot be started (see `redis::start`).
+    /// - The node fails (see `node::build`, `node::run`).
     pub async fn run<S>(
         &self,
         requirements: &DataRequirements,
@@ -115,11 +98,8 @@ impl Live {
             requirements,
             Timestamp::from(get_atomic_clock_realtime().get_time_ns()),
         )?;
-        // The node would install the logger when built, after the clients
-        // are set up: install it now with the node's trader and config, and
-        // the node keeps it. The adapters' `tracing` output goes to stdout
-        // beside it, filtered by RUST_LOG (warn by default), never to its
-        // log files (`init_tracing`).
+        // The node would install the logger only when built, after the clients are set up. The
+        // adapters' `tracing` output goes to stdout, filtered by RUST_LOG (warn by default).
         let file_config = self.logging.file_config.clone().unwrap_or_default();
         let _log_guard = init_logging(
             self.trader_id,
@@ -132,8 +112,7 @@ impl Live {
             venues::live_clients(requirements, &instrument_ids, &self.venues, &self.catalog)
                 .await?;
         let cache_database = redis::start().await?;
-        // Built first, which promotes what the last run left staged: the
-        // warmup reads the catalog with it there.
+        // Built first, because it promotes what the last run left staged and the warmup reads that
         let node = node::build(
             self.trader_id,
             instance_id,
@@ -149,21 +128,13 @@ impl Live {
     }
 }
 
-/// The instruments the node loads at its start, at `now`: each one
-/// `requirements` reads, a root replaced by the contracts of its next roll
-/// (see `rolls::Transition::after`), the one standing for it now and the
-/// one it rolls into, so the strategy subscribes to a loaded contract
-/// (`strategy::subscriptions`) even if that roll passes before the strategy
-/// starts or while the roller's request for its post contract is in
-/// flight; the roller
-/// requests the post contract of each later roll (see
-/// `rolls::Roller::live`). A plain instrument stands for itself. Each
-/// once, in order.
+/// Returns the instruments the node loads at `now`, each once, in order.
+///
+/// Each root is replaced by the contracts of its next roll (see `rolls::Transition::after`).
 ///
 /// # Errors
 ///
-/// Returns an error if a bar type is on a root: live builds no continuous
-/// bars (see `README.md`, "Rolled roots").
+/// Returns an error if a bar type is on a root: live builds no continuous bars.
 fn loaded_instrument_ids(
     requirements: &DataRequirements,
     now: Timestamp,
@@ -224,9 +195,6 @@ mod tests {
         }
     }
 
-    /// GC rolls into GCZ26 on 2026-07-29 and out of it into GCG27 on
-    /// 2026-11-26 (`rolls/README.md`, "GC against Databento"): the roller
-    /// requests the contracts of the later rolls (`rolls::Roller::live`).
     #[rstest]
     fn a_root_loads_the_contract_in_front_and_the_next() {
         let requirements = DataRequirements {
@@ -239,28 +207,20 @@ mod tests {
         );
     }
 
-    /// A start just before a roll loads the roll's post contract too, so
-    /// the strategy subscribes to it even if the roll passes before it
-    /// starts or the roller's request for it is still in flight.
     #[rstest]
-    fn a_root_loads_just_before_its_roll_the_pre_and_post_contracts() {
+    #[case::just_before_it(
+        at("2026-07-29T00:00Z") - SignedDuration::from_nanos(1),
+        &["GCQ26.GLBX", "GCZ26.GLBX"],
+    )]
+    #[case::at_it(at("2026-07-29T00:00Z"), &["GCZ26.GLBX", "GCG27.GLBX"])]
+    fn a_root_loads_around_its_roll_the_contract_in_front_and_the_next(
+        #[case] start: Timestamp,
+        #[case] loaded: &[&str],
+    ) {
         let requirements = ticks(&NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
         assert_eq!(
-            loaded_instrument_ids(
-                &requirements,
-                at("2026-07-29T00:00Z") - SignedDuration::from_nanos(1)
-            )
-            .unwrap(),
-            ids(&["GCQ26.GLBX", "GCZ26.GLBX"])
-        );
-    }
-
-    #[rstest]
-    fn a_root_loads_at_its_roll_the_post_contract_and_the_next() {
-        let requirements = ticks(&NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
-        assert_eq!(
-            loaded_instrument_ids(&requirements, at("2026-07-29T00:00Z")).unwrap(),
-            ids(&["GCZ26.GLBX", "GCG27.GLBX"])
+            loaded_instrument_ids(&requirements, start).unwrap(),
+            ids(loaded)
         );
     }
 

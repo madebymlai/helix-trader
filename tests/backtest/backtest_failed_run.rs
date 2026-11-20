@@ -1,9 +1,9 @@
-//! A run that fails once its node exists disposes the node all the same,
-//! as one that completes does, so that the next node of the thread starts
-//! alone: Nautilus runs nodes one after another when each is disposed
-//! before the next starts (`concepts/architecture.md`, "Processes and
-//! threads"), and disposing clears the thread's message bus.
+//! Tests that a run failing once its node exists still disposes the node. The next node on the
+//! thread then starts alone. Nautilus runs nodes one after another when each is disposed first
+//! (`concepts/architecture.md`, "Processes and threads"). Disposing clears the thread's message
+//! bus.
 
+use helix_trader::backtest::Backtest;
 use nautilus_common::{actor::DataActor, msgbus::get_message_bus};
 use nautilus_model::identifiers::StrategyId;
 use nautilus_trading::{
@@ -14,8 +14,6 @@ use rstest::rstest;
 
 use crate::common::trades;
 
-/// A strategy refusing to start, which fails the run once the node is
-/// built and the strategy added.
 #[derive(Debug)]
 struct Refusing {
     core: StrategyCore,
@@ -41,33 +39,23 @@ impl DataActor for Refusing {
     }
 }
 
-/// The thread's message bus holds no endpoint: no node's engines are left
-/// on it.
 fn assert_no_node_left() {
     let bus = get_message_bus();
     let endpoints = bus.borrow().endpoints().join(", ");
     assert!(endpoints.is_empty(), "endpoints left: {endpoints}");
 }
 
+type Run = fn(&Backtest, Refusing) -> anyhow::Result<()>;
+
 #[rstest]
-fn a_run_failing_at_the_start_of_its_strategy_disposes_its_node() {
+#[case::run(|backtest: &Backtest, strategy| backtest.run(strategy).map(drop))]
+#[case::dataset_run(|backtest: &Backtest, strategy| backtest.run_dataset(strategy))]
+fn a_run_failing_at_the_start_of_its_strategy_disposes_its_node(#[case] run: Run) {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
     let backtest = trades::backtest(catalog.path(), trades::start(), &levels, "0 EUR");
 
-    let err = backtest.run(Refusing::new()).unwrap_err();
-
-    assert!(format!("{err:#}").contains("refusing to start"), "{err:#}");
-    assert_no_node_left();
-}
-
-#[rstest]
-fn a_dataset_run_failing_at_the_start_of_its_strategy_disposes_its_node() {
-    let levels = trades::TIME_EXIT;
-    let catalog = trades::catalog(&levels);
-    let backtest = trades::backtest(catalog.path(), trades::start(), &levels, "0 EUR");
-
-    let err = backtest.run_dataset(Refusing::new()).unwrap_err();
+    let err = run(&backtest, Refusing::new()).unwrap_err();
 
     assert!(format!("{err:#}").contains("refusing to start"), "{err:#}");
     assert_no_node_left();

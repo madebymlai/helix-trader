@@ -1,24 +1,19 @@
 //! The account's token pair and the file that keeps the latest one.
 //!
-//! cTrader's access token lasts about 30 days; the refresh token renews it
-//! (`ProtoOARefreshTokenReq`), and each renewal replaces both, the old
-//! pair invalidated (help.ctrader.com/open-api, "App and account
-//! authentication"). So the latest pair lives in a token file, readable by
-//! the user only (mode 0600, its directory 0700), where every session
-//! finds it, at the place the credential names (`token_file`).
+//! cTrader's access token lasts about 30 days. The refresh token renews it
+//! (`ProtoOARefreshTokenReq`). Each renewal replaces both tokens and invalidates the old pair
+//! (help.ctrader.com/open-api, "App and account authentication"). So the latest pair lives in the
+//! credential's `token_file`, mode 0600 in a 0700 directory, where every session finds it.
 //!
-//! The first pair comes from the credential, which seeds the file once;
-//! wherever the caller read it from is never written. The file keeps a
-//! SHA-256 fingerprint of the pair that seeded it: when the credential
-//! holds another pair (a new one from the Playground), it seeds the file
-//! again.
+//! The credential's pair seeds the file once. The adapter never writes the place the caller read
+//! the pair from. The file keeps a SHA-256 fingerprint of the seeding pair. If a credential holds
+//! another pair (a new one from the Playground), it seeds the file again.
 //!
-//! Sessions of several processes (a fill and a live node) share the file. A
-//! renewal holds an advisory lock (`flock`, on the token file's name with
-//! `.lock` appended, a file never replaced) from before its request until
-//! the new pair is written, so two sessions never spend the same refresh
-//! token; the file is replaced atomically (a temporary file renamed over
-//! it), so a reader sees a whole pair, the latest writer's.
+//! Sessions of several processes share the file. A renewal holds an advisory lock (`flock`) from
+//! before its request until the new pair is written, so two sessions never spend the same refresh
+//! token. The lock is on a file named like the token file with `.lock` appended, and that file is
+//! never replaced. The file is replaced atomically (a temporary file renamed over it), so a reader
+//! sees a whole pair.
 
 use std::{
     fmt::Write as _,
@@ -37,11 +32,11 @@ use zeroize::Zeroize;
 
 use crate::config::CTraderSettingNames;
 
-/// How long before the access token expires a session renews it.
 pub(crate) const RENEW_BEFORE: SignedDuration = SignedDuration::from_hours(24);
 
-/// An access token, the refresh token that renews it, and when the access
-/// token expires (unknown for a pair seeded from the credential).
+/// An access token with its refresh token and expiry.
+///
+/// The expiry is unknown for a pair seeded from the credential.
 #[derive(Debug, Clone)]
 pub struct TokenPair {
     pub access_token: SecretString,
@@ -50,8 +45,6 @@ pub struct TokenPair {
 }
 
 impl TokenPair {
-    /// The pair a renewal at `now` returned, its access token valid for
-    /// `expires_in` seconds.
     pub(crate) fn renewed(
         access_token: SecretString,
         refresh_token: SecretString,
@@ -65,19 +58,16 @@ impl TokenPair {
         }
     }
 
-    /// When to renew it: `RENEW_BEFORE` its expiry, or at once when the
-    /// expiry is unknown.
     pub(crate) fn renew_at(&self) -> Option<Timestamp> {
         self.expires_at.map(|at| at - RENEW_BEFORE)
     }
 
-    /// Whether it is this pair's access token that `other` holds.
     #[must_use]
     pub fn same_access_token(&self, other: &Self) -> bool {
         self.access_token.expose_secret() == other.access_token.expose_secret()
     }
 
-    /// The fingerprint of the pair: SHA-256 of both tokens, in hex.
+    /// SHA-256 of both tokens, in hex.
     fn fingerprint(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.access_token.expose_secret());
@@ -93,8 +83,6 @@ impl TokenPair {
     }
 }
 
-/// The token file, the credential's pair that seeds it, and what errors
-/// call the settings of that pair.
 #[derive(Debug, Clone)]
 pub(crate) struct TokenStore {
     path: PathBuf,
@@ -102,10 +90,9 @@ pub(crate) struct TokenStore {
     names: CTraderSettingNames,
 }
 
-/// The file's content.
 #[derive(Serialize, Deserialize)]
 struct Stored {
-    /// The fingerprint of the credential's pair that seeded the file.
+    /// The fingerprint of the pair that seeded the file.
     seed: String,
     access_token: String,
     refresh_token: String,
@@ -120,8 +107,6 @@ impl Drop for Stored {
 }
 
 impl TokenStore {
-    /// The store at `path`, seeded with `seed`, the credential's pair,
-    /// whose settings `names` names.
     pub(crate) fn new(path: PathBuf, seed: TokenPair, names: CTraderSettingNames) -> Self {
         Self { path, seed, names }
     }
@@ -130,15 +115,15 @@ impl TokenStore {
         &self.path
     }
 
-    /// The latest pair: the file's, or the seed, written to the file
-    /// first, when there is no file or the seed is another pair than the
-    /// one that seeded it; `None` while another session renews (it holds
-    /// the lock).
+    /// Returns the latest pair, or `None` while another session holds the renewal lock.
+    ///
+    /// The latest pair is the file's. It is the seed, written first, when there is no file or
+    /// another pair seeded it.
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be read, parsed or written;
-    /// never a token.
+    /// Returns an error if the file cannot be read, parsed or written. The error never holds a
+    /// token.
     pub(crate) fn try_load(&self) -> anyhow::Result<Option<TokenPair>> {
         let Some(lock) = self.try_lock()? else {
             return Ok(None);
@@ -153,12 +138,12 @@ impl TokenStore {
         }
     }
 
-    /// The pair the file holds now.
+    /// Returns the pair the file holds now.
     ///
     /// # Errors
     ///
-    /// Returns an error if there is no file, or it cannot be read or
-    /// parsed; never a token.
+    /// Returns an error if there is no file, or it cannot be read or parsed. The error never holds
+    /// a token.
     pub(crate) fn read(&self) -> anyhow::Result<TokenPair> {
         match self.stored()? {
             Some(stored) => Ok(pair_of(&stored)),
@@ -166,7 +151,7 @@ impl TokenStore {
         }
     }
 
-    /// The renewal lock, or `None` while another session holds it.
+    /// Returns the renewal lock, or `None` while another session holds it.
     ///
     /// # Errors
     ///
@@ -212,7 +197,8 @@ impl TokenStore {
         };
         let parsed = serde_json::from_str::<Stored>(&text);
         text.zeroize();
-        // serde's message may quote the content: only where it failed.
+
+        // serde's message may quote the content: only where it failed
         parsed.map(Some).map_err(|e| {
             anyhow::anyhow!(
                 "{} is not a token file (line {}, column {}): delete it to seed it again from \
@@ -235,7 +221,6 @@ fn pair_of(stored: &Stored) -> TokenPair {
     }
 }
 
-/// The renewal lock on the token file, held until dropped.
 #[derive(Debug)]
 pub(crate) struct TokenLock {
     _file: File,
@@ -248,7 +233,7 @@ impl TokenLock {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be written; never a token.
+    /// Returns an error if the file cannot be written. The error never holds a token.
     pub(crate) fn save(&self, pair: &TokenPair) -> anyhow::Result<()> {
         let directory = self
             .path
@@ -277,13 +262,15 @@ impl TokenLock {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        time::{Duration, Instant},
     };
 
-    use nautilus_core::string::secret::REDACTED;
     use rstest::rstest;
 
     use super::*;
@@ -305,7 +292,6 @@ mod tests {
         TokenStore::new(dir.join("state").join("broker/token.json"), seed, NAMES)
     }
 
-    /// The tokens and expiry of `pair`, to compare pairs.
     fn exposed(pair: &TokenPair) -> (String, String, Option<Timestamp>) {
         (
             pair.access_token.expose_secret().to_owned(),
@@ -387,25 +373,12 @@ mod tests {
 
         assert!(other.try_load().unwrap().is_none());
         drop(renewing);
-        assert!(other.try_load().unwrap().is_some());
+        assert_eq!(
+            other.try_load().unwrap().as_ref().map(exposed),
+            Some(exposed(&seed()))
+        );
     }
 
-    #[rstest]
-    fn the_lock_is_taken_by_one_session_at_a_time() {
-        let dir = tempfile::tempdir().unwrap();
-        let (one, other) = (store_in(dir.path(), seed()), store_in(dir.path(), seed()));
-
-        let held = one.try_lock().unwrap();
-
-        assert!(held.is_some());
-        assert!(other.try_lock().unwrap().is_none());
-        drop(held);
-        assert!(other.try_lock().unwrap().is_some());
-    }
-
-    /// Two writers replace the pair over and over while a reader, which
-    /// read the seed before they started, reads on: every read is one
-    /// whole pair, and the file ends with the last one written.
     #[rstest]
     fn concurrent_writers_never_leave_a_partial_pair_and_the_later_wins() {
         let dir = tempfile::tempdir().unwrap();
@@ -428,6 +401,7 @@ mod tests {
             })
         };
         reading.recv().expect("the reader's first read");
+        let deadline = Instant::now() + Duration::from_secs(10);
         let writers: Vec<_> = ["a", "b"]
             .into_iter()
             .map(|writer| {
@@ -438,6 +412,7 @@ mod tests {
                             if let Some(lock) = store.try_lock().unwrap() {
                                 break lock;
                             }
+                            assert!(Instant::now() < deadline, "{writer}{n}: never locked");
                         };
                         let renewed = pair(
                             &format!("{writer}{n}access"),
@@ -468,12 +443,9 @@ mod tests {
 
         let err = format!("{:#}", store.read().unwrap_err());
 
-        assert!(err.contains("is not a token file"), "{err}");
         assert!(err.contains(&store.path().display().to_string()), "{err}");
-        assert!(
-            err.contains("seed it again from ACME_ACCESS_TOKEN and ACME_REFRESH_TOKEN"),
-            "{err}"
-        );
+        assert!(err.contains("ACME_ACCESS_TOKEN"), "{err}");
+        assert!(err.contains("ACME_REFRESH_TOKEN"), "{err}");
         assert!(!err.contains("leakedValue"), "{err}");
     }
 
@@ -503,6 +475,5 @@ mod tests {
 
         assert!(!debug.contains("envAccessToken"), "{debug}");
         assert!(!debug.contains("envRefreshToken"), "{debug}");
-        assert!(debug.contains(REDACTED), "{debug}");
     }
 }

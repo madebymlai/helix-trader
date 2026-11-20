@@ -22,7 +22,7 @@ use nautilus_trading::{
 use rstest::rstest;
 
 use super::*;
-use crate::strategy::{Declared, EmaArgs, IndicatorsConfig};
+use crate::strategy::{Declared, EmaArgs, IndicatorsConfig, Series};
 
 const STRATEGY: &str = "PROBE-001";
 const AUD: &str = "AUD/USD.SIM";
@@ -33,8 +33,6 @@ const NOW: u64 = 1_792_922_850_000_000_000;
 /// 2026-10-26T10:15:00Z, the next quarter hour.
 const QUARTER: u64 = 1_792_923_300_000_000_000;
 const SECOND: u64 = 1_000_000_000;
-/// How long after its time a decision fires: past the timer building
-/// the bar that closes then.
 const MARGIN: u64 = 10_000_000;
 
 #[derive(Debug)]
@@ -46,8 +44,6 @@ nautilus_strategy!(Probe);
 
 impl DataActor for Probe {}
 
-/// A strategy registered without a node at `now`, as the EMA's tests
-/// do, and its clock.
 fn registered(now: u64) -> (Probe, Rc<RefCell<VirtualClock>>) {
     let mut probe = Probe {
         core: StrategyCore::new(StrategyConfig {
@@ -82,13 +78,10 @@ fn every(minutes: i64) -> DecisionRule {
     DecisionRule::Every(SignedDuration::from_mins(minutes))
 }
 
-/// The last mid, Nautilus' exponential average of one, `[indicators.mid]`.
 const MID: Declared<EmaArgs> = Declared::new("mid");
-/// Nautilus' exponential average of two mids, the mean of the first two
-/// once both came, `[indicators.mid_2]`.
+/// An exponential average of two mids. Once both have arrived, it is their mean.
 const MID_2: Declared<EmaArgs> = Declared::new("mid_2");
 
-/// The tables of the features, as `[indicators]` holds them.
 fn tables() -> IndicatorsConfig {
     toml::from_str(
         r#"
@@ -99,15 +92,13 @@ fn tables() -> IndicatorsConfig {
     .unwrap()
 }
 
-/// The average of two mids of AUD/USD.
 fn features() -> Rc<FeatureSet> {
     FeatureSet::builder()
-        .quotes(InstrumentId::from(AUD), MID_2, &tables())
+        .feature(&[Series::quotes(InstrumentId::from(AUD))], MID_2, &tables())
         .build()
         .unwrap()
 }
 
-/// A quote of `instrument` with the mid `mid`, made at `ns`.
 fn quote_of(instrument: &str, mid: f64, ns: u64) -> QuoteTick {
     QuoteTick::new(
         InstrumentId::from(instrument),
@@ -120,12 +111,10 @@ fn quote_of(instrument: &str, mid: f64, ns: u64) -> QuoteTick {
     )
 }
 
-/// A quote of AUD/USD with the mid `mid`, a second before `NOW`.
 fn quote(mid: f64) -> QuoteTick {
     quote_of(AUD, mid, NOW - SECOND)
 }
 
-/// The rows published for `STRATEGY` from now on.
 fn published() -> Rc<RefCell<Vec<FeatureRow>>> {
     let rows = Rc::new(RefCell::new(vec![]));
     let sink = Rc::clone(&rows);
@@ -139,144 +128,98 @@ fn published() -> Rc<RefCell<Vec<FeatureRow>>> {
 }
 
 #[rstest]
-fn a_cadence_must_be_positive() {
-    assert!(every(0).validate().is_err());
-    assert!(every(-15).validate().is_err());
-    assert!(every(15).validate().is_ok());
+#[case::of_nought(0, Some("0s"))]
+#[case::below_nought(-15, Some("15m ago"))]
+#[case::positive(15, None)]
+fn a_cadence_must_be_positive(#[case] minutes: i64, #[case] refused: Option<&str>) {
+    let validated = every(minutes).validate();
+
+    match refused {
+        Some(interval) => {
+            let err = validated.unwrap_err().to_string();
+            assert!(err.contains(interval), "{err}");
+        }
+        None => validated.unwrap(),
+    }
 }
 
 #[rstest]
-fn a_cadence_decides_just_after_the_grid_of_its_interval() {
-    let (probe, clock) = registered(NOW);
+#[case::started_off_the_grid(NOW, SignedDuration::ZERO, QUARTER + MARGIN)]
+#[case::started_on_the_grid(QUARTER, SignedDuration::ZERO, QUARTER + MARGIN)]
+#[case::delayed(NOW, SignedDuration::from_secs(5), QUARTER + 5 * SECOND + MARGIN)]
+#[case::delayed_started_inside_its_delay(
+    QUARTER + 2 * SECOND,
+    SignedDuration::from_secs(5),
+    QUARTER + 5 * SECOND + MARGIN
+)]
+fn a_cadence_decides_just_after_the_grid_of_its_interval(
+    #[case] now: u64,
+    #[case] delay: SignedDuration,
+    #[case] next: u64,
+) {
+    let (probe, clock) = registered(now);
 
-    start(&probe, every(15), SignedDuration::ZERO).unwrap();
+    start(&probe, every(15), delay).unwrap();
 
     assert_eq!(
         clock.borrow().next_time_ns(DECISION_TIMER),
-        Some(UnixNanos::from(QUARTER + MARGIN))
+        Some(UnixNanos::from(next))
     );
 }
 
-/// Started on a grid time, before its decision: that decision is still
-/// to come.
+/// A decision reads data made up to its firing, its grid time plus delay and `MARGIN`. A 4 ms
+/// cadence, shorter than `MARGIN`, reads data made less than an interval before the epoch's firing.
 #[rstest]
-fn a_cadence_started_on_the_grid_keeps_its_decision() {
-    let (probe, clock) = registered(QUARTER);
-
-    start(&probe, every(15), SignedDuration::ZERO).unwrap();
-
+#[case::before_the_grid_time(every(15), SignedDuration::ZERO, QUARTER - 1, QUARTER)]
+#[case::at_the_grid_time(every(15), SignedDuration::ZERO, QUARTER, QUARTER)]
+#[case::at_the_firing(every(15), SignedDuration::ZERO, QUARTER + MARGIN, QUARTER)]
+#[case::after_the_firing(
+    every(15),
+    SignedDuration::ZERO,
+    QUARTER + MARGIN + 1,
+    QUARTER + 900 * SECOND
+)]
+#[case::at_a_delayed_firing(
+    every(15),
+    SignedDuration::from_secs(5),
+    QUARTER + 5 * SECOND + MARGIN,
+    QUARTER
+)]
+#[case::after_a_delayed_firing(
+    every(15),
+    SignedDuration::from_secs(5),
+    QUARTER + 5 * SECOND + MARGIN + 1,
+    QUARTER + 900 * SECOND
+)]
+#[case::at_the_epoch(every(15), SignedDuration::ZERO, 0, 0)]
+#[case::at_the_epochs_firing(every(15), SignedDuration::ZERO, MARGIN, 0)]
+#[case::after_the_epochs_firing(every(15), SignedDuration::ZERO, MARGIN + 1, 900 * SECOND)]
+#[case::within_an_interval_before_the_epochs_firing(
+    DecisionRule::Every(SignedDuration::from_millis(4)),
+    SignedDuration::ZERO,
+    7_000_000,
+    0
+)]
+fn data_is_read_first_by_the_first_decision_firing_at_or_after_it(
+    #[case] rule: DecisionRule,
+    #[case] delay: SignedDuration,
+    #[case] ns: u64,
+    #[case] grid: u64,
+) {
     assert_eq!(
-        clock.borrow().next_time_ns(DECISION_TIMER),
-        Some(UnixNanos::from(QUARTER + MARGIN))
+        decision_of(rule, delay, UnixNanos::from(ns)),
+        UnixNanos::from(grid)
     );
 }
 
-#[rstest]
-fn a_delayed_cadence_decides_its_delay_after_the_grid() {
-    let (probe, clock) = registered(NOW);
-
-    start(&probe, every(15), SignedDuration::from_secs(5)).unwrap();
-
-    assert_eq!(
-        clock.borrow().next_time_ns(DECISION_TIMER),
-        Some(UnixNanos::from(QUARTER + 5 * SECOND + MARGIN))
-    );
-}
-
-/// What is made up to a decision's firing, its grid time plus the margin,
-/// is that decision's to read first; what comes after, the next one's.
-#[rstest]
-fn data_is_read_first_by_the_first_decision_firing_at_or_after_it() {
-    let quarter = UnixNanos::from(QUARTER);
-    let of = |ns: u64| decision_of(every(15), SignedDuration::ZERO, UnixNanos::from(ns));
-
-    assert_eq!(of(QUARTER - 1), quarter);
-    assert_eq!(of(QUARTER), quarter);
-    assert_eq!(of(QUARTER + MARGIN), quarter);
-    assert_eq!(
-        of(QUARTER + MARGIN + 1),
-        UnixNanos::from(QUARTER + 900 * SECOND)
-    );
-}
-
-/// A delayed cadence's decision fires its delay later: it reads first what
-/// is made until then.
-#[rstest]
-fn data_inside_a_delay_is_read_first_by_the_delayed_decision() {
-    let of = |ns: u64| decision_of(every(15), SignedDuration::from_secs(5), UnixNanos::from(ns));
-
-    assert_eq!(of(QUARTER + 5 * SECOND + MARGIN), UnixNanos::from(QUARTER));
-    assert_eq!(
-        of(QUARTER + 5 * SECOND + MARGIN + 1),
-        UnixNanos::from(QUARTER + 900 * SECOND)
-    );
-}
-
-/// The grid starts at the epoch: what is made up to the firing of its
-/// decision there is that decision's to read first.
-#[rstest]
-fn data_up_to_the_firing_of_the_epochs_decision_is_read_by_it() {
-    let of = |ns: u64| decision_of(every(15), SignedDuration::ZERO, UnixNanos::from(ns));
-
-    assert_eq!(of(0), UnixNanos::default());
-    assert_eq!(of(MARGIN), UnixNanos::default());
-    assert_eq!(of(MARGIN + 1), UnixNanos::from(900 * SECOND));
-}
-
-/// A cadence of 4 ms, shorter than its margin: what is made less than an
-/// interval before the epoch's decision fires is that decision's.
-#[rstest]
-fn data_within_an_interval_before_the_epochs_decision_fires_is_read_by_it() {
-    let every_4_ms = DecisionRule::Every(SignedDuration::from_millis(4));
-
-    assert_eq!(
-        decision_of(every_4_ms, SignedDuration::ZERO, UnixNanos::from(7_000_000)),
-        UnixNanos::default()
-    );
-}
-
-/// A cadence of 4 ms: what is made 6 ms after the epoch, a whole interval
-/// before the epoch's decision fires, would be read first by a decision
-/// before the epoch.
+/// Data made at 6 ms, an interval before the epoch's firing at 10 ms, would be read first by a
+/// decision before the epoch.
 #[rstest]
 #[should_panic(expected = "a decision after the epoch")]
 fn data_read_first_by_a_decision_before_the_epoch_is_refused() {
     let every_4_ms = DecisionRule::Every(SignedDuration::from_millis(4));
 
     let _ = decision_of(every_4_ms, SignedDuration::ZERO, UnixNanos::from(6_000_000));
-}
-
-/// Started between a grid time and its delayed decision: that decision
-/// is still to come.
-#[rstest]
-fn a_delayed_cadence_started_inside_its_delay_keeps_the_next_decision() {
-    let (probe, clock) = registered(QUARTER + 2 * SECOND);
-
-    start(&probe, every(15), SignedDuration::from_secs(5)).unwrap();
-
-    assert_eq!(
-        clock.borrow().next_time_ns(DECISION_TIMER),
-        Some(UnixNanos::from(QUARTER + 5 * SECOND + MARGIN))
-    );
-}
-
-/// Nautilus fires the timer at its start plus whole intervals: the
-/// decisions after the first stay on the grid.
-#[rstest]
-fn the_cadence_keeps_the_grid_after_its_first_decision() {
-    let (probe, clock) = registered(NOW);
-    start(&probe, every(15), SignedDuration::ZERO).unwrap();
-
-    let events = clock
-        .borrow_mut()
-        .advance_time(UnixNanos::from(QUARTER + 15 * 60 * SECOND + MARGIN), true);
-
-    let times: Vec<u64> = events.iter().map(|e| e.ts_event.as_u64()).collect();
-    assert_eq!(
-        times,
-        [QUARTER + MARGIN, QUARTER + 15 * 60 * SECOND + MARGIN]
-    );
-    assert!(events.iter().all(is_decision));
 }
 
 #[rstest]
@@ -314,12 +257,12 @@ fn a_decision_publishes_the_features_keyed_by_the_strategy() {
 
     assert_eq!(row.strategy_id, StrategyId::from(STRATEGY));
     assert_eq!(row.ts_event, UnixNanos::from(NOW));
+    assert_eq!(row.ts_init, UnixNanos::from(NOW));
     assert_eq!(row.features.len(), 1);
     assert!((row.features[0] - 0.75).abs() < 1e-9, "{row:?}");
     assert_eq!(*rows.borrow(), [row]);
 }
 
-/// Warm features whose last quote of AUD/USD was made at `ns`.
 fn warm_until(ns: u64) -> Rc<FeatureSet> {
     let features = features();
     features
@@ -329,8 +272,6 @@ fn warm_until(ns: u64) -> Rc<FeatureSet> {
     features
 }
 
-/// A market closed for the last 16 minutes: its last quote is older
-/// than the decision 15 minutes ago.
 #[rstest]
 fn a_cadence_without_data_since_its_previous_decision_skips_and_publishes_nothing() {
     let (probe, _clock) = registered(NOW);
@@ -341,8 +282,6 @@ fn a_cadence_without_data_since_its_previous_decision_skips_and_publishes_nothin
     assert!(rows.borrow().is_empty());
 }
 
-/// The decision 15 minutes ago saw the data up to it: a quote made then
-/// is stale, one a nanosecond later fresh.
 #[rstest]
 fn data_since_the_previous_decision_is_fresh_and_data_up_to_it_stale() {
     let (probe, _clock) = registered(NOW);
@@ -355,8 +294,6 @@ fn data_since_the_previous_decision_is_fresh_and_data_up_to_it_stale() {
     assert!(decide(&probe, &warm_until(previous + 1), every(15), aud()).is_some());
 }
 
-/// The decision an interval after the epoch has the epoch's before it: a
-/// quote made at the epoch is stale, one a nanosecond later fresh.
 #[rstest]
 fn the_decision_an_interval_after_the_epoch_judges_its_data_from_the_epoch() {
     let (probe, _clock) = registered(900 * SECOND);
@@ -371,8 +308,6 @@ fn the_decision_an_interval_after_the_epoch_judges_its_data_from_the_epoch() {
     assert!(decide(&probe, &warm_at(1), every(15), aud()).is_some());
 }
 
-/// A decision less than an interval after the epoch has no previous
-/// decision to judge its data from.
 #[rstest]
 #[should_panic(expected = "a decision an interval after the epoch")]
 fn a_decision_within_an_interval_of_the_epoch_is_refused() {
@@ -381,15 +316,14 @@ fn a_decision_within_an_interval_of_the_epoch_is_refused() {
     let _ = decide(&probe, &features(), every(15), aud());
 }
 
-/// The traded instrument's market is closed, another's open: the
-/// decision would trade on stale prices.
+/// The traded instrument is closed and another is open.
 #[rstest]
 fn data_of_another_instrument_makes_no_decision_fresh() {
     let (probe, _clock) = registered(NOW);
     let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(InstrumentId::from(AUD), MID, &tables)
-        .quotes(InstrumentId::from(GBP), MID, &tables)
+        .feature(&[Series::quotes(InstrumentId::from(AUD))], MID, &tables)
+        .feature(&[Series::quotes(InstrumentId::from(GBP))], MID, &tables)
         .build()
         .unwrap();
     features
@@ -403,14 +337,11 @@ fn data_of_another_instrument_makes_no_decision_fresh() {
     assert!(decide(&probe, &features, every(15), InstrumentId::from(GBP)).is_some());
 }
 
-/// No feature reads AUD/USD, which the strategy reads as trades alone:
-/// its last trade in the cache, made a second ago, makes the decision
-/// fresh.
 #[rstest]
 fn a_trade_of_the_traded_instrument_in_the_cache_makes_the_decision_fresh() {
     let (probe, _clock) = registered(NOW);
     let features = FeatureSet::builder()
-        .quotes(InstrumentId::from(GBP), MID, &tables())
+        .feature(&[Series::quotes(InstrumentId::from(GBP))], MID, &tables())
         .build()
         .unwrap();
     features
@@ -453,8 +384,6 @@ fn the_fingerprint_changes_with_the_rule() {
     );
 }
 
-/// A cadence decides its build delay after the grid (`start`): another
-/// delay, 5 s for composite bars or none, is another fingerprint.
 #[rstest]
 fn the_fingerprint_changes_with_the_build_delay() {
     let features = features();
@@ -464,9 +393,7 @@ fn the_fingerprint_changes_with_the_build_delay() {
     assert_ne!(delayed(5), delayed(6));
 }
 
-/// Without a build delay the rule's part is as it was before the delay
-/// was keyed, so the datasets and stores of strategies reading no
-/// composite bars keep their fingerprints.
+/// Existing datasets keep their fingerprints.
 #[rstest]
 fn a_fingerprint_without_a_build_delay_keeps_the_rules_part_as_it_was() {
     let features = features();

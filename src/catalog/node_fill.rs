@@ -1,32 +1,23 @@
-//! Fills the catalog through a Nautilus node: the sources whose data client
-//! answers a request with a completed `DataResponseEnvelope`, which the
-//! data engine writes back to the catalog (`update_catalog`).
+//! Fills the catalog through a Nautilus node.
 //!
-//! `missing` turns series slices (`strategy::requirements::SeriesSlice`) into what the
-//! catalog lacks of them, by Nautilus' own count
-//! (`get_missing_intervals_for_request`): per contract its definitions, then
-//! each series' missing windows, the slivers between a live node's promoted
-//! files among them, each asked once and closed by its write-back.
-//! `missing_custom` does the same for custom series over their slices, a
-//! root's contract by contract, keyed by their data type's identifier,
-//! with no definition. A `NodeFill` gathers each
-//! source's data client with its requests and the source's period, and `run`
-//! builds a live node with those clients and the catalog, and an actor asking
-//! for one request at a time, naming the client it was added with, which the
-//! data engine sends it to before any venue route (`DataEngine::get_client`),
-//! with `update_catalog`, each series by Nautilus' time-range pipeline
-//! (`time_range_generator`): the data engine asks for a window of the period
-//! at a time, serves what the catalog holds, asks the client for the rest and
-//! writes each answer back over its window. A custom data request is asked
-//! whole, as the pipeline windows none, and written back over its window, as
-//! custom data under its type and identifier.
-//! The actor waits for Nautilus' answer to each request (`on_data_response`)
-//! with no deadline of its own, as Nautilus' requests have none: each client
-//! the fill asks answers every request, a failed one with the failure in its
-//! response envelope, and one that never answered would hold the run until
-//! it is interrupted. The actor records the first failure (a failed request,
-//! a failure envelope) and stops the node; `run` returns it. See
-//! `README.md`, "Fill paths".
+//! It serves the sources whose data client answers a request with a completed
+//! `DataResponseEnvelope`, which the data engine writes back (`update_catalog`).
+//!
+//! `missing` turns series slices into what the catalog lacks, using Nautilus' own count
+//! (`get_missing_intervals_for_request`). For each contract it returns the definition, then the
+//! missing windows of each series. These include the slivers between the promoted files of a live
+//! node. `missing_custom` does the same for custom series, with no definition.
+//!
+//! `run` builds a live node with the data client of each source, and an actor that asks one
+//! request at a time. Each request names the client the actor was added with, and the data engine
+//! sends the request to that client before any venue route (`DataEngine::get_client`). Each series
+//! goes through Nautilus' time-range pipeline (`time_range_generator`), one window of the period
+//! at a time. A custom data request is asked whole, because the pipeline windows none.
+//!
+//! The actor waits for each answer (`on_data_response`) with no deadline, as Nautilus' requests
+//! have none. Each client answers every request, and a failed request answers in its response
+//! envelope. The actor records the first failure and stops the node, and `run` returns the
+//! failure. See `README.md`, "Fill paths".
 
 use std::{cell::RefCell, collections::VecDeque, fmt::Display, path::Path, rc::Rc};
 
@@ -34,6 +25,7 @@ use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
+    clock::Clock,
     enums::Environment,
     factories::{ClientConfig, DataClientFactory},
     messages::data::{DataResponse, DataResponseEnvelope},
@@ -50,85 +42,86 @@ use serde_json::json;
 
 use super::catalog_config;
 use crate::{
-    strategy::requirements::{CustomSlice, SeriesSlice},
+    strategy::requirements::{CatalogSeries, CustomSlice, SeriesSlice},
     time_range, venues,
 };
 
-/// What a fill asks a source for: an instrument's definition, or one of
-/// its series.
+/// What a fill asks a source for: an instrument's definition, or one of its series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillData {
-    /// The instrument, its definition (`request_instrument`).
-    Instrument,
+    /// The instrument's definition (`request_instrument`).
+    Instrument(InstrumentId),
     /// `QuoteTick`s (`request_quotes`).
-    Quotes,
+    Quotes(InstrumentId),
     /// `TradeTick`s (`request_trades`).
-    Trades,
-    /// `OrderBookDepth` snapshots of the levels of its venue's book
-    /// (`request_book_depth`, `venues::book_format`).
-    Depth,
+    Trades(InstrumentId),
+    /// `OrderBookDepth` snapshots at the book levels of its venue (`venues::book_format`).
+    Depth(InstrumentId),
     /// `OrderBookDelta`s (`request_book_deltas`).
-    Deltas,
+    Deltas(InstrumentId),
     /// The `Bar`s of a bar type (`request_bars`).
     Bars(BarType),
     /// `FundingRateUpdate`s (`request_funding_rates`).
-    Funding,
+    Funding(InstrumentId),
 }
 
 impl FillData {
-    /// The series of `data_type` keyed by `identifier`, as the catalog
-    /// keys it (see `strategy::requirements::catalog_keys`): the bar type of bars, the
-    /// instrument id of anything else; an error for any other data type,
-    /// which no series slice holds (a custom series is asked by
-    /// `missing_custom`).
-    fn of(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Self> {
-        Ok(match data_type {
-            NautilusDataType::QuoteTick => Self::Quotes,
-            NautilusDataType::TradeTick => Self::Trades,
-            NautilusDataType::OrderBookDepth => Self::Depth,
-            NautilusDataType::OrderBookDelta => Self::Deltas,
-            NautilusDataType::Bar => Self::Bars(identifier.parse()?),
-            NautilusDataType::FundingRateUpdate => Self::Funding,
+    /// The contract the request targets.
+    #[must_use]
+    pub fn instrument_id(self) -> InstrumentId {
+        match self {
+            Self::Instrument(id)
+            | Self::Quotes(id)
+            | Self::Trades(id)
+            | Self::Depth(id)
+            | Self::Deltas(id)
+            | Self::Funding(id) => id,
+            Self::Bars(bar_type) => bar_type.instrument_id(),
+        }
+    }
+
+    fn of(series: &CatalogSeries) -> anyhow::Result<Self> {
+        let tick = match series {
+            CatalogSeries::Bars(bar_type) => return Ok(Self::Bars(*bar_type)),
+            CatalogSeries::Ticks(tick) => tick,
+        };
+        let id = tick.instrument_id;
+        Ok(match &tick.data {
+            NautilusDataType::QuoteTick => Self::Quotes(id),
+            NautilusDataType::TradeTick => Self::Trades(id),
+            NautilusDataType::OrderBookDepth => Self::Depth(id),
+            NautilusDataType::OrderBookDelta => Self::Deltas(id),
+            NautilusDataType::FundingRateUpdate => Self::Funding(id),
             other => anyhow::bail!(
                 "no source filled through the node serves the {other} of an instrument"
             ),
         })
-    }
-
-    /// The instrument whose series of this kind `identifier` keys.
-    fn instrument_of(self, identifier: &str) -> String {
-        match self {
-            Self::Bars(bar_type) => bar_type.instrument_id().to_string(),
-            _ => identifier.to_string(),
-        }
     }
 }
 
 impl Display for FillData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Instrument => f.write_str("definition"),
-            Self::Quotes => f.write_str("quotes"),
-            Self::Trades => f.write_str("trades"),
-            Self::Depth => f.write_str("book depths"),
-            Self::Deltas => f.write_str("book deltas"),
+            Self::Instrument(_) => f.write_str("definition"),
+            Self::Quotes(_) => f.write_str("quotes"),
+            Self::Trades(_) => f.write_str("trades"),
+            Self::Depth(_) => f.write_str("book depths"),
+            Self::Deltas(_) => f.write_str("book deltas"),
             Self::Bars(bar_type) => write!(
                 f,
                 "{}-{} bars",
                 bar_type.spec(),
                 bar_type.aggregation_source()
             ),
-            Self::Funding => f.write_str("funding rates"),
+            Self::Funding(_) => f.write_str("funding rates"),
         }
     }
 }
 
-/// A request of a fill: `data` of `instrument_id` over the closed window
-/// `[from, to]`, as the catalog stores intervals.
+/// A request of a fill, for `data` over the closed window `[from, to]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FillRequest {
     pub data: FillData,
-    pub instrument_id: InstrumentId,
     pub from: Timestamp,
     pub to: Timestamp,
 }
@@ -138,40 +131,37 @@ impl Display for FillRequest {
         write!(
             f,
             "the {} of {} over [{}, {}]",
-            self.data, self.instrument_id, self.from, self.to
+            self.data,
+            self.data.instrument_id(),
+            self.from,
+            self.to
         )
     }
 }
 
-/// What `catalog` lacks of `slices`, contract by contract in the order they
-/// first come: the contract's definition over the span of what it lacks,
-/// then each of its series' missing windows (Nautilus'
-/// `get_missing_intervals_for_request`), in time order. The slices are
-/// `DataRequirements::slices`, which reads no window of a series twice. A
-/// contract lacking nothing is left out.
+/// Returns what `catalog` lacks of `slices` (`DataRequirements::slices`).
+///
+/// The result goes contract by contract, in the order the contracts first appear. For each
+/// contract it lists the definition over the span it lacks, then the missing windows of each
+/// series in time order. A contract that lacks nothing is left out.
 ///
 /// # Errors
 ///
-/// Returns an error if a series is not the quotes, trades, book depths,
-/// book deltas, bars or funding of its slice's contract, or if the catalog
-/// cannot be read.
+/// Returns an error if:
+/// - A series is not the quotes, trades, book depths, book deltas, bars or funding of its slice's
+///   contract.
+/// - The catalog cannot be read.
 pub fn missing(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
 ) -> anyhow::Result<Vec<FillRequest>> {
     let mut contracts: Vec<(InstrumentId, Vec<FillRequest>)> = Vec::new();
-    for SeriesSlice {
-        series: (data_type, identifier),
-        slice,
-    } in slices
-    {
-        let id = slice.instrument_id;
-        let data = FillData::of(data_type, identifier)
+
+    for slice in slices {
+        let id = slice.series.instrument_id();
+        let (data_type, identifier) = &slice.series.key();
+        let data = FillData::of(&slice.series)
             .with_context(|| format!("the {data_type} of {identifier}"))?;
-        anyhow::ensure!(
-            data.instrument_of(identifier) == id.to_string(),
-            "the {data} of {identifier} on a slice of {id}"
-        );
         let (from, to) = (nanos(slice.from), nanos(slice.to));
         let gaps = catalog
             .get_missing_intervals_for_request(
@@ -183,7 +173,6 @@ pub fn missing(
             .with_context(|| format!("reading the stored {data} of {id}"))?;
         let requests = gaps.into_iter().map(|(from, to)| FillRequest {
             data,
-            instrument_id: id,
             from: at(from),
             to: at(to),
         });
@@ -199,8 +188,7 @@ pub fn missing(
             let from = requests.iter().map(|r| r.from).min().expect("a request");
             let to = requests.iter().map(|r| r.to).max().expect("a request");
             let definition = FillRequest {
-                data: FillData::Instrument,
-                instrument_id: id,
+                data: FillData::Instrument(id),
                 from,
                 to,
             };
@@ -209,10 +197,7 @@ pub fn missing(
         .collect())
 }
 
-/// A request of a fill of a custom series (see
-/// `strategy::requirements::CustomSeries`): the rows of its `data_type`
-/// over the closed window `[from, to]`, as the catalog stores intervals,
-/// stored under its type and identifier.
+/// A request of a fill for a custom series: its `data_type` over the closed window `[from, to]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomFillRequest {
     pub data_type: DataType,
@@ -230,12 +215,10 @@ impl Display for CustomFillRequest {
     }
 }
 
-/// What `catalog` lacks of each of `slices`, custom series over the part
-/// of a window each is read in, a root's contract by contract
-/// (`DataRequirements::custom_slices`): its missing windows (Nautilus'
-/// `get_missing_intervals_for_request`, of its type and identifier, a
-/// contract's id on a root), in time order, the slices in the order given.
-/// No definition: a custom series brings no instrument.
+/// Returns what `catalog` lacks of each of `slices` (`DataRequirements::custom_slices`).
+///
+/// The result is in time order, with the slices in the order given. It has no definition, because
+/// a custom series brings no instrument.
 ///
 /// # Errors
 ///
@@ -274,25 +257,25 @@ fn at(ns: u64) -> Timestamp {
     Timestamp::from(UnixNanos::from(ns))
 }
 
-/// A source's data client for the node: its factory and config. It takes
-/// no venue route: each request names the client it asks (see
-/// `NodeFill::add`), so two sources of one venue share a node.
+/// The data client of a source for the node.
+///
+/// It takes no venue route, because each request names its client. So two sources of one venue
+/// share a node.
 pub struct NodeClient {
     pub factory: Box<dyn DataClientFactory>,
     pub config: Box<dyn ClientConfig>,
 }
 
-/// The data clients of a fill through the node, and the requests asked of
-/// them, in order.
+/// The data clients of a fill, and the requests asked of them in order.
 #[derive(Default)]
 pub struct NodeFill {
     clients: Vec<NodeClient>,
     requests: Vec<Asked>,
 }
 
-/// A request of the fill, the client it names, and the period of the
-/// windows the data engine asks it in; a definition and custom data have
-/// none, being asked whole.
+/// A request of the fill, with its client and the period of its windows.
+///
+/// The period is none for a definition or custom data.
 #[derive(Debug, Clone)]
 struct Asked {
     request: Request,
@@ -300,8 +283,6 @@ struct Asked {
     period: Option<SignedDuration>,
 }
 
-/// What a request of the fill asks: an instrument's definition or one of
-/// its series, or a custom series.
 #[derive(Debug, Clone)]
 enum Request {
     Series(FillRequest),
@@ -318,19 +299,15 @@ impl Display for Request {
 }
 
 impl NodeFill {
-    /// A fill asking nothing yet.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Adds `requests` (see `missing`), asked of `client`, each series in
-    /// windows of `period(data)`: the most of it one answer holds, and one
-    /// write-back covers. A definition is asked whole. Each request names
-    /// the client by the name the node registers it under, its factory's,
-    /// which Nautilus' factories give the client they create, so the data
-    /// engine sends it there whatever its venue. No request leaves the
-    /// client out of the node, so it never connects.
+    /// Adds `requests` (see `missing`), asked of `client`.
+    ///
+    /// Each series is asked in windows of `period(data)`, the most one answer holds. A definition
+    /// is asked whole. With no request, the client stays out of the node and never connects.
     pub fn add(
         &mut self,
         client: NodeClient,
@@ -340,11 +317,10 @@ impl NodeFill {
         self.add_with_custom(client, requests, &[], period);
     }
 
-    /// Adds `requests` as `add` does, then `custom` (see `missing_custom`),
-    /// of custom series, asked of the same client, each whole:
+    /// Adds `requests` as `add` does, then adds `custom`, each asked whole.
+    ///
     /// Nautilus' time-range pipeline windows no custom data request
     /// (`data/src/engine/time_range.rs`, `is_time_range_pipeline_variant`).
-    /// No request of either kind leaves the client out of the node.
     pub fn add_with_custom(
         &mut self,
         client: NodeClient,
@@ -361,7 +337,7 @@ impl NodeFill {
             request: Request::Series(request),
             client: id,
             period: match request.data {
-                FillData::Instrument => None,
+                FillData::Instrument(_) => None,
                 data => Some(period(data)),
             },
         }));
@@ -372,8 +348,6 @@ impl NodeFill {
         }));
     }
 
-    /// What a fill was told to ask of instruments, each request with its
-    /// period.
     #[cfg(test)]
     pub(crate) fn asked(&self) -> Vec<(FillRequest, Option<SignedDuration>)> {
         self.requests
@@ -385,20 +359,29 @@ impl NodeFill {
             .collect()
     }
 
-    /// Fills the catalog in `catalog_dir` through a live node with the
-    /// clients and the catalog, one request at a time, each with
-    /// `update_catalog`, so the data engine writes each answer back over
-    /// its window, and what was written stays if a later window fails.
-    /// Nothing asked builds no node; a node built is disposed whatever
-    /// comes of it (`concepts/architecture.md`, "Processes and threads").
+    /// Fills the catalog in `catalog_dir` through a live node.
+    ///
+    /// It sends one request at a time with `update_catalog`, so what was written stays if a later
+    /// window fails.
+    ///
+    /// The node runs on the clocks that `clock` makes (`LiveNodeBuilder::with_clock_factory`). A
+    /// fill of history passes Nautilus' `LiveClock`. Nothing asked builds no node. A node built is
+    /// disposed whatever happens (`concepts/architecture.md`, "Processes and threads").
     ///
     /// # Errors
     ///
-    /// Returns an error if the node fails to build or run; naming the
-    /// request, if one fails, its client answers with a failure or its
-    /// answer is not written back; or if the node stops before every
-    /// request is answered. What was written before stays.
-    pub async fn run(self, catalog_dir: &Path) -> anyhow::Result<()> {
+    /// Returns an error if:
+    /// - The node fails to build or run.
+    /// - A request fails, because its client answers with a failure or its answer is not written
+    ///   back. The error names the request.
+    /// - The node stops before every request is answered.
+    ///
+    /// What was written before stays.
+    pub async fn run(
+        self,
+        catalog_dir: &Path,
+        clock: impl Fn() -> Rc<RefCell<dyn Clock>> + 'static,
+    ) -> anyhow::Result<()> {
         let Self { clients, requests } = self;
         if requests.is_empty() {
             log::info!("The catalog holds every window asked for: no node");
@@ -418,7 +401,9 @@ impl NodeFill {
         };
         let mut builder = LiveNodeBuilder::from_config(config)?
             .with_name("FILL")
-            .with_delay_post_stop_secs(0);
+            .with_delay_post_stop_secs(0)
+            .with_clock_factory(clock);
+
         for client in clients {
             builder = builder.add_data_client(None, client.factory, client.config)?;
         }
@@ -454,8 +439,6 @@ impl NodeFill {
     }
 }
 
-/// How the actor's requests ended: how many were answered, the first
-/// failure, and whether every request was answered.
 #[derive(Debug, Default)]
 struct Outcome {
     answered: usize,
@@ -463,22 +446,16 @@ struct Outcome {
     done: bool,
 }
 
-/// Asks for `requests` one at a time, the next once the one before is
-/// answered, and stops the node after the last answer or the first
-/// failure.
 #[derive(Debug)]
 struct FillActor {
     core: DataActorCore,
     requests: VecDeque<Asked>,
-    /// The request in flight and its id.
     pending: Option<(UUID4, Request)>,
-    /// The rows the request in flight has got so far, over its windows.
     rows: usize,
     outcome: Rc<RefCell<Outcome>>,
 }
 
 impl FillActor {
-    /// Asks for the next request or, all answered, stops the node.
     fn next(&mut self) {
         let Some(asked) = self.requests.pop_front() else {
             self.outcome.borrow_mut().done = true;
@@ -494,16 +471,17 @@ impl FillActor {
         }
     }
 
-    /// Sends `asked` to the data engine, naming its client, with
-    /// `update_catalog`, a series in windows of its period, custom data
-    /// whole; depth at the levels of its venue's book
-    /// (`venues::book_format`), the one format of the catalog's series of
-    /// it, which the venue's history serves in that format or not at all.
+    /// Sends `asked` to the data engine with `update_catalog`.
+    ///
+    /// Depth is asked at the levels of its venue's book (`venues::book_format`), which is the one
+    /// format of the catalog's depth series.
     ///
     /// # Errors
     ///
-    /// Returns an error if Nautilus refuses the request, or naming the
-    /// instrument if it asks the depth of a venue whose book has none.
+    /// Returns an error if:
+    /// - Nautilus refuses the request.
+    /// - The request asks for the depth of a venue whose book has none. The error names the
+    ///   instrument.
     fn issue(&mut self, asked: Asked) -> anyhow::Result<UUID4> {
         let Asked {
             request,
@@ -519,12 +497,8 @@ impl FillActor {
             params.extend(time_range::params(from, to, period));
         }
         let params = Some(Params::new(params.into_iter().collect()));
-        let FillRequest {
-            data,
-            instrument_id,
-            ..
-        } = match request {
-            Request::Series(request) => request,
+        let data = match request {
+            Request::Series(request) => request.data,
             Request::Custom(request) => {
                 return self.request_data(
                     request.data_type,
@@ -537,13 +511,18 @@ impl FillActor {
             }
         };
         let (from, to, client) = (Some(from), Some(to), Some(client));
+
         match data {
-            FillData::Instrument => {
+            FillData::Instrument(instrument_id) => {
                 self.request_instrument(instrument_id, from, to, client, params)
             }
-            FillData::Quotes => self.request_quotes(instrument_id, from, to, None, client, params),
-            FillData::Trades => self.request_trades(instrument_id, from, to, None, client, params),
-            FillData::Depth => {
+            FillData::Quotes(instrument_id) => {
+                self.request_quotes(instrument_id, from, to, None, client, params)
+            }
+            FillData::Trades(instrument_id) => {
+                self.request_trades(instrument_id, from, to, None, client, params)
+            }
+            FillData::Depth(instrument_id) => {
                 let levels = venues::book_format(instrument_id.venue)
                     .and_then(|book| book.depth)
                     .with_context(|| {
@@ -554,17 +533,16 @@ impl FillActor {
                     })?;
                 self.request_book_depth(instrument_id, from, to, None, Some(levels), client, params)
             }
-            FillData::Deltas => {
+            FillData::Deltas(instrument_id) => {
                 self.request_book_deltas(instrument_id, from, to, None, client, params)
             }
             FillData::Bars(bar_type) => self.request_bars(bar_type, from, to, None, client, params),
-            FillData::Funding => {
+            FillData::Funding(instrument_id) => {
                 self.request_funding_rates(instrument_id, from, to, None, client, params)
             }
         }
     }
 
-    /// Records `reason` as the fill's failure and stops the node.
     fn fail(&mut self, reason: String) {
         log::error!("{reason}");
         self.pending = None;
@@ -605,7 +583,7 @@ impl DataActor for FillActor {
                 .map_or(0, Vec::len),
             _ => 0,
         };
-        // A window of the request, written back; the next one is on its way.
+        // A window of the request was written back, and the next is on its way
         if !response.completed() {
             return Ok(());
         }
@@ -630,16 +608,15 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::{rolls::Slice, strategy::requirements::CustomSeries};
+    use crate::strategy::requirements::{CustomSeries, TickSeries};
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
     }
 
-    fn request(data: FillData, id: &str, from: &str, to: &str) -> FillRequest {
+    fn request(data: FillData, from: &str, to: &str) -> FillRequest {
         FillRequest {
             data,
-            instrument_id: InstrumentId::from(id),
             from: ts(from),
             to: ts(to),
         }
@@ -647,12 +624,12 @@ mod tests {
 
     fn slice(data_type: NautilusDataType, id: &str, from: &str, to: &str) -> SeriesSlice {
         SeriesSlice {
-            series: (data_type, id.to_string()),
-            slice: Slice {
+            series: CatalogSeries::Ticks(TickSeries {
+                data: data_type,
                 instrument_id: InstrumentId::from(id),
-                from: ts(from),
-                to: ts(to),
-            },
+            }),
+            from: ts(from),
+            to: ts(to),
         }
     }
 
@@ -687,32 +664,27 @@ mod tests {
             asked,
             [
                 request(
-                    FillData::Instrument,
-                    "GCQ26.GLBX",
+                    FillData::Instrument(InstrumentId::from("GCQ26.GLBX")),
                     "2026-07-01T00:00:00Z",
                     "2026-07-30T23:59:59.999999999Z"
                 ),
                 request(
-                    FillData::Depth,
-                    "GCQ26.GLBX",
+                    FillData::Depth(InstrumentId::from("GCQ26.GLBX")),
                     "2026-07-01T00:00:00Z",
                     "2026-07-30T23:59:59.999999999Z"
                 ),
                 request(
-                    FillData::Instrument,
-                    "GCZ26.GLBX",
+                    FillData::Instrument(InstrumentId::from("GCZ26.GLBX")),
                     "2026-07-31T00:00:00Z",
                     "2026-08-10T00:00:00Z"
                 ),
                 request(
-                    FillData::Depth,
-                    "GCZ26.GLBX",
+                    FillData::Depth(InstrumentId::from("GCZ26.GLBX")),
                     "2026-07-31T00:00:00Z",
                     "2026-08-10T00:00:00Z"
                 ),
                 request(
-                    FillData::Trades,
-                    "GCZ26.GLBX",
+                    FillData::Trades(InstrumentId::from("GCZ26.GLBX")),
                     "2026-08-01T00:00:00Z",
                     "2026-08-10T00:00:00Z"
                 ),
@@ -732,11 +704,7 @@ mod tests {
         )
     }
 
-    #[rstest]
-    fn a_stored_series_lacks_only_what_is_outside_its_stored_intervals() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        // Stored over Wednesday, a weekend inside it covered as well.
+    fn store_trades_over_wednesday(catalog: &ParquetDataCatalog) {
         catalog
             .write_to_parquet(
                 &[trade("GCZ26.GLBX", "2026-10-21T10:00:00Z")],
@@ -745,36 +713,76 @@ mod tests {
                 None,
             )
             .unwrap();
-        let slices = [slice(
+    }
+
+    fn store_bars_over_wednesday(catalog: &ParquetDataCatalog) {
+        let price = Price::from("4000.0");
+        let close = ts("2026-10-21T10:00:00Z");
+        let bar = Bar::new(
+            BarType::from(BARS),
+            price,
+            price,
+            price,
+            price,
+            Quantity::from(1),
+            (close - SignedDuration::from_mins(1)).into(),
+            close.into(),
+        );
+        catalog
+            .write_to_parquet(
+                &[bar],
+                Some(ts("2026-10-21T00:00:00Z").into()),
+                Some(ts("2026-10-21T23:59:59.999999999Z").into()),
+                None,
+            )
+            .unwrap();
+    }
+
+    #[rstest]
+    #[case::trades(
+        store_trades_over_wednesday,
+        slice(
             NautilusDataType::TradeTick,
             "GCZ26.GLBX",
             "2026-10-20T00:00:00Z",
-            "2026-10-23T00:00:00Z",
-        )];
+            "2026-10-23T00:00:00Z"
+        ),
+        FillData::Trades(InstrumentId::from("GCZ26.GLBX")),
+        "2026-10-23T00:00:00Z"
+    )]
+    #[case::bars(
+        store_bars_over_wednesday,
+        bars_slice(BARS, "2026-10-20T00:00:00Z", "2026-10-22T00:00:00Z"),
+        FillData::Bars(BarType::from(BARS)),
+        "2026-10-22T00:00:00Z"
+    )]
+    fn a_stored_series_lacks_only_what_is_outside_its_stored_intervals(
+        #[case] store: fn(&ParquetDataCatalog),
+        #[case] slice: SeriesSlice,
+        #[case] data: FillData,
+        #[case] to: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        store(&catalog);
 
-        let asked = missing(&catalog, &slices).unwrap();
+        let asked = missing(&catalog, &[slice]).unwrap();
 
         assert_eq!(
-            asked[1..],
+            asked,
             [
                 request(
-                    FillData::Trades,
-                    "GCZ26.GLBX",
+                    FillData::Instrument(InstrumentId::from("GCZ26.GLBX")),
+                    "2026-10-20T00:00:00Z",
+                    to
+                ),
+                request(
+                    data,
                     "2026-10-20T00:00:00Z",
                     "2026-10-20T23:59:59.999999999Z"
                 ),
-                request(
-                    FillData::Trades,
-                    "GCZ26.GLBX",
-                    "2026-10-22T00:00:00Z",
-                    "2026-10-23T00:00:00Z"
-                ),
+                request(data, "2026-10-22T00:00:00Z", to),
             ]
-        );
-        assert_eq!(asked[0].data, FillData::Instrument);
-        assert_eq!(
-            (asked[0].from, asked[0].to),
-            (ts("2026-10-20T00:00:00Z"), ts("2026-10-23T00:00:00Z"))
         );
     }
 
@@ -800,10 +808,7 @@ mod tests {
         assert_eq!(missing(&catalog, &slices).unwrap(), []);
     }
 
-    /// Quote files of `id` in the catalog in `dir` over the intervals of
-    /// `files`, each named as a live node's promotion names it: its
-    /// interval and a replay identity. The files are empty: coverage reads
-    /// their names.
+    /// Empty quote files named as a live node's promotion names them.
     fn promoted_quotes(dir: &Path, id: &str, files: &[(&str, &str)]) {
         let quotes = dir.join("data/quotes").join(id.replace('/', ""));
         std::fs::create_dir_all(&quotes).unwrap();
@@ -814,9 +819,6 @@ mod tests {
         }
     }
 
-    /// The slivers a live node's daily promotions leave between their files
-    /// are what the catalog lacks, each asked with the definition over it.
-    /// A run-start directory an older node left is ignored.
     #[rstest]
     fn a_sliver_between_promoted_files_is_asked_with_its_definition() {
         let dir = tempfile::tempdir().unwrap();
@@ -840,8 +842,7 @@ mod tests {
         let asked = missing(&catalog, &slices).unwrap();
 
         let sliver = request(
-            FillData::Quotes,
-            "XAUUSD.ICMARKETS",
+            FillData::Quotes(InstrumentId::from("XAUUSD.ICMARKETS")),
             "2026-10-21T23:59:59.500000001Z",
             "2026-10-21T23:59:59.699999999Z",
         );
@@ -849,7 +850,7 @@ mod tests {
             asked,
             [
                 FillRequest {
-                    data: FillData::Instrument,
+                    data: FillData::Instrument(InstrumentId::from("XAUUSD.ICMARKETS")),
                     ..sliver
                 },
                 sliver
@@ -859,149 +860,54 @@ mod tests {
 
     const BARS: &str = "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL";
 
-    fn bars_slice(bar_type: &str, id: &str, from: &str, to: &str) -> SeriesSlice {
+    fn bars_slice(bar_type: &str, from: &str, to: &str) -> SeriesSlice {
         SeriesSlice {
-            series: (NautilusDataType::Bar, bar_type.to_string()),
-            slice: Slice {
-                instrument_id: InstrumentId::from(id),
-                from: ts(from),
-                to: ts(to),
-            },
+            series: CatalogSeries::Bars(BarType::from(bar_type)),
+            from: ts(from),
+            to: ts(to),
         }
     }
 
     #[rstest]
-    fn bars_are_asked_as_their_bar_type_over_their_slice_after_the_definition() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let (from, to) = ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z");
-        let slices = [bars_slice(BARS, "GCZ26.GLBX", from, to)];
-
-        let asked = missing(&catalog, &slices).unwrap();
-
-        assert_eq!(
-            asked,
-            [
-                request(FillData::Instrument, "GCZ26.GLBX", from, to),
-                request(FillData::Bars(BarType::from(BARS)), "GCZ26.GLBX", from, to),
-            ]
-        );
-    }
-
-    #[rstest]
-    fn stored_bars_lack_only_what_is_outside_their_bar_type_s_stored_interval() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let price = Price::from("4000.0");
-        let close = ts("2026-10-21T10:00:00Z");
-        let bar = Bar::new(
-            BarType::from(BARS),
-            price,
-            price,
-            price,
-            price,
-            Quantity::from(1),
-            (close - SignedDuration::from_mins(1)).into(),
-            close.into(),
-        );
-        catalog
-            .write_to_parquet(
-                &[bar],
-                Some(ts("2026-10-21T00:00:00Z").into()),
-                Some(ts("2026-10-21T23:59:59.999999999Z").into()),
-                None,
-            )
-            .unwrap();
-        let slices = [bars_slice(
-            BARS,
-            "GCZ26.GLBX",
-            "2026-10-20T00:00:00Z",
-            "2026-10-22T00:00:00Z",
-        )];
-
-        let asked = missing(&catalog, &slices).unwrap();
-
-        let bars = FillData::Bars(BarType::from(BARS));
-        assert_eq!(
-            asked[1..],
-            [
-                request(
-                    bars,
-                    "GCZ26.GLBX",
-                    "2026-10-20T00:00:00Z",
-                    "2026-10-20T23:59:59.999999999Z"
-                ),
-                request(
-                    bars,
-                    "GCZ26.GLBX",
-                    "2026-10-22T00:00:00Z",
-                    "2026-10-22T00:00:00Z"
-                ),
-            ]
-        );
-    }
-
-    #[rstest]
-    fn bars_on_a_slice_of_another_contract_are_refused_naming_both() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let slices = [bars_slice(
-            BARS,
-            "GCQ26.GLBX",
-            "2026-10-20T00:00:00Z",
-            "2026-10-21T00:00:00Z",
-        )];
-
-        let err = format!("{:#}", missing(&catalog, &slices).unwrap_err());
-
-        assert!(err.contains(BARS), "{err}");
-        assert!(err.contains("GCQ26.GLBX"), "{err}");
-    }
-
-    #[rstest]
-    fn funding_is_asked_over_its_slice_after_the_definition() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let (from, to) = ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z");
-        let slices = [slice(
+    #[case::bars(
+        bars_slice(BARS, "2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"),
+        FillData::Bars(BarType::from(BARS))
+    )]
+    #[case::funding(
+        slice(
             NautilusDataType::FundingRateUpdate,
             "BTC-USDT-SWAP.OKX",
-            from,
-            to,
-        )];
+            "2026-10-20T00:00:00Z",
+            "2026-10-21T00:00:00Z"
+        ),
+        FillData::Funding(InstrumentId::from("BTC-USDT-SWAP.OKX"))
+    )]
+    #[case::book_deltas(
+        slice(
+            NautilusDataType::OrderBookDelta,
+            "GCZ26.GLBX",
+            "2026-10-20T00:00:00Z",
+            "2026-10-21T00:00:00Z"
+        ),
+        FillData::Deltas(InstrumentId::from("GCZ26.GLBX"))
+    )]
+    fn a_series_is_asked_as_its_kind_over_its_slice_after_the_definition(
+        #[case] slice: SeriesSlice,
+        #[case] data: FillData,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let id = data.instrument_id();
+        let (from, to) = ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z");
 
-        let asked = missing(&catalog, &slices).unwrap();
+        let asked = missing(&catalog, &[slice]).unwrap();
 
         assert_eq!(
             asked,
             [
-                request(FillData::Instrument, "BTC-USDT-SWAP.OKX", from, to),
-                request(FillData::Funding, "BTC-USDT-SWAP.OKX", from, to),
+                request(FillData::Instrument(id), from, to),
+                request(data, from, to),
             ]
-        );
-    }
-
-    #[rstest]
-    fn book_deltas_are_asked_as_deltas_over_their_slice() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let slices = [slice(
-            NautilusDataType::OrderBookDelta,
-            "GCZ26.GLBX",
-            "2026-10-21T00:00:00Z",
-            "2026-10-22T00:00:00Z",
-        )];
-
-        let asked = missing(&catalog, &slices).unwrap();
-
-        assert_eq!(
-            asked[1],
-            request(
-                FillData::Deltas,
-                "GCZ26.GLBX",
-                "2026-10-21T00:00:00Z",
-                "2026-10-22T00:00:00Z"
-            )
         );
     }
 
@@ -1009,8 +915,6 @@ mod tests {
         Params::new([("source".to_string(), json!("bond_yields"))].into())
     }
 
-    /// No definition: a custom series brings no instrument. Asked by its
-    /// data type as Nautilus builds it.
     #[rstest]
     fn a_custom_series_is_lacking_over_its_window_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -1038,10 +942,6 @@ mod tests {
         );
     }
 
-    /// The bond yields under GC's id, a root GC rolls from GCQ26 into GCZ26
-    /// at 00:00 UTC on 29 July 2026 (`rolls/README.md`): each contract's
-    /// series lacks over its slice, asked by its data type, the
-    /// contract's id its identifier, the type and metadata kept.
     #[rstest]
     fn a_roots_custom_series_is_lacking_contract_by_contract_over_its_slices() {
         let dir = tempfile::tempdir().unwrap();
