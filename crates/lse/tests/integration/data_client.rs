@@ -2,10 +2,10 @@
 //! replays LSE's captured exports, refusals and catalogues. Its subscriptions run against the mock
 //! sockets.
 //!
-//! A test's doc says only what its capture or case adds. A request for something the cache or the client
-//! does not know fails, naming it, before LSE is asked. LSE loads a day the morning after, so a
-//! request reaching into a day it has not loaded (`http::export`) is answered plain, which the data
-//! engine writes to no catalog (`DataEngine::response`), and a fill asks again.
+//! A test's doc says only what its capture or case adds. A request for something the cache or the
+//! client does not know fails, naming it, before LSE is asked. LSE loads a day the morning after,
+//! so a request reaching into a day it has not loaded (`http::export`) is answered plain, which the
+//! data engine writes to no catalog (`DataEngine::response`), and a fill asks again.
 
 use std::{
     cell::RefCell,

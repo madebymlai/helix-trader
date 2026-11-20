@@ -4,8 +4,8 @@
 //! `BUILT_AFTER` its close, as live does. A model strategy decides once the hour bar closing on
 //! its grid is built.
 //!
-//! The k-th minute bar after 06:00 opens at 600 + 0.01 x (37 k mod 101). The fill stores minute bars
-//! from 06:00 to 15:00, and the runs start at 10:30.
+//! The k-th minute bar after 06:00 opens at 600 + 0.01 x (37 k mod 101). The fill stores minute
+//! bars from 06:00 to 15:00, and the runs start at 10:30.
 
 use std::path::Path;
 

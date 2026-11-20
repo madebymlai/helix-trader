@@ -128,7 +128,8 @@ async fn a_subscription_brings_the_ticks_of_its_symbol() {
 }
 
 /// The clock moves on 25 s (the interval LSE's Python client keeps), then runs for the 10 s the
-/// peer waits for the ping. A ping within about 35 s bounds the interval without pinning it at 25 s.
+/// peer waits for the ping. A ping within about 35 s bounds the interval without pinning it at
+/// 25 s.
 #[tokio::test]
 async fn the_keepalive_is_lse_s_ping() {
     let peer = MockLseSocket::start(|_, frame| data_ws_answer(frame));
