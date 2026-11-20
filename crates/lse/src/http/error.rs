@@ -1,4 +1,4 @@
-//! The HTTP client's failures, and which of them a retry may lift.
+//! The HTTP client's failures, and which a retry may lift.
 
 use std::time::Duration;
 
@@ -19,18 +19,16 @@ pub enum LseHttpError {
         refusal: Box<LseRefusal>,
         retry_after: Option<Duration>,
     },
-    /// An answer LSE's docs do not describe: its status and the start of its body.
+    /// An answer LSE's docs do not describe.
     #[error("LSE answered {status}, not as its docs say: {body}")]
     Unexpected { status: u16, body: String },
-    /// An answer whose body is not what LSE's docs say it holds: what it should have been and why
-    /// it is not.
+    /// An answer whose body is not what LSE's docs say it holds.
     #[error("LSE's {what} is not as its docs say: {source}")]
     Malformed {
         what: &'static str,
         source: serde_json::Error,
     },
-    /// A whole file whose SHA-256 is not the one LSE gave with it, with LSE's id of the export
-    /// (`x-export-id`), if it gave one.
+    /// A whole file whose SHA-256 is not the one LSE gave, with the `x-export-id`, if any.
     #[error(
         "the file of LSE's export {}, {len} bytes, does not have the SHA-256 LSE gave for it",
         export_id.as_deref().unwrap_or("with no id")
@@ -47,11 +45,9 @@ pub enum LseHttpError {
 impl LseHttpError {
     /// Returns whether asking again may get the answer.
     ///
-    /// A transient failure is a transport failure or a timeout, a file cut short among them, and
-    /// LSE's refusals for the moment: a 429 of calls or of the one download at a time, and a busy
-    /// 503. A 429 of a quota is not, as it lasts until it resets. A whole file whose SHA-256 is not
-    /// LSE's is no transient failure either: LSE builds the file before sending it, so its checksum
-    /// is exact (LSE's docs, "Files").
+    /// Transient are transport failures and timeouts, a 429 of calls or of the one download at a
+    /// time, and a busy 503. A quota 429 lasts until it resets, and a checksum mismatch is
+    /// permanent, as LSE builds the file before sending it (LSE's docs, "Files").
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Transport(e) => matches!(
