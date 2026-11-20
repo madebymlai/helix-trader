@@ -1,5 +1,5 @@
-//! A decision on stores under a temp dir, with no strategy: the pick between the sides on their
-//! pair's calibrated expected R, swapping model sets, refused model sets, the meta's margin.
+//! Decisions on stores under a temp dir, with no strategy: the pick between sides, swapping model
+//! sets, refused model sets, the meta's margin.
 
 use std::path::Path;
 
@@ -27,11 +27,10 @@ use crate::{
 const MIDNIGHT: &str = "2026-10-22T00:00:00Z";
 const NOON: &str = "2026-10-22T12:00:00Z";
 
-/// The decision's features: the mid of 0.7, which a baseline does not read.
+/// The mid, which a baseline does not read.
 const ROW: [f64; 1] = [0.7];
 
-/// Each side's row of `ROW` on the tests' time-only target: the mid, then the side's entry cost,
-/// 0.23R.
+/// Each side's row: the mid, then an entry cost of 0.23R.
 fn rows_of_one() -> PerSide<SideRow> {
     PerSide {
         long: SideRow::new(&ROW, &[0.23]),
@@ -39,13 +38,11 @@ fn rows_of_one() -> PerSide<SideRow> {
     }
 }
 
-/// The models of `config` under `models`, listed now.
 fn listed(models: &Path, config: &ModelConfig) -> DecidingModels {
     DecidingModels::new(&model_store(models, &features(), config)).unwrap()
 }
 
-/// Those of `listed`, the model set of the long's of `long` tenths and the short's of `short`
-/// tenths, if any, published from midnight first.
+/// `listed` after publishing from midnight a model set of the long's and short's tenths, if any.
 fn listed_with(
     models: &Path,
     config: &ModelConfig,
@@ -61,18 +58,15 @@ fn listed_with(
     listed(models, config)
 }
 
-/// What `models` decide at `time` on `ROW`.
 fn decided(models: &mut DecidingModels, time: &str) -> Option<Taken> {
     models.decide(at(time), &ROW, &rows_of_one()).unwrap()
 }
 
-/// The net R the trade `decided` decides expects.
 fn expected(models: &mut DecidingModels, time: &str) -> Option<f64> {
     decided(models, time).map(|taken| taken.expected_r.as_f64())
 }
 
-/// `actual` is `expected`, up to the rounding of a pair's calibration, which leaves a side's
-/// prediction as it is only to the last bits.
+/// Equal up to the rounding of a pair's calibration.
 fn near(actual: Option<f64>, expected: Option<f64>) {
     let near = match (actual, expected) {
         (Some(actual), Some(expected)) => (actual - expected).abs() < 1e-12,
@@ -81,7 +75,6 @@ fn near(actual: Option<f64>, expected: Option<f64>) {
     assert!(near, "{actual:?} != {expected:?}");
 }
 
-/// The side of the trade `models` decide at noon on `ROW`.
 fn side_taken(models: &mut DecidingModels) -> Option<Side> {
     decided(models, NOON).map(|taken| taken.side)
 }
@@ -93,8 +86,8 @@ fn no_model_in_the_store_gives_no_trade() {
     assert_eq!(decided(&mut listed(models.path(), &config()), NOON), None);
 }
 
-/// A model learned targets net of its dataset runs' commission: a config declaring another does not
-/// trade on it.
+/// A model learned targets net of its dataset runs' commission, so a config declaring another does
+/// not trade on it.
 #[rstest]
 fn a_model_of_another_commission_gives_no_trade() {
     let models = tempfile::tempdir().unwrap();
@@ -171,7 +164,6 @@ fn a_model_set_published_after_a_decision_is_used_from_the_next() {
     assert_eq!(expected(&mut models, "2026-10-22T13:00:00Z"), Some(r(9)));
 }
 
-/// When to list is the caller's: the meta's examples decide on the stores as they are when made.
 #[rstest]
 fn a_model_set_published_after_the_listing_is_not_used_until_listed_again() {
     let root = tempfile::tempdir().unwrap();
@@ -184,7 +176,7 @@ fn a_model_set_published_after_the_listing_is_not_used_until_listed_again() {
     assert_eq!(expected(&mut models, "2026-10-22T13:00:00Z"), Some(r(7)));
 }
 
-/// The store, under the models root, fails to list: its reason names it.
+/// The error names the models root.
 #[rstest]
 fn an_unreadable_store_fails_the_models_when_built() {
     let root = tempfile::tempdir().unwrap();
@@ -196,8 +188,7 @@ fn an_unreadable_store_fails_the_models_when_built() {
     assert!(err.contains(&root.path().display().to_string()), "{err}");
 }
 
-/// A failed listing keeps the previous list: the model set of 10:30, published before it, is not
-/// used.
+/// The model set of 10:30, published before the failed listing, is not used.
 #[rstest]
 fn a_failed_listing_keeps_the_previous_list() {
     let root = tempfile::tempdir().unwrap();
@@ -229,7 +220,6 @@ fn a_store_listing_again_is_listed_again() {
     assert_eq!(expected(&mut models, NOON), Some(r(9)));
 }
 
-/// Both sides traded from nought, their trades taken by `meta`.
 fn with_both_and_meta() -> ModelConfig {
     ModelConfig {
         meta: Some(meta()),
@@ -237,9 +227,9 @@ fn with_both_and_meta() -> ModelConfig {
     }
 }
 
-/// A model set of `with_both_and_meta` valid from `valid_from`: its long predicting an R of
-/// `r(long)`, its short of 3, expecting a loss, never picked, and its meta model of 8, expecting
-/// 0.1 + 0.5 r(8) = 0.25R, which clears its margin of 0.15R.
+/// A model set of `with_both_and_meta`: the long predicts `r(long)`, the short `r(3)` = -0.2, never
+/// picked, and the meta `r(8)` = 0.3, expecting 0.1 + 0.5 * 0.3 = 0.25R, clearing its margin of
+/// 0.15R.
 fn model_set(valid_from: &str, long: usize) -> StoredModelSet {
     let (features, config) = (features(), with_both_and_meta());
     let meta = meta_baseline(&features, &config, 8);
@@ -252,7 +242,7 @@ fn model_set(valid_from: &str, long: usize) -> StoredModelSet {
     )
 }
 
-/// The model set's `side` model, a side's, or the meta's of none.
+/// The model of `side`, or the meta's if none.
 fn model_of(model_set: &mut StoredModelSet, side: Option<Side>) -> &mut StoredModel {
     match side {
         Some(side) => model_set
@@ -264,21 +254,20 @@ fn model_of(model_set: &mut StoredModelSet, side: Option<Side>) -> &mut StoredMo
     }
 }
 
-/// The model of a level of a model set, a side's or the meta's of none, failing a check.
+/// Mutates a model set to fail a check.
 type Refuse = fn(&mut StoredModelSet);
 
-/// Refuses the long's model: of other feature names.
+/// Other feature names.
 fn long_of_other_feature_names(model_set: &mut StoredModelSet) {
     model_of(model_set, Some(Side::Long)).manifest.feature_names = vec!["spread".to_string()];
 }
 
-/// Refuses the long's model: of another fingerprint.
+/// Another fingerprint.
 fn long_of_another_fingerprint(model_set: &mut StoredModelSet) {
     model_of(model_set, Some(Side::Long)).manifest.fingerprint = "f".repeat(64);
 }
 
-/// Refuses the long's model: of another width, a side's rows being two wide, the mid and the entry
-/// cost, and the model three.
+/// Three wide, a side's rows being two: the mid and the entry cost.
 fn long_of_another_width(model_set: &mut StoredModelSet) {
     let set = TrainingSet::new(3, vec![0.5; 6], vec![r(9); 2]).unwrap();
     let long = model_of(model_set, Some(Side::Long));
@@ -290,40 +279,39 @@ fn long_of_another_width(model_set: &mut StoredModelSet) {
     long.manifest.probes.clear();
 }
 
-/// Refuses the long's model: not predicting its probes.
+/// Not predicting its probes.
 fn long_not_predicting_its_probes(model_set: &mut StoredModelSet) {
     model_of(model_set, Some(Side::Long)).manifest.probes[0].prediction = r(9) + f64::EPSILON;
 }
 
-/// Refuses the long's model: with a level line of its own, a meta's.
+/// A level line of its own, a meta's.
 fn long_with_a_level_line(model_set: &mut StoredModelSet) {
     model_of(model_set, Some(Side::Long)).manifest.calibration = Some(super::testing::CALIBRATION);
 }
 
-/// Refuses the short's model: of another fingerprint.
+/// Another fingerprint.
 fn short_of_another_fingerprint(model_set: &mut StoredModelSet) {
     model_of(model_set, Some(Side::Short)).manifest.fingerprint = "f".repeat(64);
 }
 
-/// Refuses the meta's model: of another fingerprint.
+/// Another fingerprint.
 fn meta_of_another_fingerprint(model_set: &mut StoredModelSet) {
     model_of(model_set, None).manifest.fingerprint = "f".repeat(64);
 }
 
-/// Refuses the meta's model: without its level line, as a side's.
+/// No level line, as a side's.
 fn meta_without_a_level_line(model_set: &mut StoredModelSet) {
     model_of(model_set, None).manifest.calibration = None;
 }
 
-/// Refuses the pair: its calibration of one side for two.
+/// A calibration of one side for two.
 fn pair_calibrated_as_one_side(model_set: &mut StoredModelSet) {
     model_set.calibration.side_call = None;
 }
 
-/// The model set of 10:00, its long of 7, decides at 11:00; that of noon, its long of 9, `refuse`d,
-/// fails each decision from noon with an error naming it and the check, `check`, so no entry is
-/// made, neither on it nor on the model set of 10:00; once published again whole, it is read again
-/// at the next decision and used.
+/// The model set of 10:00, its long `r(7)`, decides at 11:00. That of noon, its long `r(9)`,
+/// `refuse`d, fails each decision from noon with an error naming it and `check`, so no entry is
+/// made, on it or on the 10:00 set. Published again whole, it is read again and used.
 #[rstest]
 #[case::of_the_longs_feature_names(long_of_other_feature_names as Refuse, "the long model: its features")]
 #[case::of_the_longs_fingerprint(long_of_another_fingerprint, "the long model: its fingerprint")]
@@ -372,8 +360,8 @@ fn a_model_set_failing_a_check_stops_new_entries_naming_it_and_is_used_once_it_l
     near(mended.map(|taken| taken.expected_r.as_f64()), Some(r(9)));
 }
 
-/// A long expecting 0.1R, clearing its margin of nought; the short is not traded. One side has no
-/// side call. With no meta, nothing more is expected of the trade.
+/// A long expecting 0.1R clears its margin of 0; the short is not traded. One side has no side
+/// call.
 #[rstest]
 fn a_side_expected_to_clear_its_margin_is_taken_with_its_expected_r_level_and_side_call() {
     let root = tempfile::tempdir().unwrap();
@@ -393,10 +381,9 @@ fn a_side_expected_to_clear_its_margin_is_taken_with_its_expected_r_level_and_si
     );
 }
 
-/// Of the sides clearing their margins, the one expected the more R trades, on R alone: the long
-/// expecting 0.2R and the short 0.3R, both clearing nought, the short; the long expecting 0.2R and
-/// the short 0.1R, the long; both expecting 0.2R, neither; and, margins of 0.5R, neither of the
-/// long expecting 0.2R and the short to lose.
+/// Of the sides clearing their margins, the one expecting more R trades: long 0.2R and short 0.3R,
+/// the short; long 0.2R and short 0.1R, the long; both 0.2R, neither; margins of 0.5R, long 0.2R
+/// and short a loss, neither.
 #[rstest]
 #[case::the_short_expected_the_more(both_sides(), (7, 8), Some((Side::Short, 8)))]
 #[case::the_long_expected_the_more(both_sides(), (7, 6), Some((Side::Long, 7)))]
@@ -432,8 +419,8 @@ fn of_two_sides_clearing_their_margins_the_one_expected_the_more_trades(
     );
 }
 
-/// A short model in the store expecting 0.4R, which a model of both sides would sell on: a
-/// long-only model never reads it.
+/// A short model expecting 0.4R, which a model of both sides would sell on, is never read by a
+/// long-only model.
 #[rstest]
 fn a_long_only_model_never_sells() {
     let root = tempfile::tempdir().unwrap();
@@ -444,15 +431,13 @@ fn a_long_only_model_never_sells() {
     assert_eq!(side_taken(&mut long), None);
 }
 
-/// A side's model predicting an R of `r(tenths)`, in no store.
 fn in_hand(tenths: usize) -> SideModel {
     let set = TrainingSet::new(2, vec![0.5; 2], vec![r(tenths)]).unwrap();
     SideModel::new(LearnerConfig::Baseline {}.fit(&set).unwrap(), r(tenths))
 }
 
-/// A pair in no store, its long predicting 0.2R and its short 0.3R, the level line `0.1 + 0.5 C`
-/// and the side call's slope 1.5: C = 0.25 and D = -0.1, so C' = 0.225 and D' = -0.15, the long's
-/// E' 0.15 and the short's 0.3.
+/// A pair in no store: long 0.2R, short 0.3R, level line `0.1 + 0.5 C`, side call slope 1.5. C =
+/// 0.25 and D = -0.1, so C' = 0.225 and D' = -0.15, the long's E' 0.15 and the short's 0.3.
 fn pair_in_hand() -> Pair {
     Pair::new(
         vec![(Side::Long, in_hand(7)), (Side::Short, in_hand(8))],
@@ -467,8 +452,7 @@ fn pair_in_hand() -> Pair {
     .unwrap()
 }
 
-/// Worked by hand on `pair_in_hand`: of a pair in no store, the short, expecting 0.3R, the more,
-/// its pick carrying the decision's level and side call.
+/// The short, expecting 0.3R, is picked, carrying C' and D' of `pair_in_hand`.
 #[rstest]
 fn a_pair_in_hand_is_picked_among_on_its_calibrated_expectation() {
     let picked = DecidingModels::pick_among(
@@ -489,8 +473,7 @@ fn a_pair_in_hand_is_picked_among_on_its_calibrated_expectation() {
     }
 }
 
-/// The short expects 0.3R, the more, short of its own margin of 0.35R: the long, expecting 0.15R
-/// and clearing its margin of nought, is picked.
+/// The short, 0.3R, misses its margin of 0.35R, so the long, 0.15R, clearing 0, is picked.
 #[rstest]
 fn a_side_of_a_pair_in_hand_is_held_to_its_own_margin() {
     let picked = DecidingModels::pick_among(
@@ -503,8 +486,7 @@ fn a_side_of_a_pair_in_hand_is_held_to_its_own_margin() {
     assert_eq!(picked.map(|picked| picked.side), Some(Side::Long));
 }
 
-/// A pair's calibration is of as many sides as its models: one of two sides for one model is no
-/// pair, nor one of one side for two.
+/// A calibration of two sides for one model, or of one side for two, is no pair.
 #[rstest]
 fn a_calibration_of_other_sides_than_its_models_is_no_pair() {
     let line = Line {
@@ -537,16 +519,15 @@ fn a_calibration_of_other_sides_than_its_models_is_no_pair() {
     assert!(one_for_two.contains("pair of 2"), "{one_for_two}");
 }
 
-/// `listed`, as `config` says, its model set from midnight: its long a model of 6 tenths (expecting
-/// 0.1R, above its margin of nought) and its meta model predicting an R of `r(tenths)`, if any.
+/// `listed` on a model set from midnight: a long of 6 tenths (0.1R, above its margin of 0) and a
+/// meta predicting `r(tenths)`, if any.
 fn with_meta_of(models: &Path, config: &ModelConfig, tenths: Option<usize>) -> DecidingModels {
     let features = features();
     let meta = tenths.map(|tenths| meta_baseline(&features, config, tenths));
     published_with(models, config, &[(Side::Long, 6)], meta)
 }
 
-/// `listed`, as `config` says, its model set from midnight: a model of each side of `sides`
-/// predicting an R of `r(tenths)` of its tenths, and its meta model `meta`, if any.
+/// `listed` on a model set from midnight: a model per side of `sides`, and `meta`, if any.
 fn published_with(
     models: &Path,
     config: &ModelConfig,
@@ -566,8 +547,8 @@ fn published_with(
     DecidingModels::new(&set).unwrap()
 }
 
-/// Worked by hand: the meta predicting an R of 0.3, its level line `0.1 + 0.5 E` expecting 0.25R,
-/// at or above its margin of 0.15R, takes the long picked, at its calibrated expected R.
+/// The meta predicts 0.3, expecting 0.1 + 0.5 * 0.3 = 0.25R, at or above its margin of 0.15R, so
+/// it takes the long.
 #[rstest]
 fn a_meta_model_from_its_margin_takes_the_side_picked_at_its_expected_r() {
     let root = tempfile::tempdir().unwrap();
@@ -589,8 +570,7 @@ fn a_meta_model_from_its_margin_takes_the_side_picked_at_its_expected_r() {
     );
 }
 
-/// The meta predicting nought expects 0.1R, below its margin of 0.15R: the margin is in R, as the
-/// meta's expectation is.
+/// The meta predicting 0 expects 0.1R, below its margin of 0.15R.
 #[rstest]
 fn a_meta_model_below_its_margin_takes_no_trade() {
     let root = tempfile::tempdir().unwrap();
@@ -599,11 +579,9 @@ fn a_meta_model_below_its_margin_takes_no_trade() {
     assert_eq!(decided(&mut models, NOON), None);
 }
 
-/// A model set's sides decide beside its own meta alone: the model set of 10:00 holds a meta model
-/// taking the long, expecting 0.25R; the one of 11:00, a long of 9, a meta predicting nought,
-/// expecting 0.1R, below its margin. At noon the latest decides, and takes no trade, never its long
-/// beside the meta of 10:00, which would take it; at 10:30 the model set of 10:00 takes its long of
-/// 6.
+/// The set of 10:00 holds a meta expecting 0.25R, taking its long of 6. The set of 11:00 holds a
+/// long of 9 and a meta predicting 0, expecting 0.1R, below its margin. At noon the latest set
+/// takes no trade, never its long beside the 10:00 meta, which would take it.
 #[rstest]
 fn a_meta_never_decides_beside_the_sides_of_another_model_set() {
     let root = tempfile::tempdir().unwrap();
@@ -634,7 +612,7 @@ fn a_meta_never_decides_beside_the_sides_of_another_model_set() {
     assert_eq!(at_noon, None);
 }
 
-/// The meta model taking a trade from 0.15R, learned by LightGBM at its defaults.
+/// A meta taking a trade from 0.15R, learned by LightGBM at its defaults.
 fn lightgbm_meta() -> MetaConfig {
     MetaConfig {
         learner: LearnerConfig::LightGbm(LightGbmConfig::builder().build()),
@@ -642,13 +620,12 @@ fn lightgbm_meta() -> MetaConfig {
     }
 }
 
-/// A meta model of `config` valid from midnight of the 22nd, which learned on rows of its features
-/// in their order, the mid, 0.7, then the side picked, 1 a buy and -1 a sell, then the decision's
-/// level, nought, and its side call, that buys realize 1R from a side call of 0.5 and -1R below it,
-/// and sells -1R: fitted by the learner of `config`'s meta on ten buys and ten sells at each side
-/// call from 0.20 to 0.79 by 0.01, at least 300 rows on each side of a split where LightGBM's
-/// leaves need 200, so that it predicts near 1R on those buys and near -1R elsewhere, near 0.6R and
-/// -0.4R calibrated (`CALIBRATION`), either side of the margin of 0.15R.
+/// A meta fitted by the learner of `config`'s meta on rows of the mid 0.7, the side (1 a buy, -1 a
+/// sell), the level 0 and the side call. Ten buys and ten sells at each side call from 0.20 to
+/// 0.79 by 0.01, at least 300 rows each side of a split where LightGBM's leaves need 200. Buys
+/// realize 1R from a side call of 0.5 and -1R below it, sells -1R, so it predicts near 1R on those
+/// buys and near -1R elsewhere: near 0.6R and -0.4R calibrated (`CALIBRATION`), either side of the
+/// margin of 0.15R.
 fn learned_meta(config: &ModelConfig) -> StoredModel {
     let (mut rows, mut labels) = (vec![], vec![]);
     for side in [1.0, -1.0] {
@@ -673,9 +650,8 @@ fn learned_meta(config: &ModelConfig) -> StoredModel {
     meta
 }
 
-/// The decision at noon on a pair whose `side` predicts `tenths` and the other 2, expecting a loss,
-/// its trade taken from 0.15R by the meta model LightGBM learned (`learned_meta`): the side call is
-/// the long's R less the short's, `r(tenths)` less -0.3 picking the long.
+/// The decision at noon on a pair whose `side` predicts `tenths` and the other `r(2)` = -0.3,
+/// taken by `learned_meta`. The side call is the long's R less the short's.
 fn learned_meta_decision(side: Side, tenths: usize) -> Option<Taken> {
     let root = tempfile::tempdir().unwrap();
     let config = ModelConfig {
@@ -688,11 +664,9 @@ fn learned_meta_decision(side: Side, tenths: usize) -> Option<Taken> {
     decided(&mut models, NOON)
 }
 
-/// The meta model reads the decision's side call from its place in the row, after its side and
-/// level, and is given the side picked after its features: it takes a buy on a side call of 0.6, a
-/// long of 0.3R beside a short of -0.3R, which it learned gains; refuses one on 0.4, a long of
-/// 0.1R, which it learned loses; and refuses a sell, its side call -0.6, which it learned never
-/// does.
+/// The meta reads the side call from its place in the row, after the side and level. It takes a
+/// buy on a side call of 0.6 (long 0.3R, short -0.3R), refuses one on 0.4 (long 0.1R), and refuses
+/// a sell, its side call -0.6.
 #[rstest]
 #[case::a_buy_above(Side::Long, 8, Some(Side::Long))]
 #[case::a_buy_below(Side::Long, 6, None)]
@@ -707,9 +681,8 @@ fn a_meta_model_decides_on_the_side_call_of_the_decision(
     assert_eq!(decided.map(|taken| taken.side), taken);
 }
 
-/// `meta`, learned by LightGBM, with every leaf of its trees NaN: it predicts NaN on any row,
-/// checked here, as a model refused at load would take no trade either. LightGBM finds its trees by
-/// their sizes, if its text gives them, and those are no longer theirs.
+/// `meta`, learned by LightGBM, with every leaf NaN, so it predicts NaN on any row. LightGBM finds
+/// its trees by their sizes, if its text gives them, and those are no longer theirs.
 fn predicting_nan(mut meta: StoredModel) -> StoredModel {
     let text = meta
         .model
