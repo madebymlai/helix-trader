@@ -1,16 +1,15 @@
 //! What connects to cTrader: the broker's venue, the environment and the credential, read from the
-//! process' environment (`CTraderConnection::from_vars`); and the configs of the data and execution
-//! clients, which connect with them.
+//! process' environment (`CTraderConnection::from_vars`), and the configs of the data and execution
+//! clients.
 //!
 //! The credential is the cTrader login's, not a broker's: one Open API app and one token pair serve
 //! the accounts the login holds at every broker, so `CTRADER_*` and the token file name no broker,
-//! and each broker's caller names only the settings of its account (`CTraderAccountVars`).
+//! and each broker's caller names only its account's settings (`CTraderAccountVars`).
 //!
-//! The app's client id and secret come from Spotware's Open API portal; the first token pair
-//! (access and refresh token), and the accounts it grants, from the portal's playground; the pair
-//! seeds the token file, which keeps the latest one (see `token`). The secret and the tokens are
-//! secret material, the client id and the account id credential identity: none of them appears in
-//! `Debug`, errors or logs.
+//! The app's client id and secret come from Spotware's Open API portal, the first token pair and
+//! its accounts from the portal's playground. The pair seeds the token file (see `token`). The
+//! secret and the tokens are secret material, the client id and the account id credential
+//! identity: none appears in `Debug`, errors or logs.
 
 use std::{any::Any, fmt::Debug, path::PathBuf};
 
@@ -26,14 +25,11 @@ const CLIENT_SECRET_VAR: &str = "CTRADER_CLIENT_SECRET";
 const ACCESS_TOKEN_VAR: &str = "CTRADER_ACCESS_TOKEN";
 const REFRESH_TOKEN_VAR: &str = "CTRADER_REFRESH_TOKEN";
 
-/// Where setting up the credential is explained.
 const GUIDE: &str = "crates/ctrader/README.md, \"Credentials\"";
 
-/// The token file under the user's state directory.
 const TOKEN_FILE: &str = "ctrader/token.json";
 
-/// cTrader's demo or live servers, fully separate: an account authenticates only on its own
-/// environment's server.
+/// cTrader's demo or live servers, fully separate: an account authenticates only on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CTraderEnvironment {
     Demo,
@@ -41,8 +37,8 @@ pub enum CTraderEnvironment {
 }
 
 impl CTraderEnvironment {
-    /// The protobuf endpoint (port 5035) over WebSocket with TLS (help.ctrader.com/open-api,
-    /// "Proxies and endpoints").
+    /// The protobuf endpoint over WebSocket with TLS (help.ctrader.com/open-api, "Proxies and
+    /// endpoints").
     pub(crate) fn url(self) -> &'static str {
         match self {
             Self::Demo => "wss://demo.ctraderapi.com:5035",
@@ -51,8 +47,7 @@ impl CTraderEnvironment {
     }
 }
 
-/// The trader's account on cTrader (`ctidTraderAccountId`), which requests name; credential
-/// identity, so redacted in `Debug`.
+/// The trader's account on cTrader (`ctidTraderAccountId`), redacted in `Debug`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CTraderAccountId(i64);
 
@@ -62,7 +57,6 @@ impl CTraderAccountId {
         Self(id)
     }
 
-    /// The id, for the requests that carry it.
     #[must_use]
     pub const fn get(self) -> i64 {
         self.0
@@ -75,17 +69,14 @@ impl Debug for CTraderAccountId {
     }
 }
 
-/// The variables of a broker's account: its environment, `demo` or `live`, and its
-/// `ctidTraderAccountId`. All the caller names of a connection's settings; the rest are the login's
-/// (`CTRADER_*`).
+/// The variables of a broker's account: its environment (`demo` or `live`) and its
+/// `ctidTraderAccountId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CTraderAccountVars {
     pub environment: &'static str,
     pub account_id: &'static str,
 }
 
-/// What the errors asking to check or replace a setting call it: the variables the connection was
-/// read from, where they are set, and where setting them up is explained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CTraderSettingNames {
     pub(crate) environment: &'static str,
@@ -94,9 +85,7 @@ pub(crate) struct CTraderSettingNames {
     pub(crate) access_token: &'static str,
     pub(crate) refresh_token: &'static str,
     pub(crate) account_id: &'static str,
-    /// Where the settings are set, such as a file of them.
     pub(crate) source: &'static str,
-    /// Where setting up the credential is explained.
     pub(crate) guide: &'static str,
 }
 
@@ -106,18 +95,14 @@ pub struct CTraderCredential {
     pub client_id: SecretString,
     pub client_secret: SecretString,
     pub account_id: CTraderAccountId,
-    /// The pair that seeds the token file: the playground's, from which the file takes over, until
-    /// another pair seeds it again (see `token`).
     pub access_token: SecretString,
     pub refresh_token: SecretString,
-    /// The token file, which keeps the latest pair for every session of the credential; nothing is
-    /// read from it until a session connects.
+    /// The token file, which keeps the latest pair; unread until a session connects.
     pub token_file: PathBuf,
     pub(crate) names: CTraderSettingNames,
 }
 
 impl CTraderCredential {
-    /// The token file, seeded with the credential's pair.
     pub(crate) fn tokens(&self) -> TokenStore {
         let seed = TokenPair {
             access_token: self.access_token.clone(),
@@ -142,20 +127,18 @@ impl CTraderCredential {
 /// Where and as whom to connect: the broker's venue, the environment and the credential.
 #[derive(Debug, Clone)]
 pub struct CTraderConnection {
-    /// The venue of the broker's instruments, each the symbol cTrader lists on it
-    /// (`XAUUSD.<venue>`), and of its account.
+    /// The venue of the broker's instruments (`XAUUSD.<venue>`) and of its account.
     pub venue: Venue,
     pub environment: CTraderEnvironment,
     pub credential: CTraderCredential,
 }
 
 impl CTraderConnection {
-    /// The connection to the account of the broker of `venue`, through `var`, the process'
-    /// environment in production: the environment and the account id from the variables `account`
-    /// names, the credential from `CTRADER_CLIENT_ID`, `CTRADER_CLIENT_SECRET`,
-    /// `CTRADER_ACCESS_TOKEN` and `CTRADER_REFRESH_TOKEN`, its token file under the user's state
-    /// directory (`XDG_STATE_HOME` or `HOME`). Nothing is read from the token file yet. An error
-    /// never holds a value.
+    /// The connection to the account of the broker of `venue`, reading settings through `var`:
+    /// the environment and account id from the variables `account` names, the credential from
+    /// `CTRADER_CLIENT_ID`, `CTRADER_CLIENT_SECRET`, `CTRADER_ACCESS_TOKEN` and
+    /// `CTRADER_REFRESH_TOKEN`, the token file under the user's state directory (`XDG_STATE_HOME`
+    /// or `HOME`), unread yet. An error never holds a value.
     ///
     /// # Errors
     ///
@@ -177,8 +160,7 @@ impl CTraderConnection {
     }
 
     /// The Nautilus account of the connection: `<venue>-DEMO` or `<venue>-LIVE`. Named after the
-    /// venue and the environment, not the account, whose id and login are credential identity,
-    /// never logged; stable across runs, so a persisted cache finds its account again.
+    /// environment, not the account id, which is credential identity, and stable across runs.
     #[must_use]
     pub fn account_id(&self) -> AccountId {
         let environment = match self.environment {
@@ -189,8 +171,8 @@ impl CTraderConnection {
     }
 }
 
-/// The environment the variable of `account` names, `demo` or `live`, through `var`. No default: a
-/// missing or other value is an error.
+/// The environment the variable of `account` names. No default: a missing or other value is an
+/// error.
 fn environment(
     venue: Venue,
     account: CTraderAccountVars,
@@ -207,7 +189,6 @@ fn environment(
     }
 }
 
-/// The credential, as `CTraderConnection::from_vars`.
 fn credential(
     account: CTraderAccountVars,
     var: impl Fn(&str) -> Option<String>,
@@ -266,9 +247,8 @@ fn credential(
     })
 }
 
-/// The token file's path under the user's state directory: under `XDG_STATE_HOME` if set to an
-/// absolute path (the XDG base directory specification ignores a relative one), else under
-/// `$HOME/.local/state`, through `var`.
+/// The token file's path: under `XDG_STATE_HOME` if set to an absolute path (the XDG base directory
+/// specification ignores a relative one), else under `$HOME/.local/state`.
 ///
 /// # Errors
 ///
@@ -289,7 +269,7 @@ fn token_file(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
     }
 }
 
-/// The config of the data client: its id, where it connects, as whom, and the instruments it loads.
+/// The config of the data client: connection and the instruments it loads.
 #[derive(Debug, Clone)]
 pub struct CTraderDataClientConfig {
     /// The client's id, its factory's name.
@@ -299,8 +279,7 @@ pub struct CTraderDataClientConfig {
 }
 
 impl CTraderDataClientConfig {
-    /// The config of the data client on `connection`, named after its venue, loading
-    /// `instrument_ids`.
+    /// The config on `connection`, named after its venue, loading `instrument_ids`.
     #[must_use]
     pub fn new(connection: CTraderConnection, instrument_ids: Vec<InstrumentId>) -> Self {
         Self {
@@ -317,8 +296,7 @@ impl ClientConfig for CTraderDataClientConfig {
     }
 }
 
-/// The config of the execution client: its id, where it connects, as whom, and the instruments
-/// whose reports it reads.
+/// The config of the execution client: connection and the instruments whose reports it reads.
 #[derive(Debug, Clone)]
 pub struct CTraderExecutionClientConfig {
     /// The client's id, its factory's name.
@@ -328,8 +306,7 @@ pub struct CTraderExecutionClientConfig {
 }
 
 impl CTraderExecutionClientConfig {
-    /// The config of the execution client on `connection`, named after its venue, reading the
-    /// reports of `instrument_ids`.
+    /// The config on `connection`, named after its venue, reading the reports of `instrument_ids`.
     #[must_use]
     pub fn new(connection: CTraderConnection, instrument_ids: Vec<InstrumentId>) -> Self {
         Self {
@@ -406,7 +383,6 @@ mod tests {
         CTraderConnection::from_vars(Venue::new(VENUE), ACCOUNT, vars(pairs))
     }
 
-    /// `FULL` without the setting `name`, or with it set to `value`.
     fn full_with(name: &str, value: Option<&'static str>) -> Vec<(&'static str, &'static str)> {
         FULL.iter()
             .filter_map(|&(k, v)| {
@@ -519,8 +495,6 @@ mod tests {
         }
     }
 
-    /// The names the errors use: the variables read, where they are set, and the guide to setting
-    /// up the credential.
     #[rstest]
     fn a_connection_from_the_environment_names_the_variables_it_read() {
         let names = read(&FULL).unwrap().credential.names;
@@ -567,7 +541,6 @@ mod tests {
         );
     }
 
-    /// The XDG base directory specification ignores a relative one.
     #[rstest]
     #[case::unset(None)]
     #[case::relative(Some("state"))]

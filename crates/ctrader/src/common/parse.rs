@@ -1,26 +1,22 @@
 //! The broker's symbols as Nautilus instruments, and their identity.
 //!
 //! A symbol's instrument is `XAUUSD.<venue>`: the symbol name cTrader lists
-//! (`ProtoOALightSymbol.symbolName`) on the broker's venue, as configured
-//! (`CTraderConnection::venue`). cTrader's `symbolId` differs between servers, so it is looked up
-//! by name on each connection, never stored.
+//! (`ProtoOALightSymbol.symbolName`) on the broker's configured venue. cTrader's `symbolId` differs
+//! between servers, so it is looked up by name on each connection, never stored.
 //!
 //! A symbol whose base and quote assets are both currencies Nautilus knows (forex, and metals such
-//! as XAU) becomes a `Cfd`: a broker's cTrader products are over-the-counter contracts for
-//! difference, cash-settled with no ownership of the asset, which Nautilus' `Cfd` models
-//! (`docs/concepts/instruments/cfd.md`), as its IB adapter defines IB's CFDs
+//! as XAU) becomes a `Cfd`: cTrader products are cash-settled contracts for difference, which
+//! Nautilus' `Cfd` models (`docs/concepts/instruments/cfd.md`), as its IB adapter defines IB's CFDs
 //! (`adapters/interactive_brokers/src/providers/parse.rs`):
 //!
-//! - The asset class of its underlying, the base asset, by its Nautilus currency type: FX for a
-//!   fiat currency, Commodity for a metal, Cryptocurrency for a crypto.
-//! - Prices: `digits` decimals, cTrader's integer prices being in 1/100000.
-//! - Sizes in units of the base asset: cTrader's volumes are in cents of a unit, so `stepVolume` /
-//!   100 is the size increment (and its decimals the size precision), `minVolume`, `maxVolume` and
-//!   `lotSize` / 100 the minimum, maximum and lot (XAUUSD: 100 oz a lot).
-//! - Margins the broker's own (`margin`): initial and maintenance 1 / the leverage the broker
-//!   applies to the symbol on the account, the lower of the account's
-//!   (`ProtoOATrader.leverageInCents`) and the symbol's first dynamic leverage tier
-//!   (`ProtoOASymbol.leverageId`), as Nautilus' AX adapter takes its venue's margin rates
+//! - The asset class is the base asset's, by its Nautilus currency type: FX for fiat, Commodity for
+//!   a metal, Cryptocurrency for crypto.
+//! - Prices have `digits` decimals, cTrader's integer prices being in 1/100000.
+//! - Sizes are in units of the base asset. Volumes are in cents of a unit, so `stepVolume` / 100 is
+//!   the size increment (its decimals the precision), `minVolume`, `maxVolume` and `lotSize` / 100
+//!   the minimum, maximum and lot (XAUUSD: 100 oz).
+//! - Margins are the broker's own (`margin`): initial and maintenance 1 / the symbol's leverage on
+//!   the account, as Nautilus' AX adapter takes its venue's margin rates
 //!   (`adapters/architect_ax/src/http/parse.rs`).
 //! - Stamped at receipt: a symbol carries no time.
 //!
@@ -42,29 +38,26 @@ use rust_decimal::Decimal;
 use super::messages::{ProtoOaAsset, ProtoOaDynamicLeverage, ProtoOaLightSymbol, ProtoOaSymbol};
 use crate::SERVED_DATA;
 
-/// The cTrader symbol name of `id`, an instrument of the broker.
 pub(crate) fn symbol_name(id: InstrumentId) -> &'static str {
     id.symbol.inner().as_str()
 }
 
-/// The instrument id of the cTrader symbol `name` on `venue`.
 pub(crate) fn instrument_id(name: &str, venue: Venue) -> anyhow::Result<InstrumentId> {
     let symbol = Symbol::new_checked(name)
         .with_context(|| format!("the cTrader symbol name {name:?} is no Nautilus symbol"))?;
     Ok(InstrumentId::new(symbol, venue))
 }
 
-/// The margin rate of the symbol `name` on the account at the broker of `venue`, initial and
-/// maintenance alike: 1 / the leverage the broker applies to it, the lower of the account's,
-/// `account_leverage` (`ProtoOATrader.leverageInCents`), and the symbol's dynamic leverage,
-/// `symbol_leverage` (its `leverageId`'s), if it has one (cTrader's help, "Dynamic leverage": "the
-/// account leverage acts as an upper limit"). Both are in cents of a ratio: 3000 is 1:30.
+/// The margin rate of the symbol `name`, initial and maintenance alike: 1 / the leverage the broker
+/// applies, the lower of `account_leverage` (`ProtoOATrader.leverageInCents`) and the symbol's
+/// dynamic leverage `symbol_leverage` (its `leverageId`'s), if any (cTrader's help, "Dynamic
+/// leverage": "the account leverage acts as an upper limit"). Both are in cents of a ratio: 3000
+/// is 1:30.
 ///
 /// The symbol's leverage is its first tier's, which covers the smallest positions. A position whose
 /// USD value passes that tier gets the next tiers' lower leverage on the excess, so the broker's
 /// margin is then above this rate's. cTrader states no maintenance or stop-out rate of a symbol
-/// (the stop-out level is the broker's, on the account's margin level), so maintenance is the
-/// initial rate.
+/// (the stop-out level is the broker's), so maintenance is the initial rate.
 pub(crate) fn margin(
     name: &str,
     venue: Venue,
@@ -94,8 +87,7 @@ pub(crate) fn margin(
     Ok(Decimal::ONE_HUNDRED / Decimal::from(applied))
 }
 
-/// The `Cfd` on `venue` of the symbol listed as `light`, with the details `symbol`, at the margin
-/// rate `margin` (see `margin`); `assets` name the asset ids.
+/// The `Cfd` of the symbol listed as `light`, with the details `symbol` and margin rate `margin`.
 pub(crate) fn cfd(
     light: &ProtoOaLightSymbol,
     symbol: &ProtoOaSymbol,
@@ -183,7 +175,6 @@ pub(crate) fn cfd(
         .with_context(|| format!("building the instrument of {name}"))
 }
 
-/// The asset class of a CFD on `base`, by its currency type.
 fn asset_class(base: Currency) -> AssetClass {
     match base.currency_type {
         CurrencyType::Fiat => AssetClass::FX,
@@ -192,24 +183,20 @@ fn asset_class(base: Currency) -> AssetClass {
     }
 }
 
-/// A cTrader volume, in cents of a unit, in units.
 fn units(cents: i64) -> Decimal {
     Decimal::new(cents, 2).normalize()
 }
 
-/// The names of `assets`, by id.
 pub(crate) fn assets_by_id(assets: Vec<ProtoOaAsset>) -> HashMap<i64, ProtoOaAsset> {
     assets.into_iter().map(|a| (a.asset_id, a)).collect()
 }
 
-/// Fails unless `id` is on `venue`, an instrument of the broker.
 pub(crate) fn ensure_on(id: InstrumentId, venue: Venue) -> anyhow::Result<()> {
     anyhow::ensure!(id.venue == venue, "{id} is not on {venue}");
     Ok(())
 }
 
-/// The instruments of `series`, each the quotes of an instrument on `venue`: those the broker's
-/// data client loads to serve them.
+/// The instruments the broker's data client loads to serve `series`.
 ///
 /// # Errors
 ///
@@ -257,7 +244,6 @@ mod tests {
         Venue::new(VENUE)
     }
 
-    /// A series of gold's quotes on the made-up venue.
     fn gold_quotes() -> (NautilusDataType, String) {
         (NautilusDataType::QuoteTick, format!("XAUUSD.{VENUE}"))
     }
@@ -303,7 +289,6 @@ mod tests {
         assert!(err.contains("EUR/USD.IDEALPRO"), "{err}");
     }
 
-    /// The captured symbols, assets and details (see `test_data/`).
     struct Fixtures {
         light: HashMap<String, ProtoOaLightSymbol>,
         details: HashMap<i64, ProtoOaSymbol>,
@@ -433,7 +418,6 @@ mod tests {
         assert_eq!((Decimal::from(1000) * margin).round_dp(2), broker);
     }
 
-    /// The instrument a captured symbol is expected to make.
     struct Expected {
         asset_class: AssetClass,
         base: &'static str,
@@ -529,7 +513,6 @@ mod tests {
         );
     }
 
-    /// The details of the symbol `name` in `fixtures`.
     fn details<'a>(fixtures: &'a mut Fixtures, name: &str) -> &'a mut ProtoOaSymbol {
         let id = fixtures.light[name].symbol_id;
         fixtures.details.get_mut(&id).unwrap()
@@ -573,7 +556,6 @@ mod tests {
         }
     }
 
-    /// The words of `err`, its numbers among them, a decimal one word.
     fn words(err: &str) -> Vec<&str> {
         err.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
             .filter(|word| !word.is_empty())

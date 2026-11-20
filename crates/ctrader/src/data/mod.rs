@@ -1,11 +1,11 @@
 //! The data client for the live node: Nautilus' `DataClient` on a cTrader session.
 //!
 //! On connect it authenticates, loads its instruments (as `CTraderSession` does) and sends them to
-//! the node; they read the spot events and the tick history, and an instrument request asks cTrader
-//! anew. Quote subscriptions become spot subscriptions, their spot events quotes (see `spots`); the
-//! session sends them again after a reconnect. Quote requests are answered from the tick history,
+//! the node. Quote subscriptions become spot subscriptions, their spot events quotes (see `spots`),
+//! sent again by the session after a reconnect. Quote requests are answered from the tick history,
 //! merged as a fill merges it, up to the request's end or now. Bars are left to Nautilus, built
-//! from the quotes.
+//! from the quotes. An instrument request asks cTrader anew; the instruments loaded at connect only
+//! read the spot events and the tick history.
 
 use std::{
     collections::HashMap,
@@ -46,16 +46,13 @@ use super::{
 
 mod spots;
 
-/// The label of the data client's socket in Nautilus' socket state events and reconnect commands,
-/// beside the execution client's under the same client id.
+/// The socket's label in Nautilus' socket state events and reconnect commands, beside the
+/// execution client's.
 const SOCKET_ENDPOINT: &str = "ctrader-open-api-data";
 
-/// How long tasks get to finish at a disconnect, then to abort.
 const TASK_GRACE: Duration = Duration::from_secs(1);
 const TASK_FORCE: Duration = Duration::from_secs(2);
 
-/// The data client: quotes live and historical of the instruments it loads, on the venue of its
-/// connection.
 #[derive(Debug)]
 pub(super) struct CTraderDataClient {
     client_id: ClientId,
@@ -63,7 +60,6 @@ pub(super) struct CTraderDataClient {
     venue: Venue,
     credential: CTraderCredential,
     instrument_ids: Vec<InstrumentId>,
-    /// Its session's socket in the node's socket state and reconnects.
     socket: SocketControl,
     session: Option<Session>,
     session_tasks: TaskGroup,
@@ -72,7 +68,6 @@ pub(super) struct CTraderDataClient {
     clock: &'static AtomicTime,
 }
 
-/// A connected session and what it loaded.
 #[derive(Debug)]
 struct Session {
     ctrader: Arc<CTraderSession>,
@@ -82,7 +77,7 @@ struct Session {
 
 impl CTraderDataClient {
     /// A client on the environment of `connection` loading `instrument_ids`, ids on its venue, at
-    /// connect; not connected.
+    /// connect.
     ///
     /// # Panics
     ///
@@ -134,8 +129,6 @@ impl CTraderDataClient {
             .with_context(|| format!("{} is not connected", self.client_id))
     }
 
-    /// Connects, loads the instruments and sends them to the node, then starts turning spot events
-    /// into quotes.
     async fn open_session(&self) -> anyhow::Result<Session> {
         let (session, mut spots) = CTraderSession::connect_to(
             &self.url,
@@ -220,8 +213,6 @@ impl CTraderDataClient {
         }
     }
 
-    /// Closes admission and cancels the tasks, and asks the session to close: `teardown` awaits
-    /// both.
     fn begin_shutdown(&self) {
         self.session_tasks.begin_shutdown();
         self.command_tasks.begin_shutdown();
@@ -230,7 +221,7 @@ impl CTraderDataClient {
         }
     }
 
-    /// Drains the tasks, then closes the session, so a token renewal out at `stop` is still saved.
+    /// Drains the tasks, then closes the session, so a token renewal out at `stop` is saved.
     async fn teardown(&mut self) -> anyhow::Result<()> {
         self.begin_shutdown();
         let (session, command) = tokio::join!(
@@ -280,7 +271,6 @@ impl DataClient for CTraderDataClient {
         self.stop()
     }
 
-    /// Connected: a session, and its tasks not shut down.
     fn is_connected(&self) -> bool {
         self.session.is_some() && self.session_tasks.is_open()
     }
@@ -332,12 +322,10 @@ impl DataClient for CTraderDataClient {
         })
     }
 
-    /// Answers with the instrument as cTrader defines it now, asked of it as at connect
-    /// (`CTraderSession::instruments`), in one completed response envelope: the data engine writes
-    /// it to the catalog if asked (`update_catalog`) and none of its id is stored. A request
-    /// cTrader does not answer fails (`DataRequestFailed`). An instrument request fetches from the
-    /// provider (Nautilus' `adapters.md`, "Data client"); the instruments loaded at connect only
-    /// read the spot events and the tick history.
+    /// Answers with the instrument as cTrader defines it now, in one completed response envelope:
+    /// the data engine writes it to the catalog if asked (`update_catalog`) and none of its id is
+    /// stored. A request cTrader does not answer fails (`DataRequestFailed`). An instrument request
+    /// fetches from the provider (Nautilus' `adapters.md`, "Data client").
     ///
     /// # Errors
     ///
@@ -352,7 +340,6 @@ impl DataClient for CTraderDataClient {
         let client_id = request.client_id.unwrap_or(self.client_id);
         let clock = self.clock;
         self.spawn_command("instrument request", async move {
-            // One instrument per id asked
             let fetched = ctrader.instruments(&[id]).await;
             let event = match fetched.map(|mut instruments| instruments.remove(0)) {
                 Ok(instrument) => {
@@ -385,9 +372,9 @@ impl DataClient for CTraderDataClient {
     }
 
     /// Answers with the quotes over `[start, end]` (end: now if none) from the tick history, the
-    /// newest `limit` if one is given, in one completed response envelope: the data engine writes
-    /// it back to the catalog if asked (`update_catalog`). A failure cutting the history short is
-    /// the envelope's failure reason, the quotes fetched before it kept.
+    /// newest `limit` if given, in one completed response envelope the data engine writes back to
+    /// the catalog if asked (`update_catalog`). A failure cutting the history short is the
+    /// envelope's failure reason, the quotes fetched before it kept.
     ///
     /// # Errors
     ///
@@ -447,8 +434,7 @@ impl DataClient for CTraderDataClient {
     }
 }
 
-/// The spot quotes, locked; a panic elsewhere left them consistent, as each change is a single
-/// step.
+/// The spot quotes, locked. A panic elsewhere left them consistent: each change is one step.
 fn lock(quotes: &Mutex<SpotQuotes>) -> MutexGuard<'_, SpotQuotes> {
     quotes.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -508,10 +494,9 @@ mod tests {
     const XAUUSD: &str = "XAUUSD.ACMEFX";
     const EURUSD: &str = "EURUSD.ACMEFX";
 
-    /// cTrader's XAUUSD and EURUSD symbol ids on the server the fixtures come from.
+    /// cTrader's XAUUSD and EURUSD symbol ids in the fixtures.
     const XAUUSD_SYMBOL_ID: i64 = 41;
 
-    /// The captured first spot event of `symbol_id`, as a frame.
     fn first_spot(symbol_id: i64) -> Action {
         let payload = if symbol_id == XAUUSD_SYMBOL_ID {
             SPOT_EVENT_XAUUSD_FIRST
@@ -528,9 +513,8 @@ mod tests {
         )
     }
 
-    /// A cTrader serving the captured assets, symbols and details, the XAUUSD ticks `bids` and
-    /// `asks` (oldest first), and spot subscriptions: the captured answer, then each symbol's
-    /// captured first spot event.
+    /// A cTrader serving the captured assets, symbols and details, XAUUSD ticks `bids` and `asks`
+    /// (oldest first), spot subscriptions, and each symbol's captured first spot event.
     fn peer(bids: Vec<Tick>, asks: Vec<Tick>) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> {
         move |_, request| {
             if let Some(actions) = accept_auth(request) {
@@ -576,15 +560,14 @@ mod tests {
 
     type Events = tokio::sync::mpsc::UnboundedReceiver<DataEvent>;
 
-    /// A client of XAUUSD and EURUSD on the peer `script` plays, connected, the node's data events,
-    /// the frames received and its token file's directory.
+    /// A connected client of XAUUSD and EURUSD on the peer `script` plays: the node's data events,
+    /// the frames received and the token file's directory.
     async fn connected(
         script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
     ) -> (CTraderDataClient, Events, Received, tempfile::TempDir) {
         connected_at(script, get_atomic_clock_realtime()).await
     }
 
-    /// As `connected`, the client's clock `clock`.
     async fn connected_at(
         script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
         clock: &'static AtomicTime,
@@ -612,7 +595,6 @@ mod tests {
             .expect("the data events ended")
     }
 
-    /// The next event, a quote.
     async fn next_quote(events: &mut Events) -> QuoteTick {
         match next_event(events).await {
             DataEvent::Data(Data::Quote(quote)) => quote,
@@ -620,15 +602,12 @@ mod tests {
         }
     }
 
-    /// The next event, a completed response envelope without failure of quotes: its quotes
-    /// response.
     async fn next_quotes_response(events: &mut Events) -> QuotesResponse {
         let envelope = next_envelope(events).await;
         assert_eq!(envelope.failure_reason(), None);
         quotes_of(&envelope)
     }
 
-    /// The next event, a completed response envelope.
     async fn next_envelope(events: &mut Events) -> DataResponseEnvelope {
         let DataEvent::ResponseEnvelope(envelope) = next_event(events).await else {
             panic!("not a response envelope");
@@ -637,7 +616,6 @@ mod tests {
         envelope
     }
 
-    /// The quotes response `envelope` carries.
     fn quotes_of(envelope: &DataResponseEnvelope) -> QuotesResponse {
         match envelope.response() {
             Some(DataResponse::Quotes(response)) => response.clone(),
@@ -667,7 +645,6 @@ mod tests {
         )
     }
 
-    /// The requests of `payload_type` received.
     fn received_of<M: Payload>(received: &Received) -> Vec<M> {
         received
             .lock()
@@ -782,7 +759,6 @@ mod tests {
         )
     }
 
-    /// (ms, bid, ask) of `quotes`.
     fn prices(quotes: &[QuoteTick]) -> Vec<(u64, String, String)> {
         quotes
             .iter()
@@ -917,8 +893,7 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// A data engine, its clock at `now`, with a writable catalog in `dir` and `client` registered,
-    /// routed by its venue, on a message bus of this thread.
+    /// A data engine at `now` with a writable catalog in `dir` and `client` registered.
     fn engine_with(client: CTraderDataClient, dir: &std::path::Path, now: &str) -> DataEngine {
         MessageBus::new(TraderId::from("TRADER-001"), UUID4::new(), None, None)
             .register_message_bus();
@@ -940,8 +915,8 @@ mod tests {
         engine
     }
 
-    /// Asks `engine` for the XAUUSD quotes over `[start, end]` to be written back, hands it what
-    /// the client answers, and returns the quotes of its answer.
+    /// Asks `engine` for the XAUUSD quotes over `[start, end]`, written back, and returns the
+    /// quotes of the client's answer.
     async fn write_back_request(
         engine: &mut DataEngine,
         events: &mut Events,
@@ -1067,7 +1042,6 @@ mod tests {
         )
     }
 
-    /// The instrument `envelope` answers with.
     fn instrument_of(envelope: &DataResponseEnvelope) -> InstrumentAny {
         match envelope.response() {
             Some(DataResponse::Instrument(response)) => response.data.clone(),
@@ -1075,9 +1049,8 @@ mod tests {
         }
     }
 
-    /// Nautilus' regression for a fresh instrument request (`adapters.md`, "Data client"):
-    /// cTrader's definition of XAUUSD changes between two requests, its digits from 2 to 3, and the
-    /// second answer is the new one.
+    /// Nautilus' regression for a fresh instrument request (`adapters.md`, "Data client"): the
+    /// XAUUSD definition changes between two requests, digits 2 to 3, and the second answer is new.
     #[tokio::test]
     async fn an_instrument_request_answers_ctraders_definition_of_the_moment() {
         let changed = Arc::new(AtomicBool::new(false));
@@ -1211,8 +1184,7 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// The renewal is answered once the test opens the gate: after `stop`, the disconnect under
-    /// way.
+    /// The renewal is answered once the test opens the gate, after `stop`, mid-disconnect.
     #[tokio::test]
     async fn a_token_renewal_in_flight_at_stop_is_saved_by_the_disconnect() {
         let (open, gate) = std::sync::mpsc::channel::<()>();
