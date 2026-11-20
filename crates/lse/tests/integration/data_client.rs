@@ -1,6 +1,5 @@
 //! The data client through its factory: its requests against the mock LSE peer replaying LSE's
-//! captured exports, refusals and catalogues, and its subscriptions against the mock sockets, each
-//! answered with the Nautilus data it makes of LSE's.
+//! captured exports, refusals and catalogues, and its subscriptions against the mock sockets.
 
 use std::{
     cell::RefCell,
@@ -58,8 +57,6 @@ use serde_json::{Value, json};
 
 type Events = tokio::sync::mpsc::UnboundedReceiver<DataEvent>;
 
-/// The client the factory creates on `lse`, its cache holding the definitions of `GOLD_FUTURES` and
-/// `GOLD_SPOT` if `defined`, connected, and the node's data events.
 async fn connected(lse: &MockLse, defined: bool) -> (Box<dyn DataClient>, Events) {
     let (tx, events) = tokio::sync::mpsc::unbounded_channel();
     replace_data_event_sender(tx);
@@ -87,9 +84,6 @@ async fn connected(lse: &MockLse, defined: bool) -> (Box<dyn DataClient>, Events
     (client, events)
 }
 
-/// The client the factory creates on `socket`, streaming `streamed`, its cache holding
-/// `GOLD_FUTURES`'s definition if `defined`, and the node's data events, once it connected or
-/// failed to.
 async fn streaming(
     socket: &MockLseSocket,
     streamed: &[&str],
@@ -108,8 +102,6 @@ async fn streaming(
     connecting(&config, definitions).await
 }
 
-/// The client the factory creates on `config`, its cache holding `definitions`, and the node's data
-/// events, once it connected or failed to.
 async fn connecting(
     config: &LseDataClientConfig,
     definitions: Vec<InstrumentAny>,
@@ -124,7 +116,6 @@ async fn connecting(
     (client, connected, events)
 }
 
-/// The quotes of `ids`, as the data engine asks the client for them.
 fn quotes_of(ids: &[&str]) -> SubscribeQuotes {
     SubscribeQuotes::new(
         ids.iter()
@@ -139,7 +130,6 @@ fn quotes_of(ids: &[&str]) -> SubscribeQuotes {
     )
 }
 
-/// The frames `socket` received, keys aside.
 fn sent(socket: &MockLseSocket) -> Vec<Value> {
     socket
         .received()
@@ -149,7 +139,6 @@ fn sent(socket: &MockLseSocket) -> Vec<Value> {
         .collect()
 }
 
-/// The futures data-ws lists, in its order.
 const LISTED_FUTURES: [&str; 17] = [
     "AUDUSD",
     "BRENT",
@@ -170,21 +159,18 @@ const LISTED_FUTURES: [&str; 17] = [
     "SILVER",
 ];
 
-/// Now on the node's clock the data client reads: days after every window the tests ask for at
-/// fixed times, so that LSE has loaded each.
+/// A time days after every window the tests ask for at fixed times, so that LSE has loaded each.
 fn now() -> Timestamp {
     "2026-11-16T12:00:00Z".parse().unwrap()
 }
 
-/// The node's clock at `now()`: Nautilus' virtual clock, set there.
 fn node_clock() -> Rc<RefCell<dyn Clock>> {
     let clock = VirtualClock::new();
     clock.set_time(UnixNanos::from(now()));
     Rc::new(RefCell::new(clock))
 }
 
-/// The first tick captured, GOLD.F's at 16:44:55.499567 on 13 November 2026: bid 3888.0, ask
-/// 3888.2.
+/// GOLD.F's first tick captured, on 13 November 2026 at 16:44:55.499567: bid 3888.0, ask 3888.2.
 #[tokio::test]
 async fn a_subscribed_lsedge_instrument_receives_lse_s_quotes_of_bid_and_ask_with_no_sizes() {
     let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -282,7 +268,6 @@ async fn more_instruments_than_a_connection_allows_fail_the_connect_naming_lse_s
     assert_eq!(sent(&socket), Vec::<Value>::new());
 }
 
-/// The trades of `ids`, as the data engine asks the client for them.
 fn trades_subscribed(ids: &[&str]) -> SubscribeTrades {
     SubscribeTrades::new(
         ids.iter()
@@ -297,7 +282,6 @@ fn trades_subscribed(ids: &[&str]) -> SubscribeTrades {
     )
 }
 
-/// The end of the trades of `id`, as the data engine asks it.
 fn trades_ended(id: &str) -> UnsubscribeTrades {
     UnsubscribeTrades::new(
         InstrumentId::from(id),
@@ -310,8 +294,6 @@ fn trades_ended(id: &str) -> UnsubscribeTrades {
     )
 }
 
-/// The client the factory creates on `socket`, data-ws, streaming `streamed`, its cache holding the
-/// definitions of `AAPL_CALL` and `AAPL_PUT_2027`, connected, and the node's data events.
 async fn streaming_options(
     socket: &MockLseSocket,
     streamed: &[&str],
@@ -324,12 +306,8 @@ async fn streaming_options(
     connecting(&config, vec![aapl_call(), aapl_put_2027()]).await
 }
 
-/// LSE's documentation's chain of AAPL streams five trades: two of the 355 call, one each of the
-/// 360 calls of 13 and 18 November, which no one subscribed, and one of the 325 put of September
-/// 2027.
-///
-/// Both contracts subscribed, the chain is asked once, and the trades of the two come in order, the
-/// others' dropped.
+/// AAPL's chain streams five trades: two of the 355 call, one each of the 360 calls of 13 and 18
+/// November, and one of the 325 put of September 2027.
 #[tokio::test]
 async fn subscribed_option_contracts_receive_their_trades_from_one_chain_of_their_underlying() {
     let socket = MockLseSocket::start(|_, frame| {
@@ -397,9 +375,8 @@ async fn subscribed_option_contracts_receive_their_trades_from_one_chain_of_thei
     );
 }
 
-/// The peer closes permanently. An ordinary symbol command probes the shared handler queue without
-/// changing option membership. Retrying the option command must still reach that closed queue, not
-/// succeed as a no-op.
+/// The peer closes permanently. A symbol command probes the shared queue without changing option
+/// membership; the retried option command must still reach it, not succeed as a no-op.
 #[rstest]
 #[case::add(false)]
 #[case::remove(true)]
@@ -445,8 +422,8 @@ async fn a_closed_socket_queue_leaves_an_option_trade_command_retryable(#[case] 
     client.disconnect().await.unwrap();
 }
 
-/// Drop the socket after the call leaves, then again after the put leaves. GOLD.F's first quote
-/// fences the replay on the final connection.
+/// The socket drops after the call leaves, then after the put. GOLD.F's first quote fences the
+/// replay.
 #[tokio::test]
 async fn a_shared_chain_replays_only_while_a_distinct_contract_remains() {
     let socket = MockLseSocket::start(|connection, frame| {
@@ -522,12 +499,8 @@ async fn a_shared_chain_replays_only_while_a_distinct_contract_remains() {
     }
 }
 
-/// LSE's chain of AAPL carries every listed contract of AAPL, so the client streams one the config
-/// does not name, of an underlying whose chain it streams, as a strategy following strikes
-/// subscribes it.
-///
-/// The 325 put of September 2027, the config naming the 355 call alone, receives its trade, its
-/// chain asked once.
+/// A strategy following strikes may subscribe a contract the config does not name: AAPL's chain
+/// carries every listed one.
 #[tokio::test]
 async fn an_option_contract_of_an_underlying_the_client_streams_receives_its_trades_unnamed() {
     let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -556,7 +529,6 @@ async fn an_option_contract_of_an_underlying_the_client_streams_receives_its_tra
     );
 }
 
-/// A contract the config does not name ends its chain as one it names.
 #[tokio::test]
 async fn an_option_contract_the_config_does_not_name_ends_its_chain_with_its_trades() {
     let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -580,9 +552,9 @@ async fn an_option_contract_the_config_does_not_name_ends_its_chain_with_its_tra
     );
 }
 
-/// A chain takes one of the 16 subscriptions data-ws allows the free key a connection, however many
-/// of its contracts are streamed, and the socket's list holds no contract to check them against: 15
-/// futures and two contracts of AAPL connect, 16 futures and one contract do not.
+/// A chain takes one of the free key's 16 subscriptions, and the socket's list holds no contract
+/// to check against: 15 futures and two AAPL contracts connect, 16 futures and one contract do
+/// not.
 #[rstest]
 #[case::fifteen_futures_and_two_contracts_connect(15, &[AAPL_CALL, AAPL_PUT_2027], true)]
 #[case::sixteen_futures_and_one_contract_do_not(16, &[AAPL_CALL], false)]
@@ -637,8 +609,8 @@ async fn trades_of_an_option_contract_the_cache_does_not_define_fail_naming_it_u
     assert_eq!(sent(&socket), Vec::<Value>::new());
 }
 
-/// A contract of another underlying would take a chain of its own, a subscription beyond those
-/// `connect` checked against LSE's limit: it is refused though the cache defines it.
+/// Another underlying would need a chain of its own, beyond the limit `connect` checked: refused
+/// though the cache defines it.
 #[tokio::test]
 async fn trades_of_an_option_contract_of_an_underlying_the_client_does_not_stream_fail_naming_it() {
     const MSFT_CALL: &str = "MSFT  261120C00500000.OPRA";
@@ -720,8 +692,6 @@ async fn quotes_of_an_instrument_the_client_does_not_stream_fail_naming_it() {
     assert_eq!(sent(&socket), Vec::<Value>::new());
 }
 
-/// An index definition of `id`, as one would be written by hand: LSE's symbol `raw`, prices in USD
-/// at `precision`, sizes whole.
 fn index(id: &str, raw: &str, precision: u8) -> InstrumentAny {
     InstrumentAny::IndexInstrument(
         IndexInstrument::builder()
@@ -739,7 +709,6 @@ fn index(id: &str, raw: &str, precision: u8) -> InstrumentAny {
     )
 }
 
-/// The symbols `socket` was asked to stream, in order.
 fn subscribed(socket: &MockLseSocket) -> Vec<String> {
     sent(socket)
         .iter()
@@ -748,9 +717,7 @@ fn subscribed(socket: &MockLseSocket) -> Vec<String> {
         .collect()
 }
 
-/// A series of each derived market, each socket a mock answering as LSE's did on 13 November 2026,
-/// with its list and the series' last tick: each quote comes from its series' socket.
-///
+/// Each socket answers as LSE's did on 13 November 2026, with its list and the series' last tick.
 /// data-ws lists `BTC/USD` too, and sent a tick of 8 November for it, bid 75891.65, crypto
 /// streaming on london-ws since.
 #[tokio::test]
@@ -826,7 +793,6 @@ async fn a_series_of_each_derived_market_subscribes_on_its_socket_under_that_soc
     assert_eq!(subscribed(&tsx), ["NVDA.TO"]);
 }
 
-/// A config of the client on `lse` with every key, calls unthrottled.
 fn config(lse: &MockLse) -> LseDataClientConfig {
     LseDataClientConfig {
         api_key: Some(SecretString::from(API_KEY)),
@@ -845,7 +811,6 @@ fn config(lse: &MockLse) -> LseDataClientConfig {
     }
 }
 
-/// The cache holding `instruments`.
 fn cache_of(instruments: Vec<InstrumentAny>) -> CacheView {
     let mut cache = Cache::default();
     for instrument in instruments {
@@ -854,15 +819,12 @@ fn cache_of(instruments: Vec<InstrumentAny>) -> CacheView {
     Rc::new(RefCell::new(cache)).into()
 }
 
-/// The node's data events, from now on.
 fn events() -> Events {
     let (tx, events) = tokio::sync::mpsc::unbounded_channel();
     replace_data_event_sender(tx);
     events
 }
 
-/// The client the factory creates from `config`, its cache holding `instruments`, connected, and
-/// the node's data events.
 async fn connected_with(
     config: LseDataClientConfig,
     instruments: Vec<InstrumentAny>,
@@ -884,7 +846,6 @@ async fn next_event(events: &mut Events) -> DataEvent {
         .expect("the data events ended")
 }
 
-/// The next event, a completed response envelope.
 async fn next_envelope(events: &mut Events) -> DataResponseEnvelope {
     let event = next_event(events).await;
     let DataEvent::ResponseEnvelope(envelope) = event else {
@@ -898,8 +859,6 @@ fn at(s: &str) -> Timestamp {
     s.parse().unwrap()
 }
 
-/// The trades of `GOLD_FUTURES` over `[from, to]`, as the data engine asks for a window, naming no
-/// client.
 fn trades(from: &str, to: &str) -> RequestTrades {
     RequestTrades::new(
         InstrumentId::from(GOLD_FUTURES),
@@ -913,7 +872,6 @@ fn trades(from: &str, to: &str) -> RequestTrades {
     )
 }
 
-/// The captured second, as the data engine asks for it.
 fn captured_second() -> RequestTrades {
     trades("2026-10-21T10:00:00Z", "2026-10-21T10:00:00.999999999Z")
 }
@@ -925,8 +883,6 @@ fn trades_of(envelope: &DataResponseEnvelope) -> TradesResponse {
     }
 }
 
-/// The bars of `bar_type` closing over `[from, to]`, as the data engine asks for a window, naming
-/// no client.
 fn bars(bar_type: &str, from: &str, to: &str) -> RequestBars {
     RequestBars::new(
         BarType::from(bar_type),
@@ -947,7 +903,6 @@ fn bars_of(envelope: &DataResponseEnvelope) -> BarsResponse {
     }
 }
 
-/// The `from` and `to` of each call `lse` received.
 fn asked_windows(lse: &MockLse) -> Vec<(String, String)> {
     lse.calls()
         .iter()
@@ -1083,8 +1038,6 @@ async fn a_window_over_midnight_is_asked_a_utc_day_at_a_time() {
     );
 }
 
-/// A day as the data engine asks for one, its window closed at the next midnight: one export,
-/// through the midnight's instant.
 #[tokio::test]
 async fn a_day_window_ending_at_a_midnight_is_one_export() {
     let lse = MockLse::start(vec![Reply::file(GOLD_TRADES)]);
@@ -1108,11 +1061,9 @@ async fn a_day_window_ending_at_a_midnight_is_one_export() {
     );
 }
 
-/// From the start of the day before until now: LSE sends the day before's trades and none of the
-/// current day's, which it stores the morning after.
-///
-/// A plain response completes the request, and the data engine writes it to no catalog
-/// (`DataEngine::response`), so that a fill asks for the window again.
+/// LSE sends the day before's trades and none of the current day's, stored the morning after. The
+/// data engine writes a plain response to no catalog (`DataEngine::response`), so a fill asks
+/// again.
 #[tokio::test]
 async fn a_trades_request_reaching_into_the_day_lse_has_not_loaded_is_answered_unwritten() {
     let lse = MockLse::start(vec![
@@ -1195,8 +1146,6 @@ async fn lse_s_refusal_is_the_request_s_failure_with_its_code_message_and_requir
     }
 }
 
-/// The data type of the rows of `symbol` in LSE's `source`, as a caller asks for them: both in its
-/// metadata, under an identifier of the caller's, here the symbol.
 fn lse_rows(source: &str, symbol: &str) -> DataType {
     let metadata = Params::new(
         [
@@ -1212,13 +1161,10 @@ fn lse_rows(source: &str, symbol: &str) -> DataType {
     )
 }
 
-/// US10Y's daily bond yields over `[from, to]`, as the data engine asks for them, naming the
-/// client.
 fn bond_yields(from: &str, to: &str) -> RequestCustomData {
     rows_of(lse_rows("bond_yields", "US10Y"), from, to)
 }
 
-/// The custom data of `data_type` over `[from, to]`.
 fn rows_of(data_type: DataType, from: &str, to: &str) -> RequestCustomData {
     RequestCustomData::new(
         ClientId::from("LSE"),
@@ -1302,8 +1248,8 @@ async fn a_custom_data_request_is_answered_with_lse_s_rows_in_one_complete_envel
     );
 }
 
-/// The identifier is the caller's: the client answers with the data type as asked, so the data
-/// engine writes the rows back under it.
+/// The client answers with the data type as asked, so the data engine writes the rows back under
+/// the caller's identifier.
 #[tokio::test]
 async fn a_custom_data_request_is_answered_under_the_identifier_it_names() {
     let lse = MockLse::start(vec![
@@ -1365,11 +1311,8 @@ async fn rows_outside_the_request_s_window_are_left_out() {
 }
 
 /// From the start of the day before until now: the day before's row, stamped at today's 00:00, is
-/// LSE's once it has loaded the day, the morning after it (`http::export`), and LSE holds none of
-/// it yet.
-///
-/// A plain response completes the request, and the data engine writes it to no catalog
-/// (`DataEngine::response`), so that a fill asks for the window again.
+/// LSE's once it has loaded the day, the morning after (`http::export`). It holds none yet, so the
+/// response is plain and a fill asks again.
 #[tokio::test]
 async fn a_request_reaching_into_a_day_lse_has_not_loaded_is_answered_unwritten() {
     let lse = MockLse::start(vec![
@@ -1394,11 +1337,9 @@ async fn a_request_reaching_into_a_day_lse_has_not_loaded_is_answered_unwritten(
 }
 
 /// LSE's catalogue, captured on 13 November 2026, held insider trades filed up to 13 October
-/// (`last`) and company profiles updated up to 05:08:52 on 13 October.
-///
-/// A window whose last key's date is after it is one LSE has not loaded, however long ago, and is
-/// answered in a plain response, written to no catalog, so that a fill asks for it again. One whose
-/// last key is of the catalogue's last date, LSE loading a day whole, is answered complete.
+/// (`last`) and company profiles updated up to 05:08:52 on 13 October. A window whose last key is
+/// dated after it is not loaded: a plain response, so a fill asks again. One ending on the last
+/// date is complete, LSE loading a day whole.
 #[rstest]
 #[case::filed_after_the_last_date(
     "insider_trades", "TEAM", TEAM_INSIDER_TRADES,
@@ -1481,8 +1422,7 @@ async fn lse_s_refusal_of_the_export_is_the_request_s_failure() {
     assert!(reason.contains("symbol-unknown"), "{reason}");
 }
 
-/// A source the client knows no stamp of is refused before LSE is asked: when its rows are known is
-/// not known.
+/// A source with no known stamp is refused before LSE is asked.
 #[tokio::test]
 async fn a_source_the_client_knows_no_stamp_of_fails_naming_it_unasked() {
     let lse = MockLse::start(vec![]);
@@ -1502,7 +1442,6 @@ async fn a_source_the_client_knows_no_stamp_of_fails_naming_it_unasked() {
     assert!(lse.calls().is_empty(), "{:?}", lse.calls());
 }
 
-/// LSE is asked its catalogue, which lists no such collection, and no export.
 #[tokio::test]
 async fn a_collection_lse_s_catalogue_does_not_list_fails_naming_it() {
     let lse = MockLse::start(vec![Reply::json(r#"{"datasets": []}"#)]);
@@ -1521,7 +1460,6 @@ async fn a_collection_lse_s_catalogue_does_not_list_fails_naming_it() {
     assert_eq!(lse.calls().len(), 1);
 }
 
-/// The times of the rows of `envelope`'s custom data response.
 fn stamps(envelope: &DataResponseEnvelope) -> Vec<UnixNanos> {
     custom_data(&rows_in(envelope))
         .iter()
@@ -1533,18 +1471,16 @@ fn utc(time: &str) -> UnixNanos {
     UnixNanos::from(at(time))
 }
 
-/// Each collection's rows known over the window, asked of LSE by the dates of their keys: a day
-/// before the window for a row known at its date's end, an interval before for one known at its
-/// interval's close, the window's own for a snapshot known when it was updated.
+/// Each collection's rows known over the window, asked by their keys' dates: a day before the
+/// window for a row known at its date's end, an interval before for one known at its interval's
+/// close, the window's own for a snapshot known when updated.
 ///
 /// The expected rows are:
-/// - AUGB10Y's 36 sovereign yields of the 10th and the 36 of the 11th, known at the ends of their
-///   days.
-/// - Atlassian's insider trade filed on 13 October 2026, at 22:00 New York time of its filing's
-///   day, 02:00 UTC on the 14th, as a Form 3, 4 or 5 takes the day's filing date up to then, not at
-///   the day's end in UTC.
-/// - AAPL's dividends of ex-dates 11 May and 10 August at those days' ends, those of 9 February and
-///   12 November falling outside.
+/// - AUGB10Y's 36 yields of the 10th and 36 of the 11th, at the ends of their days.
+/// - Atlassian's insider trade filed on 13 October 2026, stamped 22:00 New York time, 02:00 UTC on
+///   the 14th: a Form 3, 4 or 5 takes the filing date up to then.
+/// - AAPL's dividends of ex-dates 11 May and 10 August at those days' ends, not 9 February or 12
+///   November.
 /// - US10Y's minutes opening from 00:08 to 00:29 at their closes, a minute later.
 /// - AHMA's profile when it was updated.
 #[rstest]
@@ -1621,13 +1557,11 @@ async fn a_collection_s_rows_known_over_the_window_are_asked_by_the_dates_of_the
     );
 }
 
-/// A row stamped at a time of another column than its key may be keyed any time before the window:
-/// the series is asked whole, up to the window's last date, so that none known in the window is
-/// missed.
-///
-/// ZN's reports known in September 2026, of no release date and stamped when LSE ingested them, are
-/// the Fridays at about 20:30 UTC. AAPL's reports of periods ending June 2025 to March 2026 are
-/// known when their statements were accepted.
+/// A row stamped at another column than its key may be keyed any time before the window, so the
+/// series is asked whole, up to the window's last date. ZN's reports of September 2026 have no
+/// release date and are stamped when LSE ingested them, the Fridays at about 20:30 UTC. AAPL's
+/// reports of periods ending June 2025 to March 2026 are known when their statements were
+/// accepted.
 #[rstest]
 #[case::cot(
     "cot", "ZN", ZN_COT, ("2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z"), "2026-10-01",
@@ -1680,8 +1614,6 @@ fn core_cpi_calendar(from: &str, to: &str) -> RequestCustomData {
     )
 }
 
-/// The releases of March to October 2026, each with its actual: stamped when they came out, written
-/// back.
 #[tokio::test]
 async fn economic_releases_are_stamped_when_they_came_out_and_answered_complete() {
     let lse = MockLse::start(vec![
@@ -1712,9 +1644,8 @@ async fn economic_releases_are_stamped_when_they_came_out_and_answered_complete(
     );
 }
 
-/// February 2026 holds the release of the 11th, past, with no actual: LSE has not filled it, so the
-/// window is answered in a plain response, which the data engine writes to no catalog, and a fill
-/// asks for it again.
+/// February 2026 holds the release of the 11th, past, with no actual: LSE has not filled it, so
+/// the response is plain.
 #[tokio::test]
 async fn a_window_of_releases_one_of_which_lse_has_not_filled_is_answered_unwritten() {
     let lse = MockLse::start(vec![
@@ -1746,9 +1677,8 @@ fn macro_series(source: &str, code: &str, from: &str, to: &str) -> RequestCustom
     rows_of(lse_rows(source, code), from, to)
 }
 
-/// The releases of March to October 2026, each with its actual, asked of LSE's macro series by the
-/// dates of their release; and US10Y's closes of the 9th to the 12th of November, known at each
-/// day's end.
+/// The March to October 2026 releases, asked of LSE's macro series by their release dates, and
+/// US10Y's closes of 9 to 12 November, known at each day's end.
 #[rstest]
 #[case::releases(
     "macro_release", "release", "US.Core Inflation Rate YoY", US_CORE_CPI_RELEASES,
@@ -1803,7 +1733,7 @@ async fn a_macro_series_is_asked_by_its_kind_and_code(
     );
 }
 
-/// An observation is keyed by the day of its period, not when it came out (US core inflation's
+/// An observation is keyed by the day of its period, not its release (US core inflation's
 /// September at 1 September, out on 14 October): refused before LSE is asked, naming the series of
 /// its releases.
 #[tokio::test]
@@ -1830,8 +1760,6 @@ fn factors(source: &str, symbol: &str, from: &str, to: &str) -> RequestCustomDat
     rows_of(lse_rows(source, symbol), from, to)
 }
 
-/// AAPL's splits from 2000, of its five, each known at its day's end, with the factors LSE gives
-/// it.
 #[tokio::test]
 async fn an_instrument_s_splits_are_asked_of_lse_s_factors_by_its_market_and_symbol() {
     let lse = MockLse::start(vec![Reply::json(AAPL_FACTORS)]);
@@ -1878,8 +1806,8 @@ async fn an_instrument_s_splits_are_asked_of_lse_s_factors_by_its_market_and_sym
     );
 }
 
-/// AAPL's dividends of 2026 to October, each known at its ex-date's end, in time order, LSE sending
-/// them newest first, each with the unit of its amount.
+/// LSE sends AAPL's dividends of 2026 to October newest first, each with the unit of its amount;
+/// each is known at its ex-date's end.
 #[tokio::test]
 async fn an_instrument_s_dividends_are_its_factors_with_the_unit_of_their_amount() {
     let lse = MockLse::start(vec![Reply::json(AAPL_FACTORS)]);
@@ -1924,7 +1852,6 @@ async fn an_instrument_s_dividends_are_its_factors_with_the_unit_of_their_amount
     );
 }
 
-/// LSE gives a futures series no dividends.
 #[tokio::test]
 async fn an_instrument_of_no_dividends_has_none() {
     let lse = MockLse::start(vec![Reply::json(GOLD_FACTORS)]);
@@ -1944,8 +1871,7 @@ async fn an_instrument_of_no_dividends_has_none() {
     assert_eq!(stamps(&envelope), Vec::<UnixNanos>::new());
 }
 
-/// AAPL's factors as if LSE had cut its dividends to the newest it gives, its oldest of 11 May
-/// 1987.
+/// AAPL's factors with the dividends cut to the newest LSE gives, its oldest of 11 May 1987.
 fn truncated_aapl_factors() -> String {
     let mut factors: Value = serde_json::from_str(AAPL_FACTORS).unwrap();
     factors["dividends"]["truncated"] = json!(true);
@@ -1953,8 +1879,8 @@ fn truncated_aapl_factors() -> String {
     factors.to_string()
 }
 
-/// A window from before the oldest dividend LSE gave may lack some LSE left out: it fails, naming
-/// the reference collection holding them all; a window after it holds every one.
+/// A window from before the oldest dividend LSE gave may lack some: it fails, naming the reference
+/// collection holding them all. A window after it holds every one.
 #[rstest]
 #[case::from_before_the_oldest("1980-01-01T00:00:00Z", false)]
 #[case::from_after_the_oldest("2026-01-01T00:00:00Z", true)]
@@ -1986,8 +1912,6 @@ async fn dividends_lse_cut_to_its_newest_fail_a_window_from_before_them(
     }
 }
 
-/// LSE's factors take a market and a symbol: one written without its market is refused before LSE
-/// is asked, naming it.
 #[tokio::test]
 async fn factors_of_a_symbol_naming_no_market_fail_naming_it_unasked() {
     let lse = MockLse::start(vec![]);
@@ -2008,8 +1932,8 @@ async fn factors_of_a_symbol_naming_no_market_fail_naming_it_unasked() {
     assert!(lse.calls().is_empty(), "{:?}", lse.calls());
 }
 
-/// LSE's `/v3/options/chain` takes no dates: it answers the chain as it stands, so no window of it
-/// can be asked.
+/// LSE's `/v3/options/chain` takes no dates and answers the chain as it stands, so no window can
+/// be asked.
 #[tokio::test]
 async fn an_options_chain_s_history_is_refused_by_name_unasked_lse_serving_it_now_alone() {
     let lse = MockLse::start(vec![]);
@@ -2187,8 +2111,8 @@ async fn only_whole_candles_are_asked() {
     );
 }
 
-/// Bars closing at 23:59 to 00:01: candles opening at 23:58 and 23:59 on the 20th, then at 00:00 on
-/// the 21st.
+/// Bars closing at 23:59 to 00:01: candles opening at 23:58 and 23:59 on the 20th, then at 00:00
+/// on the 21st.
 #[tokio::test]
 async fn candles_over_midnight_are_asked_a_utc_day_at_a_time() {
     let lse = MockLse::start(vec![
@@ -2277,7 +2201,6 @@ async fn each_lse_candle_width_is_asked_for_its_bar_specification(
     assert_eq!(asked, [timeframe]);
 }
 
-/// A width LSE has no candles of; a price LSE's candles do not carry; and bars Nautilus builds.
 #[rstest]
 #[case::a_width_lse_has_no_candles_of("2-MINUTE-LAST-EXTERNAL")]
 #[case::ticks("100-TICK-LAST-EXTERNAL")]
@@ -2303,9 +2226,9 @@ async fn a_bar_type_lse_does_not_serve_is_refused_naming_it_unasked(#[case] spec
     assert!(lse.calls().is_empty(), "{:?}", lse.calls());
 }
 
-/// LSE stamps them at their session's first traded minute and gives no close, and builds them from
-/// its minute bars: the refusal names the bar type and the shorter LSE candles to declare it from
-/// instead, a minute's and four hours'.
+/// LSE stamps them at their session's first traded minute, gives no close, and builds them from
+/// its minute bars: the refusal names the bar type and the minute and four-hour candles to declare
+/// it from.
 #[rstest]
 #[case::daily("1-DAY")]
 #[case::weekly("1-WEEK")]
@@ -2334,11 +2257,8 @@ async fn daily_weekly_and_monthly_candles_are_refused_naming_the_candles_to_decl
     assert!(lse.calls().is_empty(), "{:?}", lse.calls());
 }
 
-/// Bars closing from 00:01 the day before the current one: LSE holds the day before's candles and
-/// none of the current day's, which it stores the morning after.
-///
-/// A plain response completes the request, and the data engine writes it to no catalog, so that a
-/// fill asks for the window again.
+/// Bars closing from 00:01 the day before: LSE holds that day's candles and none of today's,
+/// stored the morning after, so the response is plain and a fill asks again.
 #[tokio::test]
 async fn a_bars_request_reaching_into_the_day_lse_has_not_loaded_is_answered_unwritten() {
     let lse = MockLse::start(vec![
@@ -2375,7 +2295,6 @@ async fn a_bars_request_reaching_into_the_day_lse_has_not_loaded_is_answered_unw
     );
 }
 
-/// A request of an instrument's rows over a window, as the data engine makes one.
 type WindowRequest<R> = fn(
     InstrumentId,
     Option<Timestamp>,
@@ -2387,13 +2306,12 @@ type WindowRequest<R> = fn(
     Option<nautilus_core::Params>,
 ) -> R;
 
-/// The captured second of GCZ6 of 2026, as the data engine asks for a window, naming no client.
 fn gcz26_second<R>(request: WindowRequest<R>) -> R {
     second_of(GCZ26, request)
 }
 
-/// `id`'s rows over the captured second of GCZ6 of 2026, `[14:30:00, 14:30:01)` of 12 November
-/// 2026, as the data engine asks for a window, naming no client.
+/// `id`'s rows over the captured second of GCZ6 of 2026, `[14:30:00, 14:30:01)` on 12 November
+/// 2026.
 fn second_of<R>(id: &str, request: WindowRequest<R>) -> R {
     request(
         InstrumentId::from(id),
@@ -2407,15 +2325,12 @@ fn second_of<R>(id: &str, request: WindowRequest<R>) -> R {
     )
 }
 
-/// The client with GCZ26's definition, as Databento gives it, in its cache.
 async fn defining_gcz26(lse: &MockLse) -> (Box<dyn DataClient>, Events) {
     connected_with(config(lse), vec![gcz26()]).await
 }
 
-/// A call: its path, its pair id or symbol, its rows and the key it carried.
 type Asked = (String, Option<String>, Option<String>, Option<String>);
 
-/// The calls LSE received, in order.
 fn asked(lse: &MockLse) -> Vec<Asked> {
     lse.calls()
         .iter()
@@ -2440,8 +2355,6 @@ fn call(path: &str, instrument: &str, rows: Option<&str>, key: &str) -> Asked {
     )
 }
 
-/// GCZ6 is looked up in LSE's catalogue, its listing of 2026 asked for its trades, both with the
-/// CME key.
 #[tokio::test]
 async fn a_cme_contract_s_trades_are_asked_by_its_listing_with_the_cme_key() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::file(GCZ26_TRADES)]);
@@ -2466,7 +2379,6 @@ async fn a_cme_contract_s_trades_are_asked_by_its_listing_with_the_cme_key() {
     );
 }
 
-/// LSE's quotes of the captured second, with the sizes LSE sends.
 #[tokio::test]
 async fn a_cme_contract_s_quotes_are_its_best_bid_and_offer_with_lse_s_sizes() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::file(GCZ26_QUOTES)]);
@@ -2505,7 +2417,6 @@ async fn a_cme_contract_s_quotes_are_its_best_bid_and_offer_with_lse_s_sizes() {
     );
 }
 
-/// Trades, then quotes: LSE's catalogue is asked once.
 #[tokio::test]
 async fn a_contract_s_listing_is_looked_up_once_for_all_its_requests() {
     let lse = MockLse::start(vec![
@@ -2548,8 +2459,6 @@ async fn lse_s_refusal_of_a_cme_contract_s_rows_is_the_request_s_failure() {
     }
 }
 
-/// The book depth of GCZ6 of 2026 over `[from, to]`, `depth` levels a side, as the data engine asks
-/// for a window, naming no client.
 fn book_depth(depth: Option<usize>, from: &str, to: &str) -> RequestBookDepth {
     RequestBookDepth::new(
         InstrumentId::from(GCZ26),
@@ -2564,8 +2473,6 @@ fn book_depth(depth: Option<usize>, from: &str, to: &str) -> RequestBookDepth {
     )
 }
 
-/// The book deltas of GCZ6 of 2026 over `[from, to]`, as the data engine asks for a window, naming
-/// no client.
 fn book_deltas(from: &str, to: &str) -> RequestBookDeltas {
     RequestBookDeltas::new(
         InstrumentId::from(GCZ26),
@@ -2579,7 +2486,6 @@ fn book_deltas(from: &str, to: &str) -> RequestBookDeltas {
     )
 }
 
-/// A book or orders request of GCZ6 over `[from, to]`.
 #[derive(Debug, Clone, Copy)]
 enum Level {
     Book,
@@ -2587,7 +2493,6 @@ enum Level {
 }
 
 impl Level {
-    /// Asks `client` for the level's rows of GCZ6 over `[from, to]`.
     fn request(self, client: &dyn DataClient, from: &str, to: &str) {
         match self {
             Self::Book => client
@@ -2597,7 +2502,6 @@ impl Level {
         }
     }
 
-    /// The rows `envelope` answers, of the level's kind.
     fn rows_of(self, envelope: &DataResponseEnvelope) -> usize {
         match (self, envelope.response()) {
             (Self::Book, Some(DataResponse::BookDepth(response))) => response.data.len(),
@@ -2607,9 +2511,8 @@ impl Level {
     }
 }
 
-/// The captured second of GCZ6's trades and quotes: its book, as LSE's docs record it
-/// (`test_data/README.md`), four rows, each a snapshot of ten levels a side, looked up and asked by
-/// its listing, CME Globex's Level 2, with the CME key.
+/// The captured second of GCZ6: its book as LSE's docs record it (`test_data/README.md`), four
+/// rows of ten levels a side, CME Globex's Level 2, asked by its listing with the CME key.
 #[tokio::test]
 async fn a_cme_contract_s_book_is_its_depth_snapshots_asked_by_its_listing_with_the_cme_key() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::file(GCZ26_BOOK)]);
@@ -2722,8 +2625,6 @@ async fn lse_s_level_refusal_of_the_cme_key_is_the_request_s_failure_with_its_re
     assert!(envelope.response().is_none());
 }
 
-/// Two seconds of GCZ6, which LSE refuses as too wide: asked again a second at a time, each half's
-/// rows answered.
 #[rstest]
 #[case::book(Level::Book, GCZ26_BOOK, 4)]
 #[case::orders(Level::Orders, GCZ26_ORDERS, 4)]
@@ -2792,8 +2693,6 @@ async fn a_book_depth_other_than_lse_s_ten_levels_fails_naming_it_unasked() {
     assert!(lse.calls().is_empty(), "{:?}", lse.calls());
 }
 
-/// LSE serves a derived market's past as timeframes alone: it is asked, and its refusal is the
-/// answer.
 #[tokio::test]
 async fn a_derived_series_quotes_are_asked_and_lse_s_refusal_fails_them() {
     let lse = MockLse::start(vec![Reply::refusal(400, DATA_UNAVAILABLE_QUOTES)]);
@@ -2822,7 +2721,6 @@ async fn a_derived_series_quotes_are_asked_and_lse_s_refusal_fails_them() {
 
 const SPX: &str = "SPX-INDICES.LSEDGE";
 
-/// `SPX`'s `request` over `[from, to]`, as the data engine asks for a window, naming no client.
 fn of_spx<R>(
     request: impl FnOnce(
         InstrumentId,
@@ -2849,9 +2747,8 @@ fn of_spx<R>(
     )
 }
 
-/// The captured five seconds of the S&P 500's tick slice, its values of no size, as pyarrow reads
-/// LSE's file: each a quote whose bid and ask are the value, with no sizes, as data-ws sends an
-/// index's ticks.
+/// The captured five seconds of the S&P 500's tick slice, as pyarrow reads LSE's file: each value
+/// a quote whose bid and ask are the value, with no sizes, as data-ws sends an index's ticks.
 #[tokio::test]
 async fn an_index_s_quotes_are_the_values_of_its_tick_slice_as_bid_and_ask_with_no_sizes() {
     let lse = MockLse::start(vec![Reply::file(SPX_TICKS)]);
@@ -2947,12 +2844,10 @@ async fn an_exchange_s_instrument_s_bars_fail_naming_them_unasked(
     assert!(lse.calls().is_empty(), "{:?}", lse.calls());
 }
 
-/// The client with `AAPL_CALL`'s definition, as Databento gives it, in its cache.
 async fn defining_aapl_call(lse: &MockLse) -> (Box<dyn DataClient>, Events) {
     connected_with(config(lse), vec![aapl_call()]).await
 }
 
-/// The markets of the calls LSE received, in order.
 fn markets(lse: &MockLse) -> Vec<Option<String>> {
     lse.calls()
         .iter()
@@ -3088,22 +2983,17 @@ async fn an_option_s_candles_are_bars_stamped_at_their_close_asked_by_its_osi_sy
     assert_eq!(markets(&lse), [Some("us_options".to_string())]);
 }
 
-/// The client with NVDA's definition, as Databento gives it, in its cache.
 async fn defining_nvda(lse: &MockLse) -> (Box<dyn DataClient>, Events) {
     connected_with(config(lse), vec![nvda()]).await
 }
 
-/// 12 November 2026 at `time`, UTC.
 fn on_the_12th(time: &str) -> UnixNanos {
     UnixNanos::from(at(&format!("2026-11-12T{time}Z")))
 }
 
 /// NVDA's trades over the second, as LSE's docs record a paid market's trades
-/// (`test_data/README.md`): asked of LSE's `nasdaq` by NVDA's ticker with the Nasdaq key, no
-/// catalogue lookup between, a ticker naming its stock.
-///
-/// There are four trades at a cent, in shares, with no aggressor side, the two alike told apart by
-/// their ids.
+/// (`test_data/README.md`): asked of LSE's `nasdaq` by ticker with the Nasdaq key. Four trades at
+/// a cent, in shares, no aggressor side, the two alike told apart by their ids.
 #[tokio::test]
 async fn an_xnas_stock_s_trades_are_asked_of_lse_s_nasdaq_by_its_ticker_with_the_nasdaq_key() {
     let lse = MockLse::start(vec![Reply::file(NVDA_TRADES)]);
@@ -3155,8 +3045,6 @@ async fn an_xnas_stock_s_trades_are_asked_of_lse_s_nasdaq_by_its_ticker_with_the
     assert_eq!(markets(&lse), [Some("nasdaq".to_string())]);
 }
 
-/// NVDA's quotes over the second, as LSE's docs record a paid market's quotes: its best bid and
-/// offer, with the sizes LSE sends, in shares.
 #[tokio::test]
 async fn an_xnas_stock_s_quotes_are_its_best_bid_and_offer_with_lse_s_sizes() {
     let lse = MockLse::start(vec![Reply::file(NVDA_QUOTES)]);
@@ -3209,8 +3097,8 @@ async fn an_xnas_stock_s_quotes_are_its_best_bid_and_offer_with_lse_s_sizes() {
 }
 
 /// NVDA's book over the second, as LSE's docs record a book export: four snapshots of ten levels a
-/// side, each level with its count of orders, the last of eight asks, its last two levels empty;
-/// Nasdaq TotalView's Level 2, asked by NVDA's ticker with the Nasdaq key.
+/// side with order counts, the last of eight asks, its last two levels empty. Nasdaq TotalView's
+/// Level 2, asked by ticker.
 #[tokio::test]
 async fn an_xnas_stock_s_book_is_its_depth_snapshots_asked_by_its_ticker_with_the_nasdaq_key() {
     let lse = MockLse::start(vec![Reply::file(NVDA_BOOK)]);
@@ -3283,11 +3171,9 @@ async fn an_xnas_stock_s_book_is_its_depth_snapshots_asked_by_its_ticker_with_th
     );
 }
 
-/// NVDA's orders over the second, as LSE's docs record an orders export: the two orders added at
-/// one time, a change of one and the removal of the other, each a delta of its order, and an event
-/// of no action, which gives none, the last of each time ending it.
-///
-/// It is Nasdaq TotalView's Level 3, asked by NVDA's ticker with the Nasdaq key.
+/// NVDA's orders over the second, as LSE's docs record an orders export: two orders added at one
+/// time, then a change of one, the removal of the other, and an event of no action, which gives no
+/// delta, the last of each time ending it. Nasdaq TotalView's Level 3, asked by ticker.
 #[tokio::test]
 async fn an_xnas_stock_s_orders_are_its_book_deltas_asked_by_its_ticker_with_the_nasdaq_key() {
     let lse = MockLse::start(vec![Reply::file(NVDA_ORDERS)]);
