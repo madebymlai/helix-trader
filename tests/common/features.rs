@@ -1,14 +1,14 @@
-//! The features of the model tests, declared and set in `[indicators]` as a strategy's are:
-//! Nautilus' simple moving average by its constructor's arguments (`SmaArgs`), as the crate has its
-//! exponential one (`strategy::EmaArgs`), and `[indicators]` tables of TOML text.
+//! The features of the model tests, declared in `[indicators]` as a strategy's are: Nautilus'
+//! simple moving average by its constructor's arguments (`SmaArgs`), and `[indicators]` tables of
+//! TOML text.
 
 use helix_trader::strategy::{IndicatorArgs, IndicatorsConfig};
 use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::enums::PriceType;
 use serde::{Deserialize, Serialize};
 
-/// The arguments of a Nautilus `SimpleMovingAverage`, built by its `new_checked`: `period`, and
-/// `price_type`, the price it reads of quotes (`LAST` left out; bars give their close).
+/// The arguments of a Nautilus `SimpleMovingAverage`: `period`, and `price_type`, the price it
+/// reads of quotes (`LAST` left out; bars give their close).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SmaArgs {
@@ -25,7 +25,6 @@ impl IndicatorArgs for SmaArgs {
     }
 }
 
-/// The `[indicators]` tables `toml` holds, by name.
 pub(crate) fn tables(toml: &str) -> IndicatorsConfig {
     toml::from_str(toml).unwrap()
 }

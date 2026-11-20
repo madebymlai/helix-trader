@@ -1,7 +1,6 @@
 //! A strategy declaring tick series and no bar types: the run replays exactly the declared series,
 //! IC's gold quotes (`common::ic`) and CME gold's trades and book depth (`common::glbx`), and
-//! nothing else the catalog stores. The probe subscribes to the quotes, trades and book depth of
-//! both instruments and records each it gets.
+//! nothing else the catalog stores.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
@@ -21,10 +20,8 @@ use rstest::rstest;
 
 use crate::common::{glbx, ic};
 
-/// What the probe got: its kind, its instrument and its time.
 type Got = (NautilusDataType, InstrumentId, UnixNanos);
 
-/// Subscribes to every tick series of both instruments and records each tick it gets.
 #[derive(Debug)]
 struct TickProbe {
     core: StrategyCore,
@@ -81,8 +78,7 @@ impl DataActor for TickProbe {
     }
 }
 
-/// A catalog of IC's gold and its quotes, CME gold, its book depth and its trades, all stored over
-/// 08:00 to 12:00.
+/// IC's gold quotes, CME gold's book depth and trades, all stored over 08:00 to 12:00.
 fn catalog() -> tempfile::TempDir {
     let dir = ic::catalog();
     glbx::store(dir.path());
@@ -90,8 +86,7 @@ fn catalog() -> tempfile::TempDir {
     dir
 }
 
-/// Runs the probe over `[09:00, 12:00]` on `catalog`, declaring `ticks` and no bar types, and
-/// returns what it got of each kind and instrument.
+/// Runs the probe over `[09:00, 12:00]` declaring `ticks` and no bar types.
 fn run(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Vec<Got> {
     let got = Rc::new(RefCell::new(Vec::new()));
     let probe = TickProbe {
@@ -118,7 +113,6 @@ fn tick(data: NautilusDataType, instrument_id: &str) -> TickSeries {
     }
 }
 
-/// The times of what `got` holds of `data` of `instrument_id`.
 fn times(got: &[Got], data: &NautilusDataType, instrument_id: &str) -> Vec<UnixNanos> {
     let id = InstrumentId::from(instrument_id);
     got.iter()
