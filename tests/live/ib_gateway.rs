@@ -1,14 +1,20 @@
-//! End to end on the Docker IB Gateway: the history, fill-catalog and the live node start or reuse
-//! Nautilus' paper container and work through it. Needs Docker (`DOCKER_HOST` for podman), the
-//! paper login (`TWS_USERNAME`, `TWS_PASSWORD`), a paper account (`NAUTILUS_IB_ACCOUNT_ID`, for
-//! example DU1234567) from the environment or `.env`, and nothing else on port 4002: the container
-//! takes it, and its login ends any other session of the same user.
+//! End to end on the Docker IB Gateway. The history, fill-catalog and the live node start or reuse
+//! Nautilus' paper container and work through it.
 //!
-//! Gated as Nautilus' IB examples are (`node_exec_tester`, `node_data_tester`) by
-//! `NAUTILUS_IB_RUN=1` in the shell. `net_liquidation_moves_with_an_open_positions_pnl` holds SXR8
-//! for some minutes, so it also needs `NAUTILUS_IB_LIVE_ORDERS=1`, Xetra open, and a paper account
-//! in EUR holding no position; no other test places an order (the live run's strategy is never
-//! warm). Run them with:
+//! The tests need:
+//!
+//! - Docker (`DOCKER_HOST` for podman).
+//! - The paper login (`TWS_USERNAME`, `TWS_PASSWORD`) and a paper account
+//!   (`NAUTILUS_IB_ACCOUNT_ID`, for example DU1234567), from the environment or `.env`.
+//! - Nothing else on port 4002: the container takes it, and its login ends any other session of
+//!   the same user.
+//!
+//! Gated by `NAUTILUS_IB_RUN=1` in the shell, as Nautilus' IB examples are (`node_exec_tester`,
+//! `node_data_tester`).
+//!
+//! `net_liquidation_moves_with_an_open_positions_pnl` holds SXR8 for some minutes. It also needs
+//! `NAUTILUS_IB_LIVE_ORDERS=1`, Xetra open, and a paper account in EUR holding no position. No
+//! other test places an order (the live run's strategy is never warm). Run them with:
 //!
 //! ```sh
 //! NAUTILUS_IB_RUN=1 cargo test --test live ib_gateway::
@@ -17,7 +23,7 @@
 //!
 //! The test deletes the live node's Redis records (trader `HELIXTEST-043`) once the node has
 //! stopped cleanly. The gateway container is left running for the next run. Client ids 40 to 43, 48
-//! and 49, apart from `fill-catalog`'s 10 and `live`'s 1.
+//! and 49 are separate from `fill-catalog`'s 10 and `live`'s 1.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -60,12 +66,15 @@ use rust_decimal::Decimal;
 
 use crate::common;
 
-/// One test at a time: the adapter's start is not safe against another task or process starting
-/// the same container, and one node per process.
+/// Lets one test run at a time.
+///
+/// The adapter's start is not safe against another task or process starting the same container.
+/// Only one node runs per process.
 static GATEWAY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Whether the run is opted in, read from the shell before `.env` so that the file cannot opt in,
-/// claiming the process (`claim_process`).
+/// Returns whether the run is opted in, and claims the process (`claim_process`).
+///
+/// It reads the shell before `.env`, so that the file cannot opt in.
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_IB_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -109,7 +118,7 @@ async fn history_starts_or_reuses_the_paper_gateway_and_a_second_connection_reus
     assert_eq!(second.instruments(&[sxr8()]).await.unwrap().len(), 1);
 }
 
-/// IB's cash FX pair, which IB serves no TRADES bars of: its history is its 1-MINUTE BID and ASK
+/// IB's cash FX pair. IB serves no TRADES bars for it, so its history is its 1-MINUTE BID and ASK
 /// bars.
 const EUR_USD: &str = "EUR/USD.IDEALPRO";
 
@@ -120,8 +129,8 @@ fn history_venues() -> HistoryVenueArgs {
     HistoryVenueArgs::from_arg_matches(&matches).unwrap()
 }
 
-/// fill-catalog fills the pair's definition and BID and ASK minute bars over an hour FX trades
-/// through, Thursday 12 November 2026 from 10:00 UTC.
+/// fill-catalog fills the pair's definition and BID and ASK minute bars over an hour that FX trades
+/// through. The hour is Thursday 12 November 2026 from 10:00 UTC.
 #[tokio::test(flavor = "multi_thread")]
 async fn fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars() {
     if !opted_in("fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars") {
@@ -151,7 +160,7 @@ async fn fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars() {
         .unwrap();
     assert_eq!(defined.len(), 1, "{EUR_USD} is not defined once");
 
-    // A pair Nautilus' exchange rates read: one with a base currency
+    // Nautilus' exchange rates read a pair that has a base currency
     assert_eq!(defined[0].base_currency(), Some(Currency::EUR()));
     let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
     let [bids, asks] = [bid, ask].map(|bar_type| {
@@ -187,7 +196,7 @@ async fn fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars() {
             .collect::<BTreeMap<UnixNanos, Price>>()
     });
 
-    // The BID bars are the bid's and the ASK bars the ask's: in each minute both close, the bid
+    // The BID bars are the bid's and the ASK bars are the ask's: in each minute both close, the bid
     // closes at or below the ask, and below it in some.
     let closes: Vec<(Price, Price)> = bids
         .iter()
@@ -207,8 +216,10 @@ async fn fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars() {
     );
 }
 
-/// The EMA crossover on SXR8.IBIS hour bars of IB's minute bars, warmed up over two hours: its slow
-/// EMA needs 30 bars, so it never trades.
+/// Returns the EMA crossover on SXR8.IBIS hour bars, built from IB's minute bars and warmed up over
+/// two hours.
+///
+/// Its slow EMA needs 30 bars, so it never trades.
 fn never_trading_ema_cross() -> EmaCrossConfig {
     EmaCrossConfig::load(
         r#"
@@ -250,7 +261,7 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     let config = never_trading_ema_cross();
     let requirements = config.data_requirements();
 
-    // An empty catalog: the venue answers the whole warmup
+    // The catalog is empty, so the venue answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
 
     // Outside the catalog, as `Live` requires
@@ -263,8 +274,8 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
         recording: crate::recording(staging.path()),
     };
 
-    // As Ctrl-C would, once the node runs: its signal handler stops it. The node is not `Send`, so
-    // it runs here and the signal is sent from another task.
+    // Once the node runs, interrupts it as Ctrl-C would, so its signal handler stops it, and since
+    // the node is not `Send`, it runs here and the signal is sent from another task.
     let interrupt = get_runtime().spawn(async {
         tokio::time::sleep(LIVE_RUN).await;
         let status = Command::new("kill")
@@ -313,8 +324,9 @@ async fn paper_client() -> Client {
         .unwrap()
 }
 
-/// One snapshot of IB's account updates (`reqAccountUpdates`, which Nautilus' IB adapter reads into
-/// its account state's info), until the end of IB's download.
+/// Returns one snapshot of IB's account updates, until the end of IB's download.
+///
+/// Nautilus' IB adapter reads `reqAccountUpdates` into the info of its account state.
 async fn account_updates(client: &Client, account: &IbAccount) -> Vec<AccountUpdate> {
     let mut subscription = client
         .account_updates(&IbAccountId(account.to_string()))
@@ -342,8 +354,10 @@ fn account_values(updates: &[AccountUpdate]) -> Vec<&AccountValue> {
         .collect()
 }
 
-/// The one currency with an `ExchangeRate` of 1 (IB: "the exchange rate of the currency to your
-/// base currency"), besides the `BASE` ledger. Values may carry a `$LEDGER-` prefix.
+/// Returns the one currency with an `ExchangeRate` of 1, besides the `BASE` ledger.
+///
+/// IB defines it as "the exchange rate of the currency to your base currency". Values may carry a
+/// `$LEDGER-` prefix.
 fn base_currency(values: &[&AccountValue]) -> String {
     let at_one: BTreeSet<&str> = values
         .iter()
@@ -364,7 +378,9 @@ fn base_currency(values: &[&AccountValue]) -> String {
 }
 
 /// The tags Nautilus' IB adapter requests to build its account state (`execution/account.rs`,
-/// `open_account_summary`), each balance under its row's currency.
+/// `open_account_summary`).
+///
+/// Each balance is under its row's currency.
 const SUMMARY_TAGS: &[&str] = &[
     AccountSummaryTags::NET_LIQUIDATION,
     AccountSummaryTags::TOTAL_CASH_VALUE,
@@ -378,9 +394,11 @@ const SUMMARY_TAGS: &[&str] = &[
     AccountSummaryTags::CUSHION,
 ];
 
-/// A trade on IB is sized on the balance Nautilus' IB adapter builds from IB's account summary: one
-/// amount, its net liquidation, in one currency, the base currency, if IB reports so. Rows of a
-/// ratio, such as the cushion, carry no currency.
+/// A trade on IB is sized on the balance that Nautilus' IB adapter builds from IB's account
+/// summary.
+///
+/// The balance is one amount, its net liquidation, in one currency, the base currency, if IB
+/// reports so. Rows that hold a ratio, such as the cushion, carry no currency.
 #[tokio::test(flavor = "multi_thread")]
 async fn ib_reports_its_account_summary_in_the_accounts_base_currency_alone() {
     if !opted_in("ib_reports_its_account_summary_in_the_accounts_base_currency_alone") {
@@ -435,12 +453,12 @@ fn held_contract() -> Contract {
         .build()
 }
 
-/// How many SXR8 shares the test holds: a cent on SXR8 moves their P&L by 0.50 EUR.
+/// How many SXR8 shares the test holds. A cent on SXR8 moves their P&L by 0.50 EUR.
 const HELD_SHARES: f64 = 50.0;
 
 const PNL_MOVE: f64 = 1.0;
 
-/// How long the test waits for that move, sampling every `SAMPLED`: IB updates its account values
+/// How long the test waits for that move, sampling every `SAMPLED`. IB updates its account values
 /// every three minutes.
 const PNL_WAIT: Duration = Duration::from_secs(12 * 60);
 const SAMPLED: Duration = Duration::from_secs(30);
@@ -555,13 +573,14 @@ async fn samples_apart(client: &Client, account: &IbAccount) -> (Sample, Sample)
     (first, last)
 }
 
-/// Nautilus' IB adapter takes IB's net liquidation as the balance total, and `Portfolio::equity`
-/// adds a margin account's open P&L to it: a trade on IB is sized on the balance alone because the
-/// net liquidation holds that P&L already. Holding 50 SXR8 on an account based in EUR and nothing
-/// else, the net liquidation over the cash (the value of the shares) moves with their P&L as IB
-/// reports it: between two account updates the P&L moved a euro or more across, by as much, give or
-/// take half. A net liquidation leaving the position out would not move. The shares are sold
-/// before anything is judged.
+/// Nautilus' IB adapter takes IB's net liquidation as the balance total. `Portfolio::equity` adds a
+/// margin account's open P&L to it. A trade on IB is sized on the balance alone, because the net
+/// liquidation holds that P&L already.
+///
+/// With 50 SXR8 held on an account based in EUR and nothing else, the net liquidation over the cash
+/// (the value of the shares) moves with their P&L as IB reports it: between two account updates the
+/// P&L moved a euro or more across, by as much, give or take half. A net liquidation that left the
+/// position out would not move. The shares are sold before anything is judged.
 #[tokio::test(flavor = "multi_thread")]
 async fn net_liquidation_moves_with_an_open_positions_pnl() {
     let set = |name| std::env::var(name).is_ok_and(|value| value == "1");

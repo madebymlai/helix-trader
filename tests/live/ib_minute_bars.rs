@@ -1,22 +1,28 @@
-//! IB's 1-minute bars on the live node, end to end on the Docker paper gateway, with a catalog
-//! holding the instrument's minute bars up to `CATALOG_BEHIND` before now, as fill-catalog leaves
-//! it. The warmup of a composite bar type is the catalog's bars, then IB's answer to the source
-//! bars' `request_bars`; the live minute bars come from `subscribe_bars`. The two meet with no gap
-//! and no duplicate: the warmup request ends at now, so the data engine drops the minute still in
-//! progress from IB's answer and the live stream starts with it, not at the catalog's end (no
-//! replay: the subscription's `start_ns` is now). Prints how long after its close each live minute
-//! bar arrived, which `SOURCE_BAR_DELAY_MICROS` in `strategy::warmup` must exceed.
+//! IB's 1-minute bars on the live node, end to end on the Docker paper gateway. The catalog holds
+//! the instrument's minute bars up to `CATALOG_BEHIND` before now, as fill-catalog leaves it.
 //!
-//! Gated as `ib_gateway.rs`. It places no order. Needs SXR8.IBIS quoted on IB (Xetra's full
+//! The warmup of a composite bar type is the catalog's bars, then IB's answer to the source bars'
+//! `request_bars`. The live minute bars come from `subscribe_bars`. The two meet with no gap and no
+//! duplicate:
+//!
+//! - The warmup request ends at now, so the data engine drops the minute still in progress from
+//!   IB's answer.
+//! - The live stream starts with that minute, not at the catalog's end (no replay: the
+//!   subscription's `start_ns` is now).
+//!
+//! The test prints how long after its close each live minute bar arrived, which
+//! `SOURCE_BAR_DELAY_MICROS` in `strategy::warmup` must exceed.
+//!
+//! Gated as `ib_gateway.rs`. It places no order. It needs SXR8.IBIS quoted on IB (Xetra's full
 //! session, 07:30-22:00 Frankfurt time, on a trading day), or the instrument
-//! `NAUTILUS_IB_INSTRUMENT` names, trading then, and takes about five minutes:
+//! `NAUTILUS_IB_INSTRUMENT` names, trading then. It takes about five minutes:
 //!
 //! ```sh
 //! NAUTILUS_IB_RUN=1 cargo test --test live ib_minute_bars:: -- --nocapture
 //! ```
 //!
 //! The test deletes the node's Redis records (trader `HELIXTEST-046`) once the node has stopped.
-//! Client id 46 for the node, 47 for filling the catalog.
+//! Client id 46 is for the node, 47 for filling the catalog.
 
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
@@ -70,8 +76,11 @@ struct Record {
     live: Vec<(Bar, UnixNanos)>,
 }
 
-/// Warms up on the composite hour bars and subscribes from where it ends, as a strategy does, and
-/// to their source minute bars too, to see each one; stops the node after `LIVE_MINUTES` of them.
+/// Warms up on the composite hour bars and subscribes from where the warmup ends, as a strategy
+/// does.
+///
+/// It also subscribes to their source minute bars, to see each one, and stops the node after
+/// `LIVE_MINUTES` of them.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
@@ -144,7 +153,7 @@ impl DataActor for Probe {
     }
 }
 
-/// As Ctrl-C would: the node's signal handler stops it.
+/// Interrupts as Ctrl-C would, so the node's signal handler stops it.
 fn interrupt() {
     let pid = std::process::id().to_string();
     let status = Command::new("kill").args(["-INT", &pid]).status();
@@ -251,8 +260,8 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         "the warmup did not complete"
     );
 
-    // Both the catalog and IB served it: bars on either side of the catalog's end, and the largest
-    // step between two bars.
+    // Both the catalog and IB served it, as shown by bars on either side of the catalog's end and
+    // the largest step between two bars.
     let catalog_end = catalog_end.as_nanosecond() as i64;
     let from_catalog = warmup.iter().filter(|&&ts| ts <= catalog_end).count();
     let largest_step = warmup.windows(2).map(|pair| pair[1] - pair[0]).max();

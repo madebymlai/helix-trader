@@ -1,14 +1,14 @@
-//! End to end on a cTrader broker's demo, the token pair: a forced renewal of the access token on a
-//! running session, which goes on receiving quotes and answering requests; then a fresh session
-//! authenticates from the token file without renewing.
+//! End to end on a cTrader broker's demo, for the token pair. The test forces a renewal of the
+//! access token on a running session. That session goes on receiving quotes and answering
+//! requests. Then a fresh session authenticates from the token file, without renewing.
 //!
 //! It ROTATES the login's real token pair, every broker's, in the token file
-//! (`$XDG_STATE_HOME/ctrader/token.json`, by default `~/.local/state/ctrader/token.json`): the file
-//! keeps the new pair, `.env`'s is spent. Needs what `ctrader_demo.rs` needs, through the cTrader
-//! adapter's hooks (its `test-support` feature).
+//! (`$XDG_STATE_HOME/ctrader/token.json`, by default `~/.local/state/ctrader/token.json`). The file
+//! keeps the new pair, and `.env`'s is spent. It needs what `ctrader_demo.rs` needs, through the
+//! cTrader adapter's hooks (its `test-support` feature).
 //!
-//! Gated as `ctrader_demo.rs` is; demo only, no order. Run alone, so that no other demo session
-//! runs on the pair it rotates. Run it with:
+//! Gated as `ctrader_demo.rs` is. It uses the demo only and places no order. Run it alone, so that
+//! no other demo session runs on the pair it rotates. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=ic cargo test --test live ctrader_token_demo:: -- --nocapture
@@ -22,7 +22,7 @@ use nautilus_common::testing::wait_until_async;
 
 use crate::demo_broker::opted_in;
 
-/// Adapter log records at info and above, which must hold no token.
+/// Holds the adapter's log records at info and above. They must hold no token.
 struct Captured(Mutex<Vec<String>>);
 
 impl log::Log for Captured {

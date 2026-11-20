@@ -1,14 +1,17 @@
-//! End to end on a cTrader broker's demo: the session authenticates the app and the demo account,
-//! XAU/USD and EUR/USD load as CFDs at the broker's margins, a day of XAU/USD's quotes fills a
-//! temporary catalog through the node's data client in one fill and resumed, and the execution
-//! client reads the account: its state and its startup reconciliation.
+//! End to end on a cTrader broker's demo. The test checks that:
 //!
-//! Needs the login's `CTRADER_*` credential, and the broker's account and environment, from the
-//! environment or `.env`. Only its demo is accepted: any other environment fails the test before
+//! - The session authenticates the app and the demo account.
+//! - XAU/USD and EUR/USD load as CFDs at the broker's margins.
+//! - A day of XAU/USD's quotes fills a temporary catalog through the node's data client, in one
+//!   fill and resumed.
+//! - The execution client reads the account: its state and its startup reconciliation.
+//!
+//! Needs the login's `CTRADER_*` credential and the broker's account and environment, from the
+//! environment or `.env`. It accepts only the demo: any other environment fails the test before
 //! connecting.
 //!
-//! Gated by `demo_broker::opted_in`: the test returns at once, saying it was skipped, unless
-//! `NAUTILUS_CTRADER_RUN` names the broker in the shell. It places no order. Run it with:
+//! Gated by `demo_broker::opted_in`: unless `NAUTILUS_CTRADER_RUN` names the broker in the shell,
+//! the test returns at once, saying it was skipped. It places no order. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_demo:: -- --nocapture
@@ -78,8 +81,10 @@ fn stored(catalog: &mut ParquetDataCatalog, instrument_id: InstrumentId) -> Vec<
         .unwrap()
 }
 
-/// Fills the catalog in `dir` with the quotes of `instrument_id` over `[start, end]` through the
-/// node's data client, as fill-catalog does (`fill_history`).
+/// Fills the catalog in `dir` through the node's data client, as fill-catalog does
+/// (`fill_history`).
+///
+/// It fills the quotes of `instrument_id` over `[start, end]`.
 pub(crate) async fn fill_quotes_through_node(
     dir: &std::path::Path,
     instrument_id: InstrumentId,
@@ -101,7 +106,8 @@ pub(crate) async fn fill_quotes_through_node(
     fill_history(&requirements, start, end, &venues, dir).await
 }
 
-/// Wednesday 21 October 2026 UTC, split for the resumed fill at a time between two milliseconds.
+/// Covers Wednesday 21 October 2026 UTC. The resumed fill splits it at a time between two
+/// milliseconds.
 #[tokio::test(flavor = "current_thread")]
 async fn a_day_of_gold_quotes_fills_the_same_in_one_fill_and_resumed() {
     let Some(broker) = opted_in(
@@ -170,8 +176,9 @@ async fn a_day_of_gold_quotes_fills_the_same_in_one_fill_and_resumed() {
     );
 }
 
-/// Started, connected (the node registers the account state it publishes), then the startup mass
-/// status. Read only.
+/// Starts the client and connects it, then reads the startup mass status. It is read only.
+///
+/// The node registers the account state it publishes on connecting.
 #[tokio::test(flavor = "current_thread")]
 async fn the_execution_client_reads_the_hedged_demo_account_and_reconciles_it() {
     let Some(broker) = opted_in(
@@ -244,8 +251,8 @@ async fn the_execution_client_reads_the_hedged_demo_account_and_reconciles_it() 
     assert!(balance.total.as_f64() > 0.0, "{balance:?}");
     assert!(mass_status.reports_complete());
 
-    // The demo account holds nothing open: each position or order there would be one report here,
-    // beside the orders closed over the window.
+    // The demo account holds nothing open, so each position or order there would be one report
+    // here, beside the orders closed over the window.
     assert!(mass_status.position_reports().is_empty());
     assert!(
         mass_status

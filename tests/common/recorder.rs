@@ -1,13 +1,15 @@
-//! A recording strategy for what the EMA crossover cannot show: the bars' open, high and low, fills
-//! of a given side and size, funding and positions.
+//! A recording strategy for what the EMA crossover cannot show: the open, high and low of bars,
+//! fills of a given side and size, funding and positions.
 //!
-//! It subscribes to its bars through `strategy::subscriptions` as a real strategy does in a
-//! backtest, on a plain instrument or, given continuous bars, on a root. It records every bar and
-//! fill and, on stop, its positions' adjustments (funding), orders, denied orders and account
-//! margins. It can send market orders on the first bars, or trades at chosen stakes
-//! (`strategy::orders::Trade`) on equity converted at chosen rates (`strategy::conversions`), close
-//! its positions by id on given bars, and close them on stop. It leaves `oms_type` unset, so it
-//! keeps positions as the venue does.
+//! It subscribes to its bars through `strategy::subscriptions`, as a real strategy does in a
+//! backtest. It subscribes on a plain instrument or, given continuous bars, on a root. It records
+//! every bar and fill. On stop, it records the adjustments (funding) to its positions, its orders,
+//! denied orders and account margins.
+//!
+//! It can send market orders on the first bars, or trades at chosen stakes
+//! (`strategy::orders::Trade`) on equity converted at chosen rates (`strategy::conversions`). It
+//! can close its positions by id on given bars, and close them on stop. It leaves `oms_type`
+//! unset, so it keeps positions as the venue does.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -38,9 +40,10 @@ use nautilus_trading::{
 };
 use rust_decimal::Decimal;
 
-/// What the recorder got, in order. Positions, orders and adjustments are those in the cache when
-/// it stops, positions and orders oldest first; margins are the venue account's, if a margin
-/// account.
+/// What the recorder got, in order.
+///
+/// Positions, orders and adjustments are those in the cache when it stops. Positions and orders
+/// are oldest first. Margins are the venue account's, if it is a margin account.
 #[derive(Debug, Default)]
 pub(crate) struct Record {
     pub bars: Vec<Bar>,
@@ -67,14 +70,15 @@ pub(crate) struct Recorder {
 
     market: Vec<(OrderSide, Quantity)>,
 
-    /// Per first bar, in order: side, one R from the bar's close, stake. Without exits, a market
-    /// entry.
+    /// For each first bar, in order: side, one R from the bar's close, stake. It enters at market,
+    /// without exits.
     staked: Vec<(OrderSide, Decimal, Stake)>,
 
     /// None unless it converts (`converting`).
     rates: Rates,
 
-    /// Bars, by index, on which it closes its open positions before any market order of the bar.
+    /// The indexes of bars on which it closes its open positions, before any market order on that
+    /// bar.
     close_on: Vec<usize>,
     record: Rc<RefCell<Record>>,
 }
@@ -99,7 +103,7 @@ impl Recorder {
         (recorder, record)
     }
 
-    /// On a root, its bars Nautilus' continuous bars of `continuous`.
+    /// On a root, its bars are Nautilus' continuous bars of `continuous`.
     pub(crate) fn continuous(
         bar_type: BarType,
         continuous: ContinuousBars,
@@ -122,8 +126,9 @@ impl Recorder {
         (Self { market, ..recorder }, record)
     }
 
-    /// Sends on the `i`-th bar the trade of `staked[i]`: side, one R from the bar's close and
-    /// stake, a market entry.
+    /// Sends the trade of `staked[i]` on the `i`-th bar.
+    ///
+    /// The trade is a market entry with a side, one R from the bar's close and a stake.
     pub(crate) fn staking(
         bar_type: BarType,
         staked: Vec<(OrderSide, Decimal, Stake)>,

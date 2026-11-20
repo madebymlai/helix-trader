@@ -1,10 +1,11 @@
-//! End to end on a cTrader broker's demo: `Live` on XAU/USD with the broker's clients and a catalog
-//! holding gold's quotes up to `CATALOG_BEHIND` before now (filled as fill-catalog fills it). A
-//! recording strategy gets its minute bars warmed up over two windows, the catalog's and then the
-//! broker's data client's up to now, each bar reaching its indicator once, then live quotes and the
-//! bars built from them, until SIGINT. The broker's answer is written back to the catalog, and the
-//! live quotes the node receives are streamed into it. Needs what `ctrader_demo.rs` needs, and
-//! gold's market open.
+//! End to end on a cTrader broker's demo, running `Live` on XAU/USD with the broker's clients. The
+//! catalog holds gold's quotes up to `CATALOG_BEHIND` before now, filled as fill-catalog fills it.
+//!
+//! A recording strategy gets its minute bars warmed up over two windows: the catalog's, then the
+//! broker's data client's up to now. Each bar reaches its indicator once. Then the strategy gets
+//! live quotes and the bars built from them, until SIGINT. The broker's answer is written back to
+//! the catalog, and the live quotes the node receives are streamed into it. The test needs what
+//! `ctrader_demo.rs` needs, and gold's market open.
 //!
 //! Gated as `ctrader_demo.rs` is. The strategy sends no order. The test deletes the trader's Redis
 //! records (`live::redis`) once the node has stopped cleanly. Run it with:
@@ -157,7 +158,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         recording: crate::recording(staging.path()),
     };
 
-    // As Ctrl-C would, once the node runs: its signal handler stops it
+    // Interrupts as Ctrl-C would once the node runs, so its signal handler stops it
     let interrupt = get_runtime().spawn(async {
         tokio::time::sleep(LIVE_RUN).await;
         let status = Command::new("kill")
@@ -229,8 +230,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         "no warmup quote from the broker"
     );
 
-    // The catalog's quotes after its own end up to the warmup's last are the broker's answer
-    // written back; checking the catalog's end alone would pass on the quotes the node streams.
+    // The quotes after the catalog's own end, up to the warmup's last, are the broker's answer
+    // written back, as checking the catalog's end alone would pass on the quotes the node streams.
     let stored: Vec<QuoteTick> = ParquetDataCatalog::new(catalog.path(), None, None, None, None)
         .query(Some(vec![gold.to_string()]), None, None, None, None, true)
         .unwrap();
@@ -260,7 +261,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         .map(seen)
         .collect();
 
-    // The repeat, stamped as the warmup's last, is streamed beside it
+    // The repeat is stamped as the warmup's last, and is streamed beside it
     if repeated && written_back.len() > from_broker.len() {
         written_back.pop();
     }
@@ -282,7 +283,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
             .all(|w| w[0].ts_event <= w[1].ts_event)
     );
 
-    // Warm, up to now, each bar once: the first live bar is the minute after the last warmup bar
+    // The warmup runs up to now and gives each bar once, so the first live bar is the minute after
+    // the last warmup bar
     assert!(warmup_bars.len() >= 20, "{} warmup bars", warmup_bars.len());
     assert!(
         warmup_bars
@@ -301,7 +303,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
             .all(|w| w[1].ts_event.as_u64() - w[0].ts_event.as_u64() == minute)
     );
 
-    // Live quotes: at the spot's time, sized as the history's, ordered
+    // Live quotes are at the spot's time, sized as the history's, and ordered
     assert!(!quotes.is_empty());
     assert!(quotes.iter().all(|q| q.instrument_id == gold));
     assert!(quotes.iter().all(|q| q.bid_price <= q.ask_price));
@@ -313,11 +315,12 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
             .all(|q| q.bid_size == broker.gold_quote_size())
     );
 
-    // The hand-off: past the one repeat allowed, every live quote is newer than the warmup's last
+    // At the hand-off, every live quote is newer than the warmup's last, past the one repeat
+    // allowed
     let new = &quotes[usize::from(repeated)..];
     assert!(new.iter().all(|q| q.ts_event > warmup_end));
 
-    // Streamed into the catalog: the new live quotes the strategy got, in order, then those
+    // The node streams the new live quotes the strategy got into the catalog, in order, then those
     // received until the clients disconnected (`live/README.md`, "Recording into the catalog").
     let streamed: Vec<_> = stored
         .iter()

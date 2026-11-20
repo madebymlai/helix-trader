@@ -1,9 +1,9 @@
-//! The cTrader brokers the demo modules (`ctrader_*`) run on: which one a run names, and what each
-//! one's demo account is expected to hold. The checks are the same on each, the venue, margins,
-//! sizes and costs the broker's.
+//! The cTrader brokers the demo modules (`ctrader_*`) run on. It says which broker a run names, and
+//! what each broker's demo account is expected to hold. The checks are the same on each broker. The
+//! venue, margins, sizes and costs are the broker's.
 //!
-//! The gate: `NAUTILUS_CTRADER_RUN=ic` or `pepperstone` in the shell. A test returns at once,
-//! saying it was skipped, without it.
+//! The gate is `NAUTILUS_CTRADER_RUN=ic` or `pepperstone` in the shell. Without it, a test returns
+//! at once, saying it was skipped.
 
 use std::ops::RangeInclusive;
 
@@ -23,26 +23,30 @@ pub(crate) struct DemoBroker {
     environment_var: &'static str,
     connection: fn() -> anyhow::Result<CTraderConnection>,
 
-    /// The leverage of gold's and of EUR/USD's margin: the lower of the account's and the symbol's
-    /// first tier.
+    /// The leverage of the margin on gold and on EUR/USD.
+    ///
+    /// It is the lower of the account's leverage and the symbol's first tier.
     gold_leverage: u32,
     eurusd_leverage: u32,
 
-    /// The ounces of gold's synthetic quote size: its maximum order.
+    /// The ounces of gold's synthetic quote size, which is its maximum order.
     gold_quote_size: u32,
 
     commission_currency: &'static str,
     gold_commission: fn(f64) -> RangeInclusive<f64>,
 }
 
-/// The ounces of gold the orders test trades: 3, whose commission at Pepperstone's 0.035 USD an
-/// ounce is 0.105 USD, a half cent, so that the charge shows how the account rounds one.
+/// The ounces of gold the orders test trades.
+///
+/// It is 3. At Pepperstone's 0.035 USD an ounce, the commission is 0.105 USD, a half cent, so the
+/// charge shows how the account rounds one.
 pub(crate) const GOLD_OUNCES: u32 = 3;
 
 const BROKERS: [DemoBroker; 2] = [
-    // Measured on the demo account, 2026-10-26: the account's 1:30 under the symbols' own 1:200 and
-    // 1:1000. IC's Raw charge, 30 USD per million per side, in EUR on this account: 1 oz of gold,
-    // about 4,000 USD, is charged 0.10 to 0.12 EUR, and the test's ounces as many times.
+    // Measured on the demo account (2026-10-26): the account's 1:30 is under the symbols' own 1:200
+    // and 1:1000, and IC's Raw charge is 30 USD per million per side, in EUR on this account, so
+    // 1 oz of gold, about 4,000 USD, is charged 0.10 to 0.12 EUR, and the test's ounces as many
+    // times.
     DemoBroker {
         name: "ic",
         venue: ic::VENUE,
@@ -57,9 +61,9 @@ const BROKERS: [DemoBroker; 2] = [
             0.75 * usd..=usd
         },
     },
-    // Measured on the 'Pepperstone - Europe' demo account, 2026-11-04: the account's 1:30 over
-    // gold's own 1:20 and under EUR/USD's 1:30; 5,000 oz at most an order; 3.5 USD per lot per side
-    // on gold, a lot 100 oz, in the account's USD, in cents.
+    // Measured on the 'Pepperstone - Europe' demo account (2026-11-04): the account's 1:30 is
+    // over gold's own 1:20 and under EUR/USD's 1:30, an order is 5,000 oz at most, and gold is
+    // charged 3.5 USD per lot per side (a lot is 100 oz), in the account's USD, in cents.
     DemoBroker {
         name: "pepperstone",
         venue: pepperstone::VENUE,
@@ -73,9 +77,11 @@ const BROKERS: [DemoBroker; 2] = [
     },
 ];
 
-/// The broker a run names, if it does: read from the shell before `.env`, so that the file cannot
-/// opt in. An opted-in run claims the process for `module` (`claim_process`), then reads `.env` and
-/// refuses any environment but the broker's demo, before anything connects.
+/// Returns the broker a run names, if it names one.
+///
+/// It reads the shell before `.env`, so that the file cannot opt in. An opted-in run claims the
+/// process for `module` (`claim_process`). Then it reads `.env` and refuses any environment but the
+/// broker's demo, before anything connects.
 ///
 /// # Panics
 ///
