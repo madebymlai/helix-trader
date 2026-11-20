@@ -442,8 +442,6 @@ mod tests {
         load(toml).unwrap_err().downcast().unwrap()
     }
 
-    /// A declared indicator without its table is a missing field. An undeclared table is an
-    /// unsupported one.
     #[rstest]
     #[case::missing(without("breakout"), ConfigError::missing_field("indicators.breakout"))]
     #[case::not_declared(
@@ -457,7 +455,6 @@ mod tests {
         assert_eq!(refusal(&toml), expected);
     }
 
-    /// A table whose arguments or builder refuse it is refused under the indicator, saying why.
     #[rstest]
     #[case::an_argument_nautilus_refuses("period = 5", "period = 0", "period", "indicators.fast")]
     #[case::an_argument_a_custom_builder_refuses(

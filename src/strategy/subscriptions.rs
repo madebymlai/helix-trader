@@ -462,8 +462,6 @@ mod tests {
             .collect()
     }
 
-    /// Returns the tick subscriptions of a strategy started at `start` with `ticks`.
-    ///
     /// The strategy is handed GC's rolls up to `end`, each at the last nanosecond before it
     /// (`rolls::Roller`).
     fn rolled(ticks: Vec<TickSeries>, start: &str, end: &str) -> Vec<Sent> {
@@ -505,10 +503,6 @@ mod tests {
     }
 
     /// Reads GCZ26 beside its root GC, which rolls off it into GCG27 on 2026-11-26.
-    ///
-    /// - The root's trades and depth move to GCG27.
-    /// - GCZ26's trades stay subscribed, but its depth does not.
-    ///
     /// Nautilus keeps one subscription per topic and actor (`DataActorCore::add_subscription_any`),
     /// so GCZ26's own trades, subscribed after the root's, send none.
     #[rstest]
@@ -571,13 +565,6 @@ mod tests {
         )
     }
 
-    /// A replay subscribes custom series by data type and names no client, whatever their type.
-    ///
-    /// The series are:
-    /// - LSE's 10-year US yields, whose row has a live data client.
-    /// - The tests' 2-year US yields, of a type with no row.
-    ///
-    /// Only the message bus is subscribed. Nothing is sent to the data engine.
     #[rstest]
     fn a_replay_subscribes_custom_series_at_the_start_naming_no_client() {
         let us02y = CustomSeries::new("Yield", "US02Y".to_string(), None).unwrap();
@@ -616,8 +603,6 @@ mod tests {
             .collect()
     }
 
-    /// On a live node, LSE's yields name LSE's client, the live data source in the row for their
-    /// type. The tests' imbalances, of a type with no row, name none.
     #[rstest]
     fn a_live_custom_subscription_names_the_live_data_client_of_its_type_s_row() {
         let subscriptions = Subscriptions::new(
@@ -640,9 +625,6 @@ mod tests {
         assert_eq!(imbalance_subscribers("GCZ26.GLBX"), 1);
     }
 
-    /// On a live node, LSE's yields under the root GC are subscribed on GCZ26's data type, the
-    /// contract standing for GC on 2026-08-10. They move to GCG27's at the roll on 2026-11-26, and
-    /// each subscription names LSE's client.
     #[rstest]
     fn a_live_roll_moves_a_roots_custom_series_naming_the_same_client() {
         let subscriptions = Subscriptions::new(vec![], vec![], vec![lse_yields("GC.GLBX")]).live();
@@ -670,11 +652,6 @@ mod tests {
         CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
     }
 
-    /// Runs a strategy reading `custom` across GC's roll into GCG27.
-    ///
-    /// The strategy starts on 2026-08-10 at 14:30, when GCZ26 stands for GC. It is then handed the
-    /// roll at 00:00 UTC on 2026-11-26. Returns the handlers subscribed to the imbalances of each
-    /// of `identifiers` at the start and after the roll.
     fn imbalances_across_the_roll(
         custom: Vec<CustomSeries>,
         identifiers: &[&str],
@@ -701,13 +678,6 @@ mod tests {
 
     /// Counts the handlers subscribed to each identifier's imbalances at the start and after GC's
     /// roll into GCG27. No subscription names a client either time.
-    ///
-    /// - On the root GC: subscribed on GCZ26's data type, the contract standing for GC on
-    ///   2026-08-10, and moved to GCG27's at the roll.
-    /// - GCZ26's own series, read beside the root's, are still read on GCZ26 at the roll, so they
-    ///   stay subscribed.
-    /// - A contract's series and a series with no instrument stand for themselves. No GC roll moves
-    ///   them.
     #[rstest]
     #[case::of_a_root_moved_at_its_roll(
         vec![imbalances("GC.GLBX")],
@@ -758,8 +728,6 @@ mod tests {
     }
 
     /// A start subscribes from the time it is given, where a live warmup's requests end.
-    ///
-    /// It does not subscribe from the clock's time, which is a few moments later live.
     #[rstest]
     fn a_start_subscribes_from_the_time_it_is_given() {
         use NautilusDataType as D;
@@ -858,14 +826,6 @@ mod tests {
     }
 
     /// Subscribes each book in the format its venue's live data streams.
-    ///
-    /// - A GLBX contract's book, as LSE streams it: deltas as orders (L3_MBO), depth ten levels a
-    ///   side.
-    /// - A CME contract's book, as IB streams it: deltas as rows of IB's market depth (L2_MBP).
-    /// - An OKX swap's book: deltas as price levels (L2_MBP), depth five levels a side.
-    ///
-    /// Deltas cover the whole book each client streams, with no depth asked. Depth is snapshots of
-    /// price levels.
     ///
     /// A live start refuses a book whose venue's live data streams none of it (`venues::streams`):
     /// a cTrader broker's deltas or an IB instrument's depth. So only a replay subscribes to it. A
