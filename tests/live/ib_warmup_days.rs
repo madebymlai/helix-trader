@@ -1,12 +1,11 @@
-//! A warmup of days on IB, end to end on the Docker paper gateway, with an empty catalog, so that
-//! IB answers all of it: the warmup asks in windows under a day, each of which IB's client asks as
-//! one request between its bounds, in seconds (see `strategy::warmup`'s `WINDOW`), and gets every
-//! minute bar IB's history holds over them, as read a page at a time, and builds each hour bar from
-//! them once.
+//! A warmup of days on IB, end to end on the Docker paper gateway, with an empty catalog, so IB
+//! answers all of it: the warmup asks in windows under a day, each asked as one request between
+//! its bounds in seconds (see `strategy::warmup`'s `WINDOW`), gets every minute bar IB's history
+//! holds over them, read a page at a time, and builds each hour bar from them once.
 //!
-//! Gated as `ib_gateway.rs`: it returns at once, saying it was skipped, unless `NAUTILUS_IB_RUN=1`
-//! is set in the shell. It places no order. It tells only within a session of the instrument,
-//! SXR8.IBIS or the one `NAUTILUS_IB_INSTRUMENT` names, on a day of no weekend in the 72 hours:
+//! Gated as `ib_gateway.rs`, by `NAUTILUS_IB_RUN=1` in the shell. It places no order. It tells only
+//! within a session of the instrument, SXR8.IBIS or the one `NAUTILUS_IB_INSTRUMENT` names, on a
+//! day with no weekend in the 72 hours:
 //!
 //! ```sh
 //! NAUTILUS_IB_RUN=1 cargo test --test live ib_warmup_days:: -- --nocapture
@@ -53,16 +52,12 @@ fn composite() -> BarType {
 
 #[derive(Debug, Default)]
 struct Record {
-    /// When the warmup was started.
     started: Option<Timestamp>,
-
-    /// The stamps of the minute bars of the responses.
     minutes: Vec<u64>,
     failure: Option<String>,
 }
 
-/// Warms up and subscribes to its bars from where the warmup ends as a strategy does, and stops the
-/// node when the warmup ends.
+/// Warms up and subscribes to its bars from where the warmup ends as a strategy does, then stops.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
@@ -134,7 +129,7 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
         record: Rc::clone(&record),
     };
 
-    // An empty catalog of its own: IB answers the whole warmup
+    // An empty catalog: IB answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
 
     // Outside the catalog, as `Live` requires

@@ -5,9 +5,8 @@
 //! `OKX_ENVIRONMENT=demo` from the environment or `.env` (any other environment fails the test
 //! before any request); another failing check fails the test with its own message.
 //!
-//! Gated as `ib_gateway.rs` is: the test returns at once, saying it was skipped, unless
-//! `NAUTILUS_OKX_RUN=1` is set in the shell. It only reads the account and places no order. Run it
-//! with:
+//! Gated as `ib_gateway.rs` is, by `NAUTILUS_OKX_RUN=1` in the shell. It only reads the account.
+//! Run it with:
 //!
 //! ```sh
 //! NAUTILUS_OKX_RUN=1 cargo test --test live okx_demo:: -- --nocapture
@@ -26,8 +25,8 @@ use nautilus_model::{
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
-/// Whether the run is opted in: from the shell, before `.env` is read, so that the file cannot opt
-/// in. An opted-in run claims the process for this module (`claim_process`).
+/// Whether the run is opted in, from the shell before `.env` is read, so the file cannot opt in.
+/// An opted-in run claims the process (`claim_process`).
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_OKX_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -80,8 +79,8 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
     let config = x_perp_ema_cross();
     let requirements = config.data_requirements();
 
-    // A catalog of its own defining the X-Perp at a margin of 1 / 1000, above OKX's highest
-    // leverage, 125: the run is refused before any node is built, so nothing else reads it.
+    // A catalog defining the X-Perp at a margin of 1 / 1000, above OKX's highest leverage, 125: the
+    // run is refused before any node is built.
     let catalog = tempfile::tempdir().unwrap();
     let mut xperp = crypto_future_btcusdt(2, 6, Price::from("0.01"), Quantity::from("0.000001"));
     xperp.id = InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX");
@@ -108,8 +107,7 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
         .unwrap_err()
         .to_string();
 
-    // The refusal names the X-Perp, the catalog's leverage, 1000, and the account's, at most OKX's
-    // highest, 125.
+    // The refusal names the X-Perp, the catalog's leverage, 1000, and the account's, at most 125
     let numbers: Vec<f64> = err
         .split(|c: char| !c.is_ascii_digit() && c != '.')
         .filter_map(|number| number.trim_matches('.').parse().ok())
@@ -123,8 +121,8 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
         "{err}"
     );
 
-    // No node was built: the staging holds the trader's instance id alone, kept before the clients
-    // are set up, and nothing a node streams.
+    // No node was built: the staging holds only the trader's instance id, kept before the clients
+    // are set up.
     let staged: Vec<String> = std::fs::read_dir(staging.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

@@ -1,17 +1,15 @@
 //! End to end on LSE: a node streams, for a minute each, through the LSE adapter's data client
-//! routed as the live node routes it, LSE's gold futures quotes, `GOLD-FUTURES.LSEDGE`, on data-ws,
-//! the series' definition written by hand into a temporary catalog, as LSE publishes none; and the
+//! routed as the live node routes it, LSE's gold futures quotes, `GOLD-FUTURES.LSEDGE`, on
+//! data-ws, its definition written by hand into a temporary catalog as LSE publishes none; and the
 //! Level 1 of GCZ6 of 2026, `GCZ26.GLBX`, its quotes and trades, on LSE's CME stream, its
 //! definition Databento's (the crate's `testing::gcz26`), in the catalog too. Each definition is
-//! asked of the client as a live warmup asks one: the catalog answers. They need the LSE key,
-//! `LSE_API_KEY`, and a CME Group key, `LSE_CME_API_KEY`, from the environment or `.env`; the free
-//! key streams the gold series, on one connection a key, so no other live run may hold data-ws
-//! meanwhile. LSE opens a subscription with the symbol's last tick, and a CME contract with its
-//! last best bid and offer, so a quote comes while the market is closed too; trades come only while
-//! CME trades.
+//! asked of the client as a live warmup asks one: the catalog answers. They need `LSE_API_KEY` and
+//! a CME Group key, `LSE_CME_API_KEY`, from the environment or `.env`; the free key streams the
+//! gold series, on one connection a key, so no other live run may hold data-ws meanwhile. LSE
+//! opens a subscription with the symbol's last tick, and a CME contract with its last best bid
+//! and offer, so a quote comes while the market is closed too; trades come only while CME trades.
 //!
-//! Gated as `lse_history.rs` is: the test returns at once, saying it was skipped, unless
-//! `NAUTILUS_LSE_RUN=1` is set in the shell. Run it with:
+//! Gated as `lse_history.rs` is, by `NAUTILUS_LSE_RUN=1` in the shell. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_LSE_RUN=1 cargo test --test live lse_quotes:: -- --nocapture
@@ -42,11 +40,10 @@ use nautilus_persistence::{
 
 const GOLD: &str = "GOLD-FUTURES.LSEDGE";
 
-/// How long the quotes stream.
 const STREAMED: Duration = Duration::from_secs(60);
 
-/// Whether the run is opted in: from the shell, before `.env` is read, so that the file cannot opt
-/// in. An opted-in run claims the process for this module (`claim_process`).
+/// Whether the run is opted in, from the shell before `.env` is read, so the file cannot opt in.
+/// An opted-in run claims the process (`claim_process`).
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_LSE_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -57,7 +54,7 @@ fn opted_in(test: &str) -> bool {
     run
 }
 
-/// The gold series' definition, as one is written by hand: an index in USD, priced to a tenth, its
+/// The gold series' definition, as one is written by hand: an index in USD priced to a tenth, its
 /// sizes whole lots.
 fn gold() -> InstrumentAny {
     InstrumentAny::IndexInstrument(
@@ -76,8 +73,6 @@ fn gold() -> InstrumentAny {
     )
 }
 
-/// Asks the gold series' definition of LSE's client, as a live warmup does, then subscribes to its
-/// quotes, recording each.
 #[derive(Debug)]
 struct Quotes {
     core: DataActorCore,
@@ -169,8 +164,6 @@ async fn gold_futures_quotes_stream_from_lse_for_a_minute() {
     );
 }
 
-/// Asks GCZ26's definition of LSE's client, as a live warmup does, then subscribes to its quotes
-/// and trades, recording each.
 #[derive(Debug)]
 struct Level1 {
     core: DataActorCore,
