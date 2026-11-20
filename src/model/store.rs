@@ -1121,7 +1121,6 @@ mod tests {
         }
     }
 
-    /// A venue with a commission rate of 30 per million and 10 million USD.
     fn venue() -> DatasetVenue {
         DatasetVenue {
             commission: Commission::Rate(Decimal::new(3, 5)),
@@ -1134,7 +1133,6 @@ mod tests {
         time.parse().unwrap()
     }
 
-    /// A pair calibration with level line `0.1 + 0.5 C` and side call slope 1.5.
     const PAIR: Ksplit = Ksplit {
         level: Line {
             alpha: 0.1,
@@ -1144,8 +1142,6 @@ mod tests {
     };
 
     /// A fake model of `side`, or a meta model if `side` is none, probed on `rows`.
-    ///
-    /// The baseline is the mean label, 1/2. A meta model's line is `0.1 + 0.5 E`.
     fn model(side: Option<Side>, rows: &[Vec<f64>]) -> StoredModel {
         let set = TrainingSet::new(1, vec![0.2, 0.7], vec![0.0, 1.0]).unwrap();
         let fitted = LearnerConfig::Fake {}.fit(&set).unwrap();
@@ -1197,7 +1193,6 @@ mod tests {
         assert_eq!(models.read(at(MIDNIGHT)).unwrap(), published);
     }
 
-    /// A refused publish names the meta and publishes nothing.
     #[rstest]
     #[case::without_a_meta_for_a_strategy_with_one(with_meta(), false)]
     #[case::with_a_meta_for_a_strategy_without_one(config(), true)]
@@ -1239,7 +1234,6 @@ mod tests {
             .unzip();
         assert_eq!(bits(&rows_read), bits(&rows.concat()));
 
-        // The fake predicts the first feature, and the training mean (1/2) where it is missing
         assert_eq!(
             bits(&predictions),
             bits(&[0.5, f64::INFINITY, f64::NEG_INFINITY, -0.0])
@@ -1264,7 +1258,6 @@ mod tests {
         );
     }
 
-    /// A model set without its manifest, as a crash before it leaves, is not listed.
     #[rstest]
     fn a_model_set_whose_manifest_is_missing_is_not_listed() {
         let dir = tempfile::tempdir().unwrap();
@@ -1284,8 +1277,6 @@ mod tests {
         assert!(models.trades_by(at(noon)).unwrap());
     }
 
-    /// The short model names no side after the long model is written, so the publish fails and
-    /// names it.
     #[rstest]
     fn a_publish_stopped_before_its_last_model_lists_no_model_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -1320,8 +1311,6 @@ mod tests {
         );
     }
 
-    /// Eight publishers publish at one time, 20 times each. None fails, and the models read back
-    /// are those of one publish.
     #[rstest]
     fn publishers_at_the_same_time_at_once_each_publish_a_whole_model_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -1341,7 +1330,6 @@ mod tests {
         assert_eq!(models.read(at(MIDNIGHT)).unwrap(), published);
     }
 
-    /// The second is probed on other rows.
     #[rstest]
     fn publishing_at_the_same_time_replaces_the_model_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -1369,8 +1357,7 @@ mod tests {
         config
     }
 
-    /// A margin differs in what it decides. So does the reference stake, at which rows and payoff
-    /// features are priced. It is the config's risk applied to the dataset balance.
+    /// The reference stake is the config's risk applied to the dataset balance.
     #[rstest]
     #[case::another_learner(changed(with_meta(), |config| config.learner = LearnerConfig::Baseline {}))]
     #[case::retrained_weekly(changed(with_meta(), |config| {
@@ -1432,13 +1419,11 @@ mod tests {
         assert_ne!(at(VERSION), at(VERSION + 1));
     }
 
-    /// The directory as a literal: id, dataset fingerprint, then model set key. The margins are
-    /// `long 0.5R short 0.5R` and the meta's is `0.55R`.
+    /// The directory as a literal: id, dataset fingerprint, then model set key.
     ///
     /// A change that rekeys every store, leaving the model sets behind, fails here. A deliberate
     /// rekey updates the literals and also the pinned dataset identifier
-    /// (`dataset::tests::a_fixed_strategys_dataset_keeps_its_identifier`). A deliberate rekey is a
-    /// bump of `VERSION` or `dataset::VERSION`, or a new input to either key.
+    /// (`dataset::tests::a_fixed_strategys_dataset_keeps_its_identifier`).
     #[rstest]
     #[case::without_a_meta(
         config(),
@@ -1462,7 +1447,6 @@ mod tests {
         );
     }
 
-    /// A store has no model set to trade on yet if it holds none, or only ones valid later.
     #[rstest]
     #[case::without_a_meta(config(), false)]
     #[case::with_a_meta(with_meta(), true)]
@@ -1482,7 +1466,6 @@ mod tests {
         assert!(!trades(before));
     }
 
-    /// The fake predicts 0.25, calibrated by `0.1 + 0.5 E` to 0.1 + 0.5 * 0.25 = 0.225.
     #[rstest]
     fn a_loaded_meta_model_predicts_through_its_calibration() {
         let stored = model(None, &[vec![0.75]]);
@@ -1514,9 +1497,6 @@ mod tests {
         assert!(meta_as_side.contains("side"), "{meta_as_side}");
     }
 
-    /// The fakes predict their row's mid, the long's 0.4 and the short's 0.1, as C = 0.25 and D =
-    /// 0.3: calibrated by `0.1 + 0.5 C` and slope 1.5 to C' = 0.225 and D' = 0.45, so the long
-    /// expects 0.45R and the short 0.
     #[rstest]
     fn a_model_sets_pair_expects_each_sides_r_through_its_calibration() {
         let dir = tempfile::tempdir().unwrap();
@@ -1553,7 +1533,6 @@ mod tests {
         }
     }
 
-    /// An earlier version's side manifest, with the pair's calibration that names the pair.
     fn pair_calibrated_side(mut current: serde_json::Value) -> serde_json::Value {
         let manifest = current["manifest"].as_object_mut().unwrap();
         manifest.insert(
@@ -1567,7 +1546,6 @@ mod tests {
         current
     }
 
-    /// An earlier version's side manifest: Platt's calibration and a payoff record.
     fn platt_side(mut current: serde_json::Value) -> serde_json::Value {
         let manifest = current["manifest"].as_object_mut().unwrap();
         manifest.insert(

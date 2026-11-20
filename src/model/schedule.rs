@@ -301,7 +301,6 @@ mod tests {
         SignedDuration::from_hours(24)
     }
 
-    /// A start on the grid retrains at the start, an end on it does not.
     #[rstest]
     #[case::off_the_grid(
         "2026-10-21T15:20:00Z",
@@ -375,7 +374,6 @@ mod tests {
         SignedDuration::from_hours(hours)
     }
 
-    /// A schedule retrained every day, with a 24-hour window for the sides and 48 for the meta.
     fn daily() -> Schedule {
         Schedule {
             retrain: Retrain::Every(day()),
@@ -384,7 +382,6 @@ mod tests {
         }
     }
 
-    /// `daily`, never retrained.
     fn never() -> Schedule {
         Schedule {
             retrain: Retrain::Never,
@@ -424,10 +421,6 @@ mod tests {
     const SEVENTH: &str = "2026-01-07T00:00:00Z";
     const EIGHTH: &str = "2026-01-08T00:00:00Z";
 
-    /// A model set valid exactly from the train is kept, and one valid before it is not.
-    ///
-    /// The sides fit 24 hours back from the 7th. The out-of-fold pair is as of the 5th (48 hours
-    /// before) and fits 24 hours back from there.
     #[rstest]
     #[case::retrained_of_the_train(daily(), &[SIXTH, SEVENTH], Plan::Keep)]
     #[case::retrained_of_the_day_before(daily(), &[SIXTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
@@ -441,8 +434,6 @@ mod tests {
         assert_eq!(schedule.plan(at(SEVENTH), &model_sets(valid_froms)), plan);
     }
 
-    /// The store's other model sets do not change the fits. The out-of-fold pair is as of the 5th
-    /// and the sides are as of the 7th.
     #[rstest]
     #[case::retrained_on_an_empty_store(daily(), &[])]
     #[case::retrained_on_a_store_of_a_model_set_after_the_train(daily(), &[EIGHTH])]
@@ -469,8 +460,6 @@ mod tests {
         );
     }
 
-    /// The first row read is the 4th, from the out-of-fold pair. Without a meta it is the 6th, from
-    /// the sides.
     #[rstest]
     #[case::with_a_meta(daily(), FOURTH)]
     #[case::without_a_meta(without_meta(daily()), SIXTH)]

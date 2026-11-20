@@ -246,7 +246,6 @@ mod tests {
         strategy::{Declaration, Declared, EmaArgs, IndicatorArgs},
     };
 
-    /// A custom indicator over a span of time. Its value is the span in seconds.
     struct Span(SignedDuration);
 
     impl Indicator for Span {
@@ -290,8 +289,6 @@ mod tests {
     /// An EMA that the probe's own logic would build, `[indicators.filter]`. It is not a feature.
     const FILTER: Declared<EmaArgs> = Declared::new("filter");
 
-    /// Reads the series of its `features`: the span on each, and the last value of a custom
-    /// series.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ProbeParams {
@@ -364,8 +361,7 @@ mod tests {
         load_of(features, series, target, TABLES)
     }
 
-    /// Calls `load` with `tables`, after registering the custom data types as the process does at
-    /// start.
+    /// Registers the custom data types as the process does at start, then calls `load`.
     fn load_of(
         features: &[&str],
         series: &[&str],
@@ -407,7 +403,6 @@ mod tests {
         )
     }
 
-    /// A time-only target. Its unit is Nautilus' ATR of 14 hourly bars of gold.
     const TIME_ONLY: &str = r#"{ limit = "30m", atr = { period = 14 } }"#;
     const BRACKET: &str =
         r#"{ bracket = { take_profit = { atr = 2 }, stop = { atr = 1 } }, limit = "45m" }"#;
@@ -446,13 +441,8 @@ mod tests {
         load(features, series, TIME_ONLY).unwrap();
     }
 
-    /// A mismatched series is refused under its field, which names that series and no other.
-    ///
-    /// - A bracket's ATR is built from gold's quotes, so it does not read GC's trades.
-    /// - Nautilus builds a root's bars from the trades of its contracts, so the GC root's MID bars
-    ///   never come.
-    /// - A strategy reading custom data in its `on_data` declares it in what it reads, so a listed
-    ///   series that no feature reads is refused.
+    /// Nautilus builds a root's bars from the trades of its contracts, so the GC root's MID bars
+    /// never come.
     #[rstest]
     #[case::listed_and_read_by_no_feature(
         &[GOLD_BARS],
@@ -549,8 +539,6 @@ mod tests {
         assert!(of_unread.contains("TradeTick of GC.GLBX"), "{of_unread}");
     }
 
-    /// The target's ATR reads what `[data]` lists for it: gold's quotes or hourly bars of mids. A
-    /// bracket in basis points has no ATR.
     #[rstest]
     #[case::ticks(GOLD_QUOTES, "QuoteTick of XAUUSD.ICMARKETS")]
     #[case::bars(GOLD_HOURS, "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")]
@@ -612,8 +600,7 @@ mod tests {
     const US10Y: &str = r#"{ data = "Custom:LseRow", identifier = "TREASURY-10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#;
     const US2Y: &str = r#"{ data = "Custom:LseRow", identifier = "TREASURY-2Y", metadata = { source = "bond_yields", symbol = "US2Y" } }"#;
 
-    /// The cache keys a point by its whole data type, so the 2-year yields listed under the
-    /// 10-year identifier are refused both ways.
+    /// The cache keys a point by its whole data type.
     #[rstest]
     fn a_custom_series_listed_under_its_identifier_with_other_metadata_is_refused_both_ways() {
         let under_10y = US2Y.replace("TREASURY-2Y", "TREASURY-10Y");
@@ -632,7 +619,6 @@ mod tests {
             .unwrap()
     }
 
-    /// The feature's value is the span of 15 minutes, 900 s.
     #[rstest]
     fn a_feature_is_built_of_its_table() {
         assert_eq!(features_of(TABLES).values(), Some(vec![900.0]));
