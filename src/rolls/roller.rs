@@ -1,8 +1,10 @@
-//! The roller: tells a strategy when the contract standing for each instrument it reads changes,
-//! with the plain Nautilus clock, as Nautilus' own (crate-private) roller of continuous bars does.
-//! An alert before each roll returns the roll and, live, loads the post contract, but not a custom
-//! series' root's (`Roller::custom_roots`). It subscribes to nothing: the strategy hands each roll
-//! to its subscriptions (`strategy::subscriptions`), and to whatever else reads the contract.
+//! The roller tells a strategy when the contract standing for an instrument it reads changes.
+//!
+//! It uses the plain Nautilus clock, as Nautilus' own (crate-private) roller of continuous bars
+//! does. An alert before each roll returns the roll. Live, the alert also loads the post contract,
+//! except for the root of a custom series (`Roller::custom_roots`). The roller subscribes to
+//! nothing. The strategy hands each roll to its subscriptions (`strategy::subscriptions`), and to
+//! whatever else reads the contract.
 
 use std::fmt::Debug;
 
@@ -17,27 +19,30 @@ use nautilus_model::identifiers::InstrumentId;
 use super::Transition;
 use crate::venues;
 
-/// The prefix of a roll alert's name, then the instrument id, `@` and the roll's time.
+/// The prefix of a roll alert's name. The instrument id, `@` and the roll's time follow it.
 const ROLL_ALERT: &str = "ROLL:";
 
-/// The request param that sends an instrument request past the node's catalogs to the venue's data
-/// client (`dispatch_instrument_request` in Nautilus' data engine).
+/// The request param that sends an instrument request past the catalogs of the node to the data
+/// client of the venue (`dispatch_instrument_request` in Nautilus' data engine).
 const FORCE_INSTRUMENT_UPDATE: &str = "force_instrument_update";
 
-/// Rolls a strategy's instruments, each from the contract standing for it (see `Transition::after`)
-/// to the next. The strategy owns it, starts it in `on_start` and hands it its time events in
+/// Rolls the instruments of a strategy, each from the contract standing for it to the next (see
+/// `Transition::after`).
+///
+/// The strategy owns the roller. It starts the roller in `on_start` and hands it time events in
 /// `on_time_event`, which returns the roll made, if any, for `Subscriptions::roll`.
 ///
 /// A live roller requests each post contract when it sets its roll alert (`Loading::Requested`),
-/// so a node rolls any number of times. A replayed one loads nothing.
+/// so a node rolls any number of times. A replayed roller loads nothing.
 ///
-/// The strategy calls it on a clone (`self.roller.clone().start(self, now)`) because it sets
-/// alerts and requests through the strategy: it holds the instruments only, and works out the
-/// contracts from its start time and the roll time each alert's name holds.
+/// The strategy calls the roller on a clone (`self.roller.clone().start(self, now)`), because the
+/// roller sets alerts and requests through the strategy. It holds only the instruments. It works
+/// out the contracts from its start time and from the roll time in each alert's name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roller {
     instrument_ids: Vec<InstrumentId>,
-    /// The roots of custom series, none of `instrument_ids`: rolled as those are, loading nothing.
+    /// The roots of custom series, none of them in `instrument_ids`. They roll like the instruments
+    /// but load nothing.
     custom_roots: Vec<InstrumentId>,
     loading: Loading,
 }
@@ -45,23 +50,25 @@ pub struct Roller {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Loading {
     Registered,
-    /// A live node loads at its start the contract standing for each instrument. The roller
-    /// requests each post contract when it sets its roll's alert, past the catalogs, from the
-    /// client live definitions are asked of (`venues::live_definitions_client`: the broker's, IB's
-    /// for GLBX, whose live data is LSE's, which publishes no definitions). The client loads it
-    /// into its instrument provider (IB subscribes only to what its provider holds), and the data
-    /// engine adds it to the cache.
+    /// A live node loads the contract standing for each instrument at its start.
+    ///
+    /// The roller requests each post contract when it sets the roll's alert. The request goes past
+    /// the catalogs to the client that live definitions are asked of
+    /// (`venues::live_definitions_client`). That is the broker's client, or IB's for GLBX, whose
+    /// live data is LSE's, which publishes no definitions. The client loads the contract into its
+    /// instrument provider (IB subscribes only to what its provider holds), and the data engine
+    /// adds it to the cache.
     Requested,
 }
 
 impl Roller {
-    /// A live roller of `instrument_ids`, roots or plain: requests each post contract.
+    /// Returns a live roller of `instrument_ids`, roots or plain, requesting each post contract.
     #[must_use]
     pub fn live(instrument_ids: Vec<InstrumentId>) -> Self {
         Self::of(instrument_ids, Loading::Requested)
     }
 
-    /// A roller for a backtest or dataset run, which register every contract up front.
+    /// Returns a roller for a backtest or dataset run, which registers every contract up front.
     #[must_use]
     pub fn replayed(instrument_ids: Vec<InstrumentId>) -> Self {
         Self::of(instrument_ids, Loading::Registered)
@@ -81,9 +88,10 @@ impl Roller {
         }
     }
 
-    /// Rolls `roots`, the roots of custom series (`CustomSeries::root`), as its instruments but
-    /// loads none of their contracts, live too: a custom series brings no instrument. A root among
-    /// the instruments loads its contracts still.
+    /// Rolls `roots`, the roots of custom series (`CustomSeries::root`), like its instruments.
+    ///
+    /// It loads none of their contracts, live too, because a custom series brings no instrument. A
+    /// root that is also among the instruments still loads its contracts.
     #[must_use]
     pub fn custom_roots(mut self, roots: impl IntoIterator<Item = InstrumentId>) -> Self {
         for root in roots {
@@ -101,9 +109,11 @@ impl Roller {
             .copied()
     }
 
-    /// Sets the alert of each rolling instrument's next roll after `now`, live requesting its post
-    /// contract. `now` is where the subscriptions start (`Subscriptions::start`), so the alert is
-    /// of the roll out of the contract they subscribe to (`front`).
+    /// Sets an alert for the next roll after `now` of each rolling instrument.
+    ///
+    /// Live, it also requests the post contract. `now` is where the subscriptions start
+    /// (`Subscriptions::start`), so the alert is for the roll out of the contract they subscribe
+    /// to (`front`).
     ///
     /// # Errors
     ///
@@ -120,16 +130,20 @@ impl Roller {
         Ok(())
     }
 
-    /// If `event` is an instrument's roll alert, sets the alert of its next roll, live requesting
-    /// its post contract, and returns the roll the alert was armed for. `None` for any other
-    /// event, which is the strategy's own. The roll is the one the alert's name holds, not one
-    /// worked out from the event's time: Nautilus fires an alert set in the past at once, at the
-    /// clock's time (`validate_and_prepare_time_alert`), so an alert armed after its roll, at a
-    /// live start just before it, comes after the roll's time.
+    /// Handles `event` if it is the roll alert of an instrument.
     ///
-    /// The alert is at the last nanosecond of the pre contract's slice: the backtest engine
-    /// delivers a time's data before its alerts, so an alert at the transition would miss the post
-    /// contract's tick stamped there.
+    /// It sets the alert for the next roll of that instrument, and live also requests its post
+    /// contract. It returns the roll the alert was armed for, or `None` for any other event, which
+    /// is the strategy's own.
+    ///
+    /// The roll is the one in the alert's name, not one worked out from the event's time. Nautilus
+    /// fires an alert set in the past at once, at the clock's time
+    /// (`validate_and_prepare_time_alert`). So an alert armed after its roll, at a live start just
+    /// before it, comes after the roll's time.
+    ///
+    /// The alert is at the last nanosecond of the pre contract's slice. The backtest engine
+    /// delivers the data of a time before its alerts, so an alert at the transition would miss the
+    /// post contract's tick stamped there.
     ///
     /// # Errors
     ///
@@ -154,7 +168,8 @@ impl Roller {
         Ok(Some(roll))
     }
 
-    /// Live, also requests the post contract, except of a custom series' root alone.
+    /// Sets the alert for `next`. Live, it also requests the post contract, except for the root of
+    /// a custom series that is not among the instruments.
     fn arm<A>(
         &self,
         actor: &mut A,
@@ -174,8 +189,9 @@ impl Roller {
     }
 }
 
-/// The contract standing for `instrument_id` at `time`: the pre contract of its next roll, or
-/// itself if it does not roll.
+/// Returns the contract standing for `instrument_id` at `time`.
+///
+/// That is the pre contract of its next roll, or the instrument itself if it does not roll.
 #[must_use]
 pub fn front(instrument_id: InstrumentId, time: Timestamp) -> InstrumentId {
     Transition::after(instrument_id, time).map_or(instrument_id, |next| next.pre)
@@ -241,13 +257,13 @@ mod tests {
 
     impl DataActor for Probe {}
 
-    /// What the probe sent the data engine: a roller sends requests alone, so a subscription shows
+    /// What the probe sent the data engine. A roller sends requests alone, so a subscription shows
     /// as a regression.
     #[derive(Debug, PartialEq, Eq)]
     enum Sent {
         Subscribe(InstrumentId),
         Unsubscribe(InstrumentId),
-        /// The instrument, whether it skips the catalog, the client it names.
+        /// The instrument, whether the request skips the catalog, and the client it names.
         Request(InstrumentId, bool, Option<ClientId>),
     }
 
@@ -328,8 +344,9 @@ mod tests {
             .collect()
     }
 
-    /// Runs `roller` on the probe from `start` to `end`, a day at a time; returns what the probe
-    /// sent and the rolls made.
+    /// Runs `roller` on the probe from `start` to `end`, a day at a time.
+    ///
+    /// Returns what the probe sent and the rolls made.
     fn run(roller: &Roller, start: &str, end: &str) -> (Vec<Sent>, Vec<Transition>) {
         let (mut probe, clock, commands) = registered(start);
         roller.start(&mut probe, start.parse().unwrap()).unwrap();
@@ -347,8 +364,8 @@ mod tests {
     }
 
     /// GC rolls into GCG27 at 00:00 UTC on 2026-11-26 and into GCJ27 on 2027-01-27
-    /// (`calendar.toml`); GCJ27 rolls into GCM27. Each post contract is asked of IB's client, which
-    /// resolves GLBX contracts, not of LSE's, which publishes no definitions.
+    /// (`calendar.toml`). GCJ27 rolls into GCM27. Each post contract is requested from IB's client,
+    /// which resolves GLBX contracts, not from LSE's, which publishes no definitions.
     #[rstest]
     #[case::live_requesting_each_post_contract_before_its_roll(
         Roller::live(vec![id("GC.GLBX")]),
@@ -390,8 +407,9 @@ mod tests {
         ]
     }
 
-    /// The post contracts of GC's two rolls and the roll after them, requested of IB's client past
-    /// the catalog.
+    /// The post contracts of GC's two rolls and the roll after them.
+    ///
+    /// They are requested from IB's client, past the catalog.
     fn gc_post_contracts() -> Vec<Sent> {
         vec![
             Sent::Request(id("GCG27.GLBX"), true, Some(ClientId::from("IB"))),
@@ -400,11 +418,12 @@ mod tests {
         ]
     }
 
-    /// A live start a minute before GC rolls from GCZ26 into GCG27 (00:00 UTC on 2026-11-26): the
-    /// strategy subscribes on GCZ26 from the warmup's `now`, 23:59, and the clock is past the roll
-    /// when the roller arms it, so Nautilus fires its alert at once
-    /// (`validate_and_prepare_time_alert`). The roller returns the roll it armed, out of GCZ26, not
-    /// the next one after the alert's time.
+    /// A live start a minute before GC rolls from GCZ26 into GCG27 (00:00 UTC on 2026-11-26).
+    ///
+    /// The strategy subscribes on GCZ26 from the warmup's `now`, 23:59. The clock is past the roll
+    /// when the roller arms it, so Nautilus fires the alert at once
+    /// (`validate_and_prepare_time_alert`). The roller returns the roll it armed, out of GCZ26,
+    /// not the next one after the alert's time.
     #[rstest]
     fn a_roll_armed_after_its_time_is_the_one_out_of_the_contract_standing_at_the_start() {
         let roller = Roller::live(vec![id("GC.GLBX")]);

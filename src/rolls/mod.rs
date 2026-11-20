@@ -1,18 +1,20 @@
 //! Futures rolls: which dated contract stands for a root at each moment.
 //!
-//! Nautilus' continuous futures take a caller's transition table, and its venues and data sources
-//! take dated contracts only. This module builds that table for any instrument id over a span,
-//! from the roll calendar (`calendar.toml`). An id listed there as a product root (`GC.GLBX`)
-//! rolls through its contracts (`GCQ26.GLBX`, ...); any other id is a plain instrument, with no
-//! transitions and one slice on itself.
+//! Nautilus' continuous futures take a transition table from the caller. Its venues and data
+//! sources take dated contracts only. This module builds that table for any instrument id over a
+//! span, from the roll calendar (`calendar.toml`).
 //!
-//! Callers use the slices and never branch on an id, except for a custom series' identifier
-//! (`CustomSeries::root`), which may name no instrument, and its catalog folder, which may be a
-//! contract's a root's series is stored under (`root_of`,
-//! `CustomSeries::contract_folder_shared_with`). A `Roller` tells a strategy of each roll, at
-//! which its subscriptions (`strategy::subscriptions`) move the root's tick and custom series to
-//! the post contract. `ContinuousBars` makes a root's bars Nautilus' continuous bars, which roll
-//! themselves.
+//! An id listed there as a product root (`GC.GLBX`) rolls through its contracts (`GCQ26.GLBX`,
+//! ...). Any other id is a plain instrument, with no transitions and one slice on itself.
+//!
+//! Callers use the slices and never branch on an id, with two exceptions:
+//! - A custom series' identifier (`CustomSeries::root`) may name no instrument.
+//! - Its catalog folder may be a contract's, where a root's series is stored (`root_of`,
+//!   `CustomSeries::contract_folder_shared_with`).
+//!
+//! A `Roller` tells a strategy about each roll. At each roll, its subscriptions
+//! (`strategy::subscriptions`) move the root's tick and custom series to the post contract.
+//! `ContinuousBars` makes a root's bars Nautilus' continuous bars, which roll themselves.
 
 mod calendar;
 mod continuous;
@@ -23,12 +25,13 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_model::identifiers::InstrumentId;
 pub use roller::{Roller, front};
 
-/// The transitions of an instrument over a span, in Nautilus' continuous futures shape: segment 0
-/// runs on the first pre contract, each later segment on a transition's post contract from its
-/// time on.
+/// The transitions of an instrument over a span, in Nautilus' continuous futures shape.
+///
+/// Segment 0 runs on the first pre contract. Each later segment runs on a transition's post
+/// contract, from that transition's time on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionTable {
-    /// The first pre contract, the instrument itself if it does not roll.
+    /// The first pre contract, or the instrument itself if it does not roll.
     first: InstrumentId,
     transitions: Vec<Transition>,
     /// The span, both ends included.
@@ -45,9 +48,10 @@ pub struct Transition {
 }
 
 impl Transition {
-    /// The first transition of `instrument_id` after `time`, `time` excluded; none if the id is
-    /// not a root in the roll calendar. Its `pre` is the contract in front at `time`. Unbounded,
-    /// as live needs.
+    /// Returns the first transition of `instrument_id` after `time`, excluding `time`.
+    ///
+    /// Returns `None` if the id is not a root in the roll calendar. The transition's `pre` is the
+    /// contract in front at `time`. It is unbounded, as live needs.
     #[must_use]
     pub fn after(instrument_id: InstrumentId, time: Timestamp) -> Option<Self> {
         let product = calendar::product(instrument_id)?;
@@ -59,9 +63,11 @@ impl Transition {
         })
     }
 
-    /// The last transition of `instrument_id` at or before `time`, `time` included; none if the id
-    /// is not a root in the roll calendar. Its `post` is the contract in front at `time`, as
-    /// `contract_at` has it, so `after` starts where this ends. Unbounded.
+    /// Returns the last transition of `instrument_id` at or before `time`, including `time`.
+    ///
+    /// Returns `None` if the id is not a root in the roll calendar. The transition's `post` is the
+    /// contract in front at `time`, as `contract_at` has it, so `after` starts where this ends.
+    /// It is unbounded.
     #[must_use]
     pub fn before(instrument_id: InstrumentId, time: Timestamp) -> Option<Self> {
         let product = calendar::product(instrument_id)?;
@@ -75,14 +81,16 @@ impl Transition {
     }
 }
 
-/// The root of the roll calendar `contract` stands for at some time: a contract of any year of one
-/// of its product's liquid months, on its venue (`GCZ26.GLBX` of `GC.GLBX`).
+/// Returns the root in the roll calendar that `contract` stands for at some time.
+///
+/// The contract can be from any year, in one of its product's liquid months, on the root's venue.
+/// `GCZ26.GLBX` stands for `GC.GLBX`.
 #[must_use]
 pub fn root_of(contract: InstrumentId) -> Option<InstrumentId> {
     calendar::root_of(contract)
 }
 
-/// The part of a span one contract stands for its root, both ends included.
+/// The part of a span where one contract stands for its root, both ends included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Slice {
     pub instrument_id: InstrumentId,
@@ -91,8 +99,10 @@ pub struct Slice {
 }
 
 impl TransitionTable {
-    /// The table of `instrument_id` over `[start, end]`: the rolls of its product after `start` up
-    /// to `end`. An id that is not a root in the roll calendar has none.
+    /// Returns the table of `instrument_id` over `[start, end]`.
+    ///
+    /// It holds the rolls of the product after `start`, up to `end`. An id that is not a root in
+    /// the roll calendar has none.
     #[must_use]
     pub fn of(instrument_id: InstrumentId, start: Timestamp, end: Timestamp) -> Self {
         let first = Transition::after(instrument_id, start).map_or(instrument_id, |next| next.pre);
@@ -118,7 +128,7 @@ impl TransitionTable {
         &self.transitions
     }
 
-    /// The contract standing for the root at `time`, by Nautilus' segment rule.
+    /// Returns the contract standing for the root at `time`, by Nautilus' segment rule.
     #[must_use]
     pub fn contract_at(&self, time: Timestamp) -> InstrumentId {
         self.transitions
@@ -128,8 +138,9 @@ impl TransitionTable {
             .map_or(self.first, |transition| transition.post)
     }
 
-    /// The slices covering the span, one per contract: each ends 1 ns before the next transition,
-    /// the last at the span's end.
+    /// Returns the slices covering the span, one per contract.
+    ///
+    /// Each slice ends 1 ns before the next transition. The last slice ends at the end of the span.
     #[must_use]
     pub fn slices(&self) -> Vec<Slice> {
         let froms = std::iter::once(self.start)
@@ -189,9 +200,9 @@ mod tests {
         }
     }
 
-    /// Last weekday of the month before each delivery month: Fri Jan 30 (Jan 31 is a Saturday),
-    /// Tue Mar 31, Fri May 29 (May 31 is a Sunday), Fri Jul 31, Mon Nov 30. Two weekdays before:
-    /// Wed Jan 28, Fri Mar 27, Wed May 27, Wed Jul 29, Thu Nov 26.
+    /// The last weekday before each delivery month is Fri Jan 30 (Jan 31 is a Saturday), Tue Mar
+    /// 31, Fri May 29 (May 31 is a Sunday), Fri Jul 31 and Mon Nov 30. Two weekdays before are Wed
+    /// Jan 28, Fri Mar 27, Wed May 27, Wed Jul 29 and Thu Nov 26.
     #[rstest]
     fn gc_rolls_in_2026_two_weekdays_before_the_last_weekday_before_each_delivery_month() {
         let table = TransitionTable::of(gc(), at("2026-01-01T00:00Z"), at("2026-12-31T00:00Z"));
@@ -399,9 +410,9 @@ mod tests {
         assert!(previous.time <= time && time < next.time);
     }
 
-    /// Databento's GC.v.0 switches over the stored span, 2026-01-26 to 2026-10-23, on the day the
-    /// stored daily definitions' expiration moves to the next contract, 00:00 UTC. It rolls by the
-    /// previous day's volume.
+    /// Databento's GC.v.0 switches over the stored span, 2026-01-26 to 2026-10-23. Each switch is
+    /// on the day the expiration in the stored daily definitions moves to the next contract, at
+    /// 00:00 UTC. It rolls by the previous day's volume.
     const DATABENTO_SWITCHES: [(&str, &str, &str); 4] = [
         ("2026-01-30", "GCG26.GLBX", "GCJ26.GLBX"),
         ("2026-03-30", "GCJ26.GLBX", "GCM26.GLBX"),
