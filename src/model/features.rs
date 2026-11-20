@@ -1,81 +1,107 @@
-//! A strategy's features: Nautilus indicators, each declared once on the list of series it reads
-//! (`FeatureSetBuilder::feature`): any number of bar types, tick series (quotes, trades, depth or
-//! deltas of an instrument or futures root) and custom series (`Series`), in any combination.
+//! Declares a strategy's features as Nautilus indicators.
+//!
+//! Each feature is declared once, on the list of series it reads (`FeatureSetBuilder::feature`).
+//! The series can be any number of bar types, tick series (quotes, trades, depth or deltas of an
+//! instrument or futures root) and custom series (`Series`), in any combination.
 //!
 //! A feature is built from a declared indicator's table in `[indicators]` (`strategy::Declared`,
-//! `IndicatorsConfig`), never by hand. It is named after its table (`fast`) when the table feeds
-//! it alone, else after its series and its table: the whole list in the order declared, apart by
-//! `, ` (`QuoteTick of XAUUSD.ICMARKETS, TradeTick of XAUUSD.ICMARKETS:fast`). A raw feature has
-//! no table and is named by the strategy.
+//! `IndicatorsConfig`), never by hand. A raw feature has no table and is named by the strategy.
+//! Other features are named as follows:
+//! - If the table feeds the feature alone, the feature is named after its table (`fast`).
+//! - Otherwise it is named after its series and its table. The whole list of series comes in the
+//!   order declared, separated by `, ` (`QuoteTick of XAUUSD.ICMARKETS, TradeTick of
+//!   XAUUSD.ICMARKETS:fast`).
 //!
-//! The set is one Nautilus indicator (`ActorIndicator`), shared as an `Rc` between the strategy
-//! and its warmup, its features in a `RefCell` as the handlers borrow it immutably. It is
-//! registered with none of Nautilus' indicators of the strategy: the warmup hands it every bar,
-//! quote and trade (`Warmup::feeding`, `Warmup::feeding_ticks`), because Nautilus hands a
-//! registered indicator each live tick as it comes, and each live bar once its request completes,
-//! while a live warmup's older windows are still being answered. The warmup orders its responses
-//! across series and holds the live updates until it ends. Temporary: `strategy::warmup`'s `hold`
-//! and `merge` do this, until Nautilus holds them (helix-trader#16) and orders a warmup's history
-//! across data types (helix-trader#46), when the set is registered for quotes, trades and bars
-//! again.
+//! The set is one Nautilus indicator (`ActorIndicator`). The strategy and its warmup share it as an
+//! `Rc`. Its features sit in a `RefCell`, because the handlers borrow the set immutably.
 //!
-//! Nautilus routes depth and deltas to the actor's handlers alone, and custom data to `on_data`
-//! and `on_historical_data` alone, so the strategy hands them to the warmup (`model_data_hooks!`),
-//! which hands them to the set (`BookIndicator`, `CustomIndicator`). A feature reading a custom
-//! series gives its own handler (`Feature::custom_handler`). Bars built from a warmup's quotes,
-//! trades or source bars reach only the cache, so the warmup reads them there and hands them to
-//! `handle_bar` (`Warmup::on_data_response`).
+//! The set is registered with none of Nautilus' indicators of the strategy. Instead the warmup
+//! hands it every bar, quote and trade (`Warmup::feeding`, `Warmup::feeding_ticks`). Nautilus hands
+//! a registered indicator each live tick as it comes, and each live bar once its request
+//! completes. That happens while a live warmup's older windows are still being answered. The warmup
+//! orders its responses across series and holds the live updates until it ends.
 //!
-//! A raw feature reads a custom series of a whole Nautilus data type (`FeatureSetBuilder::custom`)
-//! from the cache of the actor the set is registered with (`register`), with no indicator. Its
-//! value is `read` of the latest point of the data type (`Cache::custom_data`), cold until the
-//! cache holds one. The data engine caches each point it processes before the strategy's
-//! handlers run, but not a request's response, so a live warmup adds its own
+//! Temporary: `strategy::warmup`'s `hold` and `merge` do this, until Nautilus holds them
+//! (helix-trader#16) and orders a warmup's history across data types (helix-trader#46). Then the
+//! set is registered for quotes, trades and bars again.
+//!
+//! Nautilus routes depth and deltas to the actor's handlers alone. It routes custom data to
+//! `on_data` and `on_historical_data` alone. So the strategy hands them to the warmup
+//! (`model_data_hooks!`), and the warmup hands them to the set (`BookIndicator`,
+//! `CustomIndicator`). A feature that reads a custom series supplies its own handler
+//! (`Feature::custom_handler`).
+//!
+//! Bars built from a warmup's quotes, trades or source bars reach only the cache. So the warmup
+//! reads them there and hands them to `handle_bar` (`Warmup::on_data_response`).
+//!
+//! A raw feature reads a custom series of a whole Nautilus data type (`FeatureSetBuilder::custom`),
+//! with no indicator. It reads from the cache of the actor the set is registered with (`register`).
+//! Its value is `read` applied to the latest point of the data type (`Cache::custom_data`), and it
+//! is cold until the cache holds one. The data engine caches each point it processes before the
+//! strategy's handlers run, but not a request's response. So a live warmup adds its own
 //! (`Warmup::on_historical_data`).
 //!
-//! A feature on a futures root (`GC.GLBX`, see `rolls`) reads the contract standing for it:
-//! `register` sets it from the clock (`rolls::front`), and that contract's data, custom data keyed
-//! by its id (`CustomSeries::on`), is matched to it. `roll` moves the root's features to the post
-//! contract and resets them (`Indicator::reset`), so their windows never mix two contracts and
-//! decisions wait until they refill. A raw feature reads the post contract's latest cached point.
+//! A feature on a futures root (`GC.GLBX`, see `rolls`) reads the contract standing for the root.
+//! `register` sets that contract from the clock (`rolls::front`). The contract's data is matched to
+//! the feature, including custom data keyed by its id (`CustomSeries::on`). `roll` moves the root's
+//! features to the post contract and resets them (`Indicator::reset`). So their windows never mix
+//! two contracts, and decisions wait until the windows refill. A raw feature reads the post
+//! contract's latest cached point.
 //!
 //! `ticks`, `bar_types` and `custom` gather the series of all features, each once, in the order
-//! declared: the model handle subscribes to them (`strategy::subscriptions`), a live warmup
-//! requests them and `[data] series` is checked against them (`model::reads`).
+//! declared. Three things use them:
+//! - The model handle subscribes to them (`strategy::subscriptions`).
+//! - A live warmup requests them.
+//! - `[data] series` is checked against them (`model::reads`).
 //!
-//! An update reaches only the features declared on a series of its kind and source, once however
-//! many of a feature's series it matches. An update no feature reads is a no-op, so the panicking
-//! defaults of Nautilus' `Indicator` are never called. The set never returns an error, because
-//! Nautilus stops handling a bar at an indicator's error, before the strategy's handler, and the
-//! warmup its hand-over of ticks: an error of one feature is logged and the update goes on.
+//! An update reaches only the features declared on a series of its kind and source. It reaches each
+//! such feature once, however many of the feature's series it matches. An update no feature reads
+//! is a no-op, so the panicking defaults of Nautilus' `Indicator` are never called.
 //!
-//! The names and their order are fixed when the set is built, and `values` snapshots them once
-//! every feature is initialized. A side model reads them, then its side's payoff features
-//! (`side_names`, `side_row`); a meta model, then the side picked and the decision's level and
-//! side call (`meta_names`, `meta_row`).
+//! The set never returns an error. Nautilus stops handling a bar at an indicator's error, before
+//! the strategy's handler, and the warmup stops its hand-over of ticks. So the set logs one
+//! feature's error and the update goes on.
 //!
-//! The set records for each instrument the `ts_init` of the latest update a feature read, a root's
-//! under the root (`last_update`): a decision is fresh only if data of the traded instrument came
-//! since the previous one (`decide`). Custom data is no update of any instrument.
+//! The names and their order are fixed when the set is built. `values` snapshots them once every
+//! feature is initialized.
+//! - A side model reads them, then its side's payoff features (`side_names`, `side_row`).
+//! - A meta model reads them, then the side picked and the decision's level and side call
+//!   (`meta_names`, `meta_row`).
 //!
-//! The warmup (`FeatureSetBuilder::warmup`) is how much data the features read before a decision:
-//! a dataset build replays it before its first day (`dataset`).
+//! The set records the `ts_init` of the latest update a feature read, for each instrument
+//! (`last_update`). A root's is recorded under the root. A decision is fresh only if data of the
+//! traded instrument came since the previous decision (`decide`). Custom data is no update of any
+//! instrument.
 //!
-//! A feature over the target's bracket (`Feature::over_bracket`, an `OverBracket`) is declared as
-//! any other and handed the width (`targets::BracketWidth`) the builder takes once
-//! (`FeatureSetBuilder::bracket`). The set refuses such a feature with no width given, a width no
-//! feature reads and a second width. A feature reading a width it was never handed panics, never
-//! reading NaN. The model handle has the target's setter run on the one width (`bracket_width`),
-//! so its ATR is the target's, with no series of the strategy's. The width is in the fingerprint
-//! of a dataset beside the set's (`targets::fingerprint`).
+//! The warmup (`FeatureSetBuilder::warmup`) is how much data the features read before a decision.
+//! A dataset build replays it before its first day (`dataset`).
 //!
-//! The fingerprint covers the names in order, the series each reads (which a name from its table
-//! alone, or of a raw feature, does not tell), the whole data type of each custom series, the
-//! arguments of each table by value (`IndicatorsConfig::canonical_args`, so however the TOML
-//! spells them), the warmup, and the version of the strategy's feature code
-//! (`FeatureSetBuilder::version`), bumped by hand when what it computes changes. An indicator the
-//! strategy builds of `[indicators]` for its own logic is not in it. The code shared by every set,
-//! this module and Nautilus' indicators, is versioned with the dataset (`dataset::VERSION`).
+//! A feature over the target's bracket (`Feature::over_bracket`, an `OverBracket`) is declared
+//! like any other. It is handed the width (`targets::BracketWidth`) that the builder takes once
+//! (`FeatureSetBuilder::bracket`). The set refuses:
+//! - Such a feature with no width given.
+//! - A width that no feature reads.
+//! - A second width.
+//!
+//! A feature that reads a width it was never handed panics, and never reads NaN. The model handle
+//! has the target's setter run on the one width (`bracket_width`), so its ATR is the target's, with
+//! no series of the strategy's. The dataset's fingerprint includes the width beside the set's
+//! (`targets::fingerprint`).
+//!
+//! The fingerprint covers:
+//! - The names, in order.
+//! - The series each feature reads, which a name from its table alone, or a raw feature's name,
+//!   does not tell.
+//! - The whole data type of each custom series.
+//! - The arguments of each table by value (`IndicatorsConfig::canonical_args`), however the TOML
+//!   spells them.
+//! - The warmup.
+//! - The version of the strategy's feature code (`FeatureSetBuilder::version`), which is bumped by
+//!   hand when what the code computes changes.
+//!
+//! It does not cover an indicator that the strategy builds from `[indicators]` for its own logic.
+//! The code shared by every set, which is this module and Nautilus' indicators, is versioned with
+//! the dataset (`dataset::VERSION`).
 
 use std::{
     any::Any,
@@ -145,8 +171,8 @@ pub fn meta_names(names: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// A meta model's row: the sides' `features`, then the `side` picked (1 a buy, -1 a sell), and the
-/// level and side call of `expected`.
+/// A meta model's row: the sides' `features`, then the `side` picked (1 a buy, -1 a sell), then the
+/// level and side call from `expected`.
 #[must_use]
 pub fn meta_row(features: &[f64], side: OrderSide, expected: Expected) -> Vec<f64> {
     features
@@ -161,13 +187,13 @@ pub trait Feature: Indicator {
     /// The current value, read once initialized.
     fn value(&self) -> f64;
 
-    /// Its handler of custom data, none unless given. A feature on a custom series with none is
-    /// refused at build.
+    /// Returns the handler for custom data, or `None` if the feature has none. A feature on a
+    /// custom series with no handler is refused at build.
     fn custom_handler(&mut self) -> Option<&mut dyn CustomHandler> {
         None
     }
 
-    /// How it reads the target's bracket, none unless it is formed over it.
+    /// Returns how it reads the target's bracket, or `None` unless it is formed over it.
     fn over_bracket(&mut self) -> Option<&mut dyn OverBracket> {
         None
     }
@@ -179,8 +205,8 @@ pub trait CustomHandler {
     ///
     /// # Errors
     ///
-    /// Returns an error if the feature cannot read it, a point of a type it does not know, say. The
-    /// set logs it.
+    /// Returns an error if the feature cannot read the point, such as a point of a type it does not
+    /// know. The set logs the error.
     fn handle_custom(&mut self, data: &CustomData) -> anyhow::Result<()>;
 }
 
@@ -190,9 +216,10 @@ impl<T: MovingAverage> Feature for T {
     }
 }
 
-/// How a feature formed over the target's bracket reads it (`Feature::over_bracket`): its value at
-/// a decision is over the bracket's width there. Reading a width it was never handed, which only a
-/// feature outside a set can, it panics.
+/// How a feature formed over the target's bracket reads it (`Feature::over_bracket`).
+///
+/// Its value at a decision is over the bracket's width there. Reading a width it was never handed
+/// panics, which only a feature outside a set can do.
 pub trait OverBracket {
     /// Reads its values over `width` from now on.
     fn over(&mut self, width: Rc<BracketWidth>);
@@ -206,15 +233,18 @@ enum Slot {
     Custom(CustomSeries, Option<Reading>, Read),
 }
 
-/// Bars match by their standard bar type (`BarType::standard`), ticks of one kind by the contract
-/// read, a custom series by its data type as read (`read_type`).
+/// How an update matches a source.
+///
+/// - Bars match by their standard bar type (`BarType::standard`).
+/// - Ticks of one kind match by the contract read.
+/// - A custom series matches by its data type as read (`read_type`).
 enum Source {
     Bars(BarType),
     Ticks(NautilusDataType, Reading),
     Custom(CustomSeries, Option<Reading>),
 }
 
-/// The instrument or root read, and the contract standing for it, else the instrument itself.
+/// The instrument or root read, and the contract standing for it, or the instrument itself if none.
 #[derive(Debug, Clone, Copy)]
 struct Reading {
     instrument_id: InstrumentId,
@@ -233,8 +263,9 @@ pub struct FeatureSet {
     fingerprint: Fingerprint,
 }
 
-/// Declares the features of a `FeatureSet`, in the order of their values. An indicator is never
-/// handed in built:
+/// Declares the features of a `FeatureSet`, in the order of their values.
+///
+/// An indicator is never handed in built:
 ///
 /// ```
 /// # use helix_trader::{model::features::FeatureSet, strategy::{Declared, EmaArgs, IndicatorsConfig, Series}};
@@ -365,8 +396,8 @@ impl FeatureSet {
         bar_types
     }
 
-    /// The custom series the features read, raw features' and among a feature's series, each once,
-    /// in the order declared.
+    /// The custom series the features read, each once, in the order declared. It covers the series
+    /// of raw features and the custom series among a feature's series.
     #[must_use]
     pub fn custom(&self) -> Vec<CustomSeries> {
         let mut custom: Vec<CustomSeries> = Vec::new();
@@ -392,8 +423,8 @@ impl FeatureSet {
         custom
     }
 
-    /// The custom series among the features' series, which the set hands their custom handlers. A
-    /// raw feature's are not among them.
+    /// The custom series among the features' series, which the set hands to their custom handlers.
+    /// The series of raw features are not among them.
     #[must_use]
     pub fn handled_custom(&self) -> Vec<CustomSeries> {
         let mut custom: Vec<CustomSeries> = Vec::new();
@@ -410,7 +441,7 @@ impl FeatureSet {
         custom
     }
 
-    /// The `ts_init` of the latest update of `instrument_id` a feature read, if any.
+    /// The `ts_init` of the latest update of `instrument_id` that a feature read, if any.
     #[must_use]
     pub fn last_update(&self, instrument_id: InstrumentId) -> Option<UnixNanos> {
         self.updates.borrow().get(&instrument_id).copied()
@@ -422,8 +453,10 @@ impl FeatureSet {
         *latest = (*latest).max(ts_init);
     }
 
-    /// Whether any of `sources` reads the tick, recording the update under the instrument of each
-    /// that does, a root's under the root.
+    /// Returns whether any of `sources` reads the tick.
+    ///
+    /// It records the update under the instrument of each source that does, or under the root for a
+    /// root.
     fn reads_ticks(
         &self,
         sources: &[Source],
@@ -469,9 +502,11 @@ impl FeatureSet {
             )
     }
 
-    /// Registers the set on `actor`, from its `on_start`. A set registered again on a restart gets
-    /// each update once, as the actor's indicators are not registered with. Temporary until
-    /// Nautilus holds and orders them: helix-trader#16 and helix-trader#46.
+    /// Registers the set on `actor`, from its `on_start`.
+    ///
+    /// A set registered again on a restart gets each update once, because the actor's indicators
+    /// are not registered with. Temporary until Nautilus holds and orders them: helix-trader#16 and
+    /// helix-trader#46.
     pub fn register<A: DataActor + DataActorNative>(self: &Rc<Self>, actor: &mut A) {
         *self.cache.borrow_mut() = Some(actor.cache_rc());
         let now = actor.clock().utc_now();
@@ -487,9 +522,10 @@ impl FeatureSet {
         self.width.as_deref()
     }
 
-    /// Moves the features reading the root `roll` rolls, those on its pre contract that are not the
-    /// contract itself, to the post contract. Called from the roller's transition
-    /// (`rolls::Roller::on_time_event`).
+    /// Moves the features that read the root `roll` rolls to the post contract.
+    ///
+    /// Only features on its pre contract that are not the contract itself move. The roller calls it
+    /// on a transition (`rolls::Roller::on_time_event`).
     pub fn roll(&self, roll: &Transition) {
         for slot in self.slots.borrow_mut().iter_mut() {
             slot.roll(roll);
@@ -601,7 +637,7 @@ impl Slot {
         }
     }
 
-    /// The series as a feature's name and the fingerprint have it.
+    /// The series as they appear in a feature's name and the fingerprint.
     fn series(&self) -> String {
         match self {
             Self::Indicator(sources, _) => sources
@@ -679,7 +715,7 @@ impl Debug for FeatureSet {
     }
 }
 
-/// The warmup's side of the set, for its bars (`Warmup::feeding`), quotes and trades
+/// The warmup's side of the set, for bars (`Warmup::feeding`), quotes and trades
 /// (`Warmup::feeding_ticks`).
 impl ActorIndicator for FeatureSet {
     fn key(&self) -> usize {
@@ -742,9 +778,10 @@ impl ActorIndicator for FeatureSet {
 
 impl FeatureSetBuilder {
     /// Declares the feature of `declared`, built from its table in `indicators`, on `series`.
-    /// `build` refuses a custom series if the feature has no custom handler, as it does an empty
-    /// list. The load refuses a missing, unparsable or refused table of an indicator the strategy
-    /// declares (`Part::INDICATORS`).
+    ///
+    /// `build` refuses an empty list of series, and a custom series if the feature has no custom
+    /// handler. The load refuses a missing, unparsable or refused table for an indicator the
+    /// strategy declares (`Part::INDICATORS`).
     ///
     /// # Panics
     ///
@@ -766,9 +803,12 @@ impl FeatureSetBuilder {
         self.indicator(declared.name(), series, feature)
     }
 
-    /// Takes `width`, which the features over the bracket read and the target's setter runs on
-    /// (`FeatureSet::bracket_width`). `build` refuses a second width, a width no feature reads,
-    /// and a feature over the bracket with none.
+    /// Takes the bracket `width` (`FeatureSet::bracket_width`).
+    ///
+    /// The features over the bracket read it, and the target's setter runs on it. `build` refuses:
+    /// - A second width.
+    /// - A width no feature reads.
+    /// - A feature over the bracket with no width.
     #[must_use]
     pub fn bracket(mut self, width: &Rc<BracketWidth>) -> Self {
         if self.width.is_some() {
@@ -782,9 +822,10 @@ impl FeatureSetBuilder {
         self
     }
 
-    /// Declares a raw feature, named `name`, on the custom series `series`: its value is `read` of
-    /// the latest point of its data type the cache holds. Any series not on a root stands for
-    /// itself, and no roll moves it.
+    /// Declares a raw feature, named `name`, on the custom series `series`.
+    ///
+    /// Its value is `read` applied to the latest point of its data type that the cache holds. A
+    /// series not on a root stands for itself, and no roll moves it.
     #[must_use]
     pub fn custom(
         self,
@@ -802,27 +843,35 @@ impl FeatureSetBuilder {
         )
     }
 
-    /// Sets the version of the strategy's feature code, in the fingerprint, bumped by hand when
-    /// what the features compute changes, which rebuilds the strategy's dataset and models. 0
-    /// unless given.
+    /// Sets the version of the strategy's feature code, in the fingerprint.
+    ///
+    /// It is bumped by hand when what the features compute changes, which rebuilds the strategy's
+    /// dataset and models. It is 0 unless given.
     #[must_use]
     pub const fn version(mut self, version: u32) -> Self {
         self.version = version;
         self
     }
 
-    /// Declares how much data the features read before a decision: a dataset build replays this
-    /// much before its first day. Zero unless given.
+    /// Declares how much data the features read before a decision.
+    ///
+    /// A dataset build replays this much before its first day. It is zero unless given.
     #[must_use]
     pub const fn warmup(mut self, warmup: SignedDuration) -> Self {
         self.warmup = warmup;
         self
     }
 
-    /// Returns the feature set, shared. Features are named as the module says. The fingerprint
-    /// hashes, each part told apart (`Fingerprint::with`), the names in order, `series <series>`
-    /// of each feature, `indicators.<table> <arguments>` of each table by name
-    /// (`IndicatorsConfig::canonical_args`), then `version <n>` and `warmup <ns> ns`.
+    /// Returns the feature set, shared.
+    ///
+    /// Features are named as the module says. The fingerprint hashes these parts, each told apart
+    /// (`Fingerprint::with`):
+    /// - The names in order.
+    /// - `series <series>` of each feature.
+    /// - `indicators.<table> <arguments>` of each table by name
+    ///   (`IndicatorsConfig::canonical_args`).
+    /// - `version <n>`.
+    /// - `warmup <ns> ns`.
     ///
     /// # Errors
     ///
@@ -928,7 +977,7 @@ impl FeatureSetBuilder {
         indicators.build(declared)
     }
 
-    /// Refuses no series, or a custom series without a custom handler (see `feature`).
+    /// Refuses an empty list of series or a custom series without a custom handler (see `feature`).
     fn indicator(
         mut self,
         table: &'static str,

@@ -1,28 +1,37 @@
-//! A strategy's decision, made in one place: `DecidingModels` lists the model sets of its model
-//! store, swaps them in, picks a side and applies the meta's margin. It sees no strategy, cache or
-//! clock, so the handle and the meta's examples decide through the same code.
+//! Makes a strategy's decision in one place.
 //!
-//! A caller resolves what a decision reads: the time, the decision's features and each side's row
-//! (`SideRow`, the features then the side's payoff features, in R at the reference stake). The
-//! handle builds the rows from the target it sets (`targets::TargetSetter`), the meta's examples
-//! and a train's from each dataset row (`dataset::DatasetRow::sides`), all through
-//! `SideRow::new`.
+//! `DecidingModels` lists the model sets in the strategy's model store, swaps them in, picks a side
+//! and applies the meta's margin. It sees no strategy, cache or clock, so the handle and the
+//! meta's examples decide through the same code.
+//!
+//! The caller resolves what a decision reads:
+//! - The time.
+//! - The decision's features.
+//! - Each side's row (`SideRow`): the features, then the side's payoff features, in R at the
+//!   reference stake.
+//!
+//! All rows come from `SideRow::new`. The handle builds them from the target it sets
+//! (`targets::TargetSetter`). The meta's examples and a train build them from each dataset row
+//! (`dataset::DatasetRow::sides`).
 //!
 //! `new` lists the model sets once and fails on a read error. `list` lists them again, and the
-//! caller decides what a failure means: the handle logs it, the meta's examples fail. A failed
+//! caller decides what a failure means. The handle logs it. The meta's examples fail. A failed
 //! listing keeps the previous list.
 //!
-//! A model set is swapped in only inside a decision, before it predicts (`store::Swap`), so no
-//! decision mixes sets: its sides and its meta come from one train. A model set failing its checks
-//! fails the decision with an error naming it and the check, and is read again at the next.
+//! A model set is swapped in only inside a decision, before it predicts (`store::Swap`). So no
+//! decision mixes sets: its sides and its meta come from one train. If a model set fails its
+//! checks, the decision fails with an error naming the model set and the check. The model set is
+//! read again at the next decision.
 //!
-//! `decide` picks among the sides by the evaluation of `pick_among`, which a train's meta also
-//! learns from, its out-of-fold pair being in no store. Each side's `E'` (`store::Pair::expect`)
-//! is held to its margin in R and picked on by `payoff::pick`. The side picked is taken if the
-//! meta model, on the features with that side and the decision's `C'` and `D'`
-//! (`features::meta_row`), expects a net R of at least its margin (`earnings::MetaMargin`). A
-//! model set of a strategy with a meta holds a meta model (`store::ModelStore::load`). An expected
-//! R that is not finite clears no margin.
+//! `decide` picks among the sides with the evaluation in `pick_among`. A train's meta also learns
+//! from that evaluation, and its out-of-fold pair is in no store.
+//! - Each side's `E'` (`store::Pair::expect`) is held to its margin in R. `payoff::pick` picks
+//!   among the sides by `E'`.
+//! - The side picked is taken if the meta model expects a net R of at least its margin
+//!   (`earnings::MetaMargin`). The meta model reads the features with that side and the decision's
+//!   `C'` and `D'` (`features::meta_row`).
+//! - A model set of a strategy with a meta holds a meta model (`store::ModelStore::load`).
+//! - An expected R that is not finite clears no margin.
 
 use anyhow::Context;
 use jiff::Timestamp;
@@ -37,23 +46,23 @@ use super::{
 };
 use crate::strategy::risk::R;
 
-/// A strategy's model sets as last listed, and the one swapped in so far.
+/// The strategy's model sets as last listed, and the one swapped in so far.
 #[derive(Debug)]
 pub struct DecidingModels {
     models: ModelStore,
-    /// When the model sets are valid from.
+    /// The time each model set is valid from.
     listed: Vec<Timestamp>,
     model_sets: Swap<ModelSet>,
 }
 
-/// What a decision reads of a side (`features::side_row`).
+/// The row a decision reads for a side (`features::side_row`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SideRow {
     pub features: Vec<f64>,
 }
 
 impl SideRow {
-    /// Builds the row of a decision's `features` and its target's `payoff` features.
+    /// Builds the row from a decision's `features` and its target's `payoff` features.
     #[must_use]
     pub fn new(features: &[f64], payoff: &[f64]) -> Self {
         Self {
@@ -66,7 +75,7 @@ impl SideRow {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Picked {
     pub side: Side,
-    /// The net R the pair expects of its trade, its `E'`.
+    /// The net R the pair expects from the trade (its `E'`).
     pub expected_r: R,
     pub expected: Expected,
 }
@@ -89,7 +98,7 @@ pub(super) struct EvaluatedPick {
     pub meta: Option<MetaVerdict>,
 }
 
-/// Keeps even a declined (possibly nonfinite) estimate for scoring.
+/// Keeps a declined estimate too, which may be nonfinite, for scoring.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum MetaVerdict {
     Accepted(R),
@@ -112,7 +121,7 @@ impl EvaluatedPick {
     }
 }
 
-/// A decision to trade: the side picked, taken by the meta if there is one.
+/// A decision to trade the side picked. The meta takes it, if there is one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Taken {
     pub side: Side,
@@ -124,7 +133,7 @@ pub struct Taken {
 }
 
 impl DecidingModels {
-    /// Lists the model sets of `models`.
+    /// Lists the model sets in `models`.
     ///
     /// # Errors
     ///
@@ -147,8 +156,12 @@ impl DecidingModels {
         Ok(())
     }
 
-    /// Decides the trade at `now` by the latest model set valid then. Returns `None` if no model
-    /// set is valid yet, no side is picked or the meta's margin is not met.
+    /// Decides the trade at `now` with the latest model set valid then.
+    ///
+    /// Returns `None` if:
+    /// - No model set is valid yet.
+    /// - No side is picked.
+    /// - The meta's margin is not met.
     ///
     /// # Errors
     ///
@@ -203,8 +216,9 @@ impl DecidingModels {
         })
     }
 
-    /// Picks the side with the greatest finite `E'` that clears its margin of `margins`. Returns
-    /// `None` if none clears it or two tie (`payoff::pick`).
+    /// Picks the side with the greatest finite `E'` that clears its margin in `margins`.
+    ///
+    /// Returns `None` if no side clears its margin or two tie (`payoff::pick`).
     ///
     /// # Errors
     ///
@@ -236,7 +250,7 @@ impl DecidingModels {
     }
 }
 
-/// The sides `models` trade, the long first, each with its margin.
+/// Lists the sides `models` trade, the long first, each with its margin.
 pub(super) fn margins(models: &ModelStore) -> impl Iterator<Item = (Side, R)> + '_ {
     models
         .sides()

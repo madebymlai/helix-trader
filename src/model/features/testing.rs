@@ -1,5 +1,7 @@
-//! Features for the tests: the last mid of an instrument's quotes, the same over the bracket's
-//! width, and counts of book depth and deltas and of custom points, declared in `[indicators]`.
+//! Declares features for the tests in `[indicators]`.
+//!
+//! They are the last mid of an instrument's quotes, the same mid over the bracket's width, and
+//! counts of book depth and deltas and of custom points.
 
 use std::rc::Rc;
 
@@ -29,8 +31,10 @@ pub(crate) fn last_mid(instrument_id: InstrumentId) -> FeatureSetBuilder {
     FeatureSet::builder().feature(&[Series::quotes(instrument_id)], MID, &tables())
 }
 
-/// The last mid of a quote over the bracket's width there, initialized once a quote came and the
-/// width has a length. Reading a width never handed, it panics.
+/// The last mid of a quote over the bracket's width there.
+///
+/// It is initialized once a quote came and the width has a length. Reading a width never handed
+/// panics.
 pub(crate) struct MidOverWidth {
     mid: Option<f64>,
     width: Option<Rc<BracketWidth>>,
@@ -111,7 +115,7 @@ pub(crate) fn mid_over(instrument_id: InstrumentId, width: &Rc<BracketWidth>) ->
 
 pub(crate) const BOOK: Declared<BookCountArgs> = Declared::new("book");
 
-/// Two features: the count of depth snapshots, then of batches of deltas, each warm once one came.
+/// Two features, each warm once one came: the count of depth snapshots, then of delta batches.
 pub(crate) fn book_counts(instrument_id: InstrumentId) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("book = {}").unwrap();
     FeatureSet::builder()
