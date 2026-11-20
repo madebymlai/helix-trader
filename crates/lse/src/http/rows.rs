@@ -1,25 +1,19 @@
 //! The rows of LSE's sources that are not prices, as `LseRow`s, each stamped when its values are
-//! known (`Stamp`).
+//! known (`Stamp`): reference collections, macro releases and yields, and an instrument's splits
+//! and dividends.
 //!
-//! The sources are a reference collection's (`/v3/reference/export`), a macro series' of releases
-//! or of yields (`/v3/macro/export`), and an instrument's splits or dividends (`/v3/factors`). This
-//! module decides which call a source names, what is asked of LSE for the rows known over a window,
-//! and whether LSE may not have loaded them all yet.
-//!
-//! A row known at a time its key, the column LSE's export selects rows by, says (`Stamp::known`),
-//! is asked by the dates of the keys of the rows known in the window (`Stamp::key`). One known at a
-//! time of another column, which may be any time after its key, is asked of the whole series up to
-//! the window's last date, so that none known in the window is missed. The rows outside the window
-//! are left out.
+//! A row known at the time its key says (`Stamp::known`) is asked by the dates of the keys of the
+//! rows known in the window (`Stamp::key`). A row known at another column's time, which may be any
+//! time after its key, is asked of the whole series up to the window's last date, so that none
+//! known in the window is missed. Rows outside the window are left out.
 //!
 //! LSE stores a date the morning after it (see `export`), so the window's last key date may not be
 //! loaded:
 //! - The current UTC day, or the day before while LSE holds no row of it (`export::loaded`).
-//! - Of a reference collection, any after the last key LSE's catalogue says it holds (`last`),
-//!   which LSE loads later: on 13 November 2026 the catalogue held insider trades filed up to 13
-//!   October.
-//! - A release LSE has not filled yet is a row of no actual, so a window of releases holding one,
-//!   past, is not loaded either.
+//! - Of a reference collection, any after the last key LSE's catalogue says it holds (`last`): on
+//!   13 November 2026 the catalogue held insider trades filed up to 13 October.
+//! - A release LSE has not filled yet is a row of no actual, so a past window holding one is not
+//!   loaded either.
 
 use std::fmt::Display;
 
@@ -39,23 +33,18 @@ use super::{
 };
 use crate::{common::consts::OPTIONS_CHAIN, types::LseRow};
 
-/// The sources of LSE's macro series, by the kind of its rows: its releases, its yields, and its
-/// observations, which are refused.
 const MACRO_RELEASE: &str = "macro_release";
 const MACRO_YIELD: &str = "macro_yield";
 const MACRO_OBSERVATION: &str = "macro_observation";
-/// The sources of an instrument's factors: its splits and its dividends.
 const FACTORS_SPLITS: &str = "factors_splits";
 const FACTORS_DIVIDENDS: &str = "factors_dividends";
-/// The reference collections whose rows are releases, each filled with its `actual` once out.
+// The reference collections whose rows are releases
 const RELEASES: &[&str] = &["economic_calendar"];
-/// The field of a release's value, empty until LSE fills it.
+// A release's value, empty until LSE fills it
 const ACTUAL: &str = "actual";
-/// A UTC day.
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
-/// A source of LSE's rows that are not prices, and the series of it, as a data type names them in
-/// its metadata (`data::served::row_source`).
+/// A source of LSE's rows that are not prices, and its series (`data::served::row_source`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowSource {
     source: String,
@@ -63,14 +52,11 @@ pub struct RowSource {
     call: Call,
 }
 
-/// The call that answers a source's rows, and how they are stamped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Call {
-    /// A reference collection, its rows stamped as its `Stamp` says.
     Reference(Stamp),
-    /// A macro series of a kind.
     Macro(MacroKind),
-    /// An instrument's splits or dividends, by its market and symbol, each known at its day's end.
+    // Each row is known at its day's end
     Factors {
         factor: Factor,
         market: String,
@@ -78,18 +64,15 @@ enum Call {
     },
 }
 
-/// A kind of LSE's macro series that the client serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MacroKind {
-    /// Releases, each keyed by the time it came out, `released_at`, and known then, with its
-    /// `actual` once LSE has filled it.
+    /// Releases, keyed by `released_at` and known then.
     Release,
-    /// Yields, a day's close each, keyed by its `day`, and known at its end.
+    /// Yields, a day's close each, keyed by `day` and known at its end.
     Yield,
 }
 
 impl MacroKind {
-    /// Returns LSE's name of the kind, as its export asks it (`kind`).
     fn name(self) -> &'static str {
         match self {
             Self::Release => "release",
@@ -97,7 +80,6 @@ impl MacroKind {
         }
     }
 
-    /// Returns the column the export selects its rows by.
     fn time_column(self) -> &'static str {
         match self {
             Self::Release => "released_at",
@@ -113,8 +95,7 @@ impl MacroKind {
     }
 }
 
-/// An instrument's factor LSE serves: its splits, each of its `date`, or its dividends, each of its
-/// `ex_date`.
+// Splits are keyed by `date`, dividends by `ex_date`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Factor {
     Splits,
@@ -122,7 +103,6 @@ enum Factor {
 }
 
 impl Factor {
-    /// Returns the field of a factor's day.
     fn day_field(self) -> &'static str {
         match self {
             Self::Splits => "date",
@@ -131,34 +111,29 @@ impl Factor {
     }
 }
 
-/// What LSE holds of a source's rows known over a window.
+/// The rows of a source known over a window.
 #[derive(Debug)]
 pub struct Fetched {
     /// The rows known over the window, in the order they are known.
     pub rows: Vec<LseRow>,
-    /// Where the span LSE may not have loaded yet starts, if the window reaches into it: from
-    /// there, LSE may hold rows it does not yet.
+    /// Where the span LSE may not have loaded yet starts, if the window reaches into it.
     pub unloaded_from: Option<Timestamp>,
 }
 
 impl RowSource {
     /// Returns the series `symbol` of LSE's `source`.
     ///
-    /// A reference collection is by its name (`bond_yields`), a macro series of releases or of
-    /// yields by its code (`macro_release`, `macro_yield`), and an instrument's splits or dividends
-    /// by its symbol and market (`factors_splits`, `factors_dividends` of `AAPL-US_STOCKS`, LSE's
-    /// symbol, a hyphen and its market in capitals, as an `LSEDGE` series' symbol names its
-    /// market).
+    /// A reference collection is named by its name (`bond_yields`), macro releases and yields by
+    /// their code, and splits or dividends by LSE's symbol, a hyphen and the market in capitals
+    /// (`factors_splits` of `AAPL-US_STOCKS`).
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - `source` is LSE's options chain (`options_chain`), which LSE serves as it stands alone,
-    ///   with no history.
-    /// - It is a macro series of observations, each keyed by the day of its period, not when it
-    ///   came out.
-    /// - It is a reference collection the client has not classified, whose rows may be known at any
-    ///   time.
+    /// - `source` is LSE's options chain (`options_chain`), which has no history.
+    /// - It is a macro series of observations, keyed by the day of the period, not when it came
+    ///   out.
+    /// - It is a reference collection the client has not classified.
     /// - It is factors of a symbol naming no market.
     ///
     /// Each fails before LSE is asked.
@@ -211,8 +186,6 @@ impl RowSource {
         })
     }
 
-    /// Returns whether its rows are releases, each with its `actual` once LSE has filled it: the
-    /// economic calendar's and a macro series of releases'.
     fn awaits_actual(&self) -> bool {
         match &self.call {
             Call::Reference(_) => RELEASES.contains(&self.source.as_str()),
@@ -221,7 +194,6 @@ impl RowSource {
         }
     }
 
-    /// Returns when its rows are known.
     fn stamp(&self) -> Stamp {
         match &self.call {
             Call::Reference(stamp) => *stamp,
@@ -237,17 +209,14 @@ impl Display for RowSource {
     }
 }
 
-/// Returns the rows of `source` known over `[start, end]`, asked through `http`, in the order they
-/// are known, and where the span LSE has not loaded as of `now` starts, if the window reaches into
-/// it (see the module's doc).
-///
-/// A row known at no time LSE gives is left out, with a warning naming it.
+/// Returns the rows of `source` known over `[start, end]` in the order they are known, and where
+/// the span LSE has not loaded as of `now` starts, if the window reaches into it (see the module's
+/// doc). A row known at no time LSE gives is left out, with a warning.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - A call fails, naming it: LSE refused it, answered as its docs do not say, or could not be
-///   reached.
+/// - A call fails: LSE refused it, answered as its docs do not say, or could not be reached.
 /// - LSE's catalogue does not list the reference collection.
 /// - Its `last` is neither a date nor a time (see `ReferenceCollection::last_key`).
 /// - A file is not read (see `parse_rows`).
@@ -267,7 +236,7 @@ pub async fn fetch(
         call,
     } = source;
 
-    // The key of the last rows LSE holds, as its reference catalogue says
+    // The key of the last rows LSE holds, per its reference catalogue
     let (parsed, held) = match call {
         Call::Reference(_) => {
             let collection = http
@@ -314,7 +283,7 @@ pub async fn fetch(
         );
     }
 
-    // The window's last key date, the one LSE may not have loaded yet
+    // The window's last key date, which LSE may not have loaded
     let last = stamp.key(end).unwrap_or(end);
     let rows_of_last = parsed
         .rows
@@ -323,7 +292,7 @@ pub async fn fetch(
     let known = |key: Timestamp| stamp.known(key).unwrap_or(key);
     let unloaded_day = (!loaded(last, rows_of_last, now)).then(|| known(midnight(last)));
 
-    // LSE loads a day whole, so its catalogue's last says which day
+    // LSE loads a day whole
     let unloaded_after_held = held
         .filter(|&held| midnight(last) > midnight(held))
         .map(|held| known(midnight(held) + DAY));
@@ -350,13 +319,11 @@ pub async fn fetch(
     })
 }
 
-/// Returns the rows of `file`, LSE's answer to the export `query` of `source`, each keyed by
-/// `time_column` and stamped as `stamp` (see `parse_rows`), none if LSE holds no row of the
-/// selection.
+/// Returns the rows of `file`, LSE's answer to `query`, keyed by `time_column` (see `parse_rows`).
 ///
 /// # Errors
 ///
-/// Returns an error if LSE refused the export or its file is not read, naming `query`.
+/// Returns an error if LSE refused the export or its file is not read.
 fn read(
     file: Result<Option<Bytes>, LseHttpError>,
     query: &impl Display,
@@ -371,9 +338,8 @@ fn read(
         .with_context(|| format!("reading {query}"))
 }
 
-/// Returns the dates of the keys of the rows stamped as `stamp` known over `[start, end]`: from the
-/// key of its start to the key of its end (see `Stamp::key`), or, for rows known at another
-/// column's time, every date up to the window's last.
+/// Returns the dates of the keys of the rows known over `[start, end]` (see `Stamp::key`), or, for
+/// rows known at another column's time, every date up to the window's last.
 fn dates(stamp: Stamp, start: Timestamp, end: Timestamp) -> Dates {
     let date = |at: Timestamp| at.to_zoned(TimeZone::UTC).date();
     match (stamp.key(start), stamp.key(end)) {
@@ -388,14 +354,13 @@ fn dates(stamp: Stamp, start: Timestamp, end: Timestamp) -> Dates {
     }
 }
 
-/// Returns the rows of `factors`' `factor`, of `symbol` in LSE's `source`, each keyed by its day
-/// (`Factor::day_field`) and known at its end, a dividend with the unit of its amount (`unit`).
+/// Returns the rows of `factors`' `factor`, each keyed by its day (`Factor::day_field`) and known
+/// at its end, a dividend with the unit of its amount (`unit`).
 ///
 /// # Errors
 ///
 /// Returns an error if a row has no day, or if LSE cut the dividends to their newest and `start` is
-/// not after the oldest of them: the window may lack some LSE left out, which the reference
-/// collection `dividends` holds.
+/// not after the oldest of them: the reference collection `dividends` holds the rest.
 fn factor_rows(
     factors: LseFactors,
     factor: Factor,
@@ -451,7 +416,7 @@ fn factor_rows(
     Ok(parsed)
 }
 
-/// Returns the start of `day`, a date LSE writes `YYYY-MM-DD`, in UTC.
+/// Returns the start of `day`, written `YYYY-MM-DD`, in UTC.
 fn midnight_of(day: &str) -> anyhow::Result<Timestamp> {
     let date: Date = day
         .parse()
