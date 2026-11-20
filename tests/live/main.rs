@@ -1,22 +1,22 @@
-//! End to end tests on real venues, in one test binary with a module per venue run. Each module is
-//! gated by its own variables. Without them, its tests return at once and say they were skipped.
-//! Run one module per process, by its path:
+//! End to end tests on real venues, one module per venue run, in one test binary.
+//!
+//! Each module is gated by its own variables: without them its tests return at once and say they
+//! were skipped. Run one module per process, by its path:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_demo:: -- --nocapture
 //! ```
 //!
-//! Two opted-in modules cannot share a process, for these reasons:
+//! Two opted-in modules cannot share a process:
 //!
 //! - A node stops on the SIGINT its test sends to the whole process.
 //! - `Live::run` installs its `tracing` subscriber once per process.
 //! - There is one node per process (`docs/architecture.md`, "Process constraints").
 //! - Modules of one venue trade the same account.
 //!
-//! The first module to opt in claims the process (`claim_process`). Another module's test fails
-//! before connecting.
-//!
-//! `streaming` is hermetic and ungated: its nodes run in child processes, so it claims nothing.
+//! The first module to opt in claims the process (`claim_process`), and another module's test fails
+//! before connecting. `streaming` is hermetic and ungated: its nodes run in child processes, so it
+//! claims nothing.
 
 use std::{cell::RefCell, path::Path, sync::OnceLock};
 
@@ -25,7 +25,7 @@ use helix_trader::{live::Recording, venues::LiveVenueArgs};
 use nautilus_common::actor::indicators::ActorIndicator;
 use nautilus_model::data::{Bar, QuoteTick, TradeTick};
 
-/// Returns the current time on Nautilus' realtime clock, as the live node reads it.
+/// Returns the current time on Nautilus' realtime clock.
 pub(crate) fn now() -> jiff::Timestamp {
     jiff::Timestamp::from(nautilus_core::time::get_atomic_clock_realtime().get_time_ns())
 }
@@ -111,9 +111,7 @@ fn venues(flags: &[&str]) -> LiveVenueArgs {
     LiveVenueArgs::from_arg_matches(&matches).unwrap()
 }
 
-/// Returns the recording of a venue test's node.
-///
-/// It is staged in `staging`, and promoted daily and on the node's stop.
+/// Returns the recording of a venue test's node, staged in `staging`.
 fn recording(staging: &Path) -> Recording {
     Recording {
         staging: staging.to_path_buf(),

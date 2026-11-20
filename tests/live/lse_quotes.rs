@@ -2,7 +2,8 @@
 //! adapter's data client, routed as the live node routes it.
 //!
 //! - LSE's gold futures quotes, `GOLD-FUTURES.LSEDGE`, on data-ws. LSE publishes no definition, so
-//!   the   test writes it by hand into a temporary catalog.
+//!   the test writes it by hand into a temporary catalog: an index in USD priced to a tenth, with
+//!   sizes in whole lots.
 //! - Level 1 of GCZ6 of 2026, `GCZ26.GLBX`, its quotes and trades, on LSE's CME stream. Its
 //!   definition is Databento's (the crate's `testing::gcz26`), and is in the catalog too.
 //!
@@ -46,10 +47,8 @@ const GOLD: &str = "GOLD-FUTURES.LSEDGE";
 
 const STREAMED: Duration = Duration::from_secs(60);
 
-/// Returns whether the run is opted in.
-///
-/// Reads the opt-in from the shell before `.env` is read, so the file cannot opt in. An opted-in
-/// run claims the process (`claim_process`).
+/// Returns whether the run is opted in by the shell, which `.env` cannot do, and claims the process
+/// if so (`claim_process`).
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_LSE_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -61,8 +60,6 @@ fn opted_in(test: &str) -> bool {
 }
 
 /// Returns a hand-written definition of the gold series.
-///
-/// It is an index in USD priced to a tenth, with sizes in whole lots.
 fn gold() -> InstrumentAny {
     InstrumentAny::IndexInstrument(
         IndexInstrument::builder()
