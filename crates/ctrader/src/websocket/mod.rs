@@ -1,43 +1,51 @@
-//! The cTrader Open API connection: an outer client and the handler task that owns Nautilus'
+//! The cTrader Open API connection. It has an outer client and a handler task that owns Nautilus'
 //! `WebSocketClient` (see `handler`).
 //!
-//! The outer client starts the handler with `SetClient`, waits for the session to authenticate
-//! (application, then account, tracked by Nautilus' `AuthTracker` registered with the transport),
-//! then sends requests as commands and awaits each response. The handler sends the binary
-//! heartbeat, correlates responses by `clientMsgId` and authenticates each new session after a
-//! reconnect before serving waiting requests. When cTrader ends the client's session, it asks the
-//! transport to reconnect (`WebSocketClient::request_reconnect`). Requests in flight at a
-//! reconnect fail: their session is gone.
+//! The outer client starts the handler with `SetClient` and waits for the session to authenticate.
+//! Authentication is the application, then the account, tracked by Nautilus' `AuthTracker`
+//! registered with the transport. The client then sends requests as commands and awaits each
+//! response.
 //!
-//! The socket's state is Nautilus' to report: given the client's `SocketControl`, the transport
-//! tells the node when the socket becomes available and when it is lost (`SocketStateChanged`,
-//! under the client's endpoint label), and the node's reconnect replaces the transport as a drop
-//! does. A disconnect deregisters it (`live.md`, "Socket transport state").
+//! The handler sends the binary heartbeat and correlates responses by `clientMsgId`. After a
+//! reconnect, it authenticates each new session before it serves waiting requests. When cTrader
+//! ends the client's session, the handler asks the transport to reconnect
+//! (`WebSocketClient::request_reconnect`). Requests in flight at a reconnect fail, because their
+//! session is gone.
 //!
-//! The handler task is held in Nautilus' `TaskSlot`: `begin_shutdown` tells it to close,
-//! `disconnect` joins it (`finish_task`), a token renewal in flight answered and saved first. Time
-//! goes through Nautilus' simulation seams (`nautilus_common::live::dst`, `nautilus_core::time`).
+//! Nautilus reports the socket's state. Given the client's `SocketControl`, the transport tells
+//! the node when the socket becomes available and when it is lost (`SocketStateChanged`, under the
+//! client's endpoint label). The node's reconnect replaces the transport, as a drop does. A
+//! disconnect deregisters it (`live.md`, "Socket transport state").
 //!
-//! Spot subscriptions are tracked in Nautilus' `SubscriptionState` (topics `spot:<symbolId>`) and
-//! sent again after each reconnect (`reset_after_reconnect`).
+//! Nautilus' `TaskSlot` holds the handler task. `begin_shutdown` tells it to close, and
+//! `disconnect` joins it (`finish_task`). A token renewal in flight is answered and saved first.
+//! Time goes through Nautilus' simulation seams (`nautilus_common::live::dst`,
+//! `nautilus_core::time`).
 //!
-//! Trade requests go out under the `clientMsgId` their caller chose (`trade`), which learns whether
-//! the frame was sent. Their outcome, like every execution event and order error of the account,
-//! comes on the trade events (`trade_events`) with that `clientMsgId`.
+//! Nautilus' `SubscriptionState` tracks the spot subscriptions (topics `spot:<symbolId>`). They
+//! are sent again after each reconnect (`reset_after_reconnect`).
 //!
-//! Historical requests wait for their slot of Nautilus' `RateLimiter`, keyed `HISTORICAL_KEY`: one
-//! every 250 ms, without burst, so fewer than cTrader's 5 in any second even after an idle spell (a
-//! burst of 5 then the refill could send 9 within one second). One every 200 ms got
-//! `BLOCKED_PAYLOAD_TYPE` ("You are being rate limited") on the demo. The caller waits before its
-//! command goes to the handler, as Nautilus' `HttpClient` does: waiting on the transport's keyed
-//! quota would hold the handler's loop, and with it trade requests, answers and the heartbeat. A
-//! slot counts only while the session is authenticated (`AuthTracker`, invalidated while the
-//! handler authenticates the account again on the same connection): the handler holds the requests
+//! Trade requests go out under the `clientMsgId` their caller chose (`trade`). The caller learns
+//! whether the frame was sent. The outcome comes on the trade events (`trade_events`) with that
+//! `clientMsgId`, like every execution event and order error of the account.
+//!
+//! Historical requests wait for a slot of Nautilus' `RateLimiter`, keyed `HISTORICAL_KEY`. The
+//! quota is one request every 250 ms, without burst. That stays under cTrader's limit of 5 in any
+//! second, even after an idle spell. (A burst of 5 then the refill could send 9 within one
+//! second.) One every 200 ms got `BLOCKED_PAYLOAD_TYPE` ("You are being rate limited") on the
+//! demo.
+//!
+//! The caller waits before its command goes to the handler, as Nautilus' `HttpClient` does.
+//! Waiting on the transport's keyed quota would hold the handler's loop, and with it trade
+//! requests, answers and the heartbeat.
+//!
+//! A slot counts only while the session is authenticated (`AuthTracker`, invalidated while the
+//! handler authenticates the account again on the same connection). The handler holds the requests
 //! meanwhile and sends them together once authenticated, faster than the limit.
 //!
-//! The transport's own heartbeat is off: cTrader counts its `ProtoHeartbeatEvent`, which the
-//! transport cannot send (it sends Ping frames or text). Its dead-peer timeout is on, against the
-//! heartbeats cTrader sends (`DEAD_PEER_TIMEOUT_SECS`).
+//! The transport's own heartbeat is off. cTrader counts its `ProtoHeartbeatEvent`, which the
+//! transport cannot send (it sends Ping frames or text). The transport's dead-peer timeout is on,
+//! against the heartbeats cTrader sends (`DEAD_PEER_TIMEOUT_SECS`).
 
 mod handler;
 
@@ -70,10 +78,12 @@ use super::{
 
 pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Three of the heartbeats cTrader's proxy sends every 30 s on a silent authenticated connection
-/// (`ProtoHeartbeatEvent`'s doc; the interval, Spotware's support on its forum), after which the
-/// transport reconnects (`heartbeat_timeout_secs`). Without it a silent peer with its TCP
-/// connection open would hold the session until requests time out.
+/// The time of three heartbeats, after which the transport reconnects (`heartbeat_timeout_secs`).
+///
+/// cTrader's proxy sends a heartbeat every 30 s on a silent authenticated connection
+/// (`ProtoHeartbeatEvent`'s doc gives the event, and Spotware's support on its forum gives the
+/// interval). Without this timeout, a silent peer with its TCP connection open would hold the
+/// session until requests time out.
 const DEAD_PEER_TIMEOUT_SECS: u64 = 90;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -85,7 +95,7 @@ const HISTORICAL_KEY: &str = "historical";
 // cTrader allows 5 historical requests a second
 const HISTORICAL_PERIOD: Duration = Duration::from_millis(250);
 
-/// Includes the answer of a token renewal in flight, up to `AUTH_TIMEOUT`.
+/// Allows time for the answer of a token renewal in flight, up to `AUTH_TIMEOUT`.
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(40);
 
 const ABORT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -113,12 +123,14 @@ fn spot_symbol(topic: &str) -> i64 {
         .expect("a spot topic holds a symbol id")
 }
 
-/// The spot events of the symbols subscribed.
+/// The spot events of the subscribed symbols.
 pub type SpotEvents = tokio::sync::mpsc::UnboundedReceiver<ProtoOaSpotEvent>;
 
 pub(crate) type TradeEvents = tokio::sync::mpsc::UnboundedReceiver<TradeEvent>;
 
-/// A trade event and its `clientMsgId`, the trade request's when it answers one.
+/// A trade event and its `clientMsgId`.
+///
+/// The `clientMsgId` is the trade request's when the event answers one.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TradeEvent {
     pub(crate) client_msg_id: Option<String>,
@@ -141,7 +153,7 @@ pub(crate) enum TradeMessage {
     },
 }
 
-/// `Ok` once a trade request's frame is written, an error if it never was.
+/// Reports a trade request's send: `Ok` once the frame is written, an error if it never was.
 pub(crate) type TradeSent = tokio::sync::oneshot::Receiver<Result<(), CTraderError>>;
 
 pub(super) struct CTraderWebSocketClient {
@@ -163,9 +175,10 @@ impl Debug for CTraderWebSocketClient {
 }
 
 impl CTraderWebSocketClient {
-    /// Connects to `url` and authenticates with the token file's pair (seeded from `credential`
-    /// the first time, renewed first if due). `socket`, a node's client's, reports the socket's
-    /// state and takes the node's reconnect.
+    /// Connects to `url` and authenticates with the token file's pair.
+    ///
+    /// The pair is seeded from `credential` the first time, and renewed first if due. `socket`
+    /// belongs to a node's client. It reports the socket's state and takes the node's reconnect.
     ///
     /// # Errors
     ///
@@ -179,7 +192,7 @@ impl CTraderWebSocketClient {
         credential: CTraderCredential,
         socket: Option<SocketControl>,
     ) -> anyhow::Result<(Self, SpotEvents)> {
-        // While another session renews the pair, its new one is awaited
+        // While another session renews the pair, this one awaits the new pair
         let tokens = loop {
             if let Some(tokens) = credential.tokens().try_load()? {
                 break tokens;
@@ -210,8 +223,8 @@ impl CTraderWebSocketClient {
         let reconnect = client.reconnect_handle();
 
         // The transport invalidates the authentication when the connection drops and fails it once
-        // closed, its reconnect buffer waiting for it; the handler's frames, bound to their
-        // connection, never go through it.
+        // closed, while its reconnect buffer waits for it, and the handler's frames, which are
+        // bound to their connection, never go through it.
         let auth = AuthTracker::new();
         client.set_auth_tracker(auth.clone(), true);
         let subscriptions = SubscriptionState::new(TOPIC_DELIMITER);
@@ -258,7 +271,9 @@ impl CTraderWebSocketClient {
         }
     }
 
-    /// Sends `request`, a historical one once its slot comes, and awaits its response.
+    /// Sends `request` and awaits its response.
+    ///
+    /// A historical request goes out once its slot comes.
     ///
     /// # Errors
     ///
@@ -291,6 +306,8 @@ impl CTraderWebSocketClient {
         open(&envelope)
     }
 
+    /// Takes a historical slot.
+    ///
     /// A slot taken while the session authenticates again is spent. A failed session takes none.
     async fn historical_slot(&self) {
         let keys = [Ustr::from(HISTORICAL_KEY)];
@@ -304,7 +321,7 @@ impl CTraderWebSocketClient {
 
     /// Subscribes to the spot events of `symbol_id`, with timestamps, for the rest of the session.
     ///
-    /// cTrader's answer comes after this returns: a refusal is logged and marks the subscription
+    /// cTrader's answer comes after this returns. A refusal is logged and marks the subscription
     /// failed, kept for the next connection.
     ///
     /// # Errors
@@ -316,7 +333,9 @@ impl CTraderWebSocketClient {
             .map_err(|_| CTraderError::ConnectionLost)
     }
 
-    /// Ends the spot subscription of `symbol_id`, if any. cTrader may still send a few spot events.
+    /// Ends the spot subscription of `symbol_id`, if any.
+    ///
+    /// cTrader may still send a few spot events.
     ///
     /// # Errors
     ///
@@ -362,7 +381,8 @@ impl CTraderWebSocketClient {
         let _ = self.cmd_tx.send(HandlerCommand::RenewToken);
     }
 
-    /// Asks the handler to close once a token renewal in flight is saved or `AUTH_TIMEOUT` passed.
+    /// Asks the handler to close once a token renewal in flight is saved or `AUTH_TIMEOUT` has
+    /// passed.
     pub(super) fn begin_shutdown(&self) {
         // The handler is gone once it has stopped
         let _ = self.cmd_tx.send(HandlerCommand::Disconnect);
@@ -489,7 +509,8 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// Two heartbeats come `HEARTBEAT_INTERVAL` apart, the first one interval after the connect.
+    /// Two heartbeats come `HEARTBEAT_INTERVAL` apart, and the first comes one interval after the
+    /// connect.
     #[tokio::test]
     async fn the_heartbeat_is_a_binary_heartbeat_event() {
         let (url, received) = testing::start(symbols_peer);
@@ -726,8 +747,8 @@ mod tests {
         }
     }
 
-    /// Seven requests take six gaps wider than 200 ms (one every 200 ms was refused on the demo):
-    /// above 1.2 s, with a margin for round trips.
+    /// Seven requests take six gaps wider than 200 ms (one every 200 ms was refused on the demo).
+    /// That is above 1.2 s, with a margin for round trips.
     const SEVEN_HISTORICAL: Duration = Duration::from_millis(1250);
 
     #[tokio::test]
@@ -861,7 +882,7 @@ mod tests {
     }
 
     /// Connection 0 answers the first request after the auth with a synthetic end of the client's
-    /// session, keeping the socket open.
+    /// session, and keeps the socket open.
     fn ending_peer(connection: usize, request: &ProtoMessage) -> Vec<Action> {
         if connection > 0 {
             return symbols_peer(connection, request);
@@ -1161,8 +1182,9 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// Synthetic refusal of a symbol cTrader does not list, on the first connection only, closed
-    /// once it has answered symbol 1's subscription.
+    /// Gives a synthetic refusal of a symbol cTrader does not list, on the first connection only.
+    ///
+    /// That connection closes once it has answered symbol 1's subscription.
     #[tokio::test]
     async fn a_refused_spot_subscription_is_sent_again_on_the_next_connection() {
         let (url, received) = testing::start(|connection, request| {
@@ -1199,8 +1221,10 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// Synthetic answer to symbol 41's subscription not listing it in `subscribedSymbolId`, as the
-    /// demo lists each symbol: it stays pending, symbol 1 is confirmed.
+    /// Gives a synthetic answer to symbol 41's subscription that does not list it in
+    /// `subscribedSymbolId`, as the demo lists each symbol.
+    ///
+    /// Symbol 41 stays pending, and symbol 1 is confirmed.
     #[tokio::test]
     async fn a_symbol_the_answer_does_not_list_as_subscribed_is_not_confirmed() {
         let (url, _received) = testing::start(|connection, request| {
@@ -1390,8 +1414,8 @@ mod tests {
         )
     }
 
-    /// cTrader keeps a connection's spot subscriptions across a new account auth on it, and refuses
-    /// one already held with `ALREADY_SUBSCRIBED` (demo, 2026-10-26).
+    /// cTrader keeps the spot subscriptions of a connection across a new account auth on it. It
+    /// refuses one already held with `ALREADY_SUBSCRIBED` (demo, 2026-10-26).
     fn venue_peer(
         venue: &SharedVenue,
     ) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static {
@@ -1466,8 +1490,8 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// A token expiring within a day is renewed (2173) between the application auth (2100) and the
-    /// account auth (2102).
+    /// A token that expires within a day is renewed (2173) between the application auth (2100) and
+    /// the account auth (2102).
     #[rstest]
     #[case::within_a_day(23, &[2100, 2173, 2102], "renewedAccess1")]
     #[case::later_than_a_day(25, &[2100, 2102], "accessTokenValue")]
@@ -1647,7 +1671,7 @@ mod tests {
         );
     }
 
-    /// As `peer`, answering renewals `delay` late.
+    /// Acts as `peer` and answers renewals `delay` late.
     fn slow_renewal(
         delay: Duration,
         mut peer: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
