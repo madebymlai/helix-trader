@@ -1,15 +1,16 @@
-//! A live start on IB of a strategy converting through IDEALPRO's
-//! EUR/USD, end to end on the Docker paper gateway, with an empty catalog,
-//! so that IB answers the whole warmup: the pair's 1-minute BID and ASK
-//! bars, which the strategy's data requirements carry, are requested as
-//! IB serves them (see `strategy::warmup`), the warmup completes, and
-//! Nautilus' rate of EUR in USD through them is in the cache at its end,
-//! as a trade sized at the start reads it.
+//! A live start on IB of a strategy that converts through IDEALPRO's EUR/USD, end to end on the
+//! Docker paper gateway. The catalog is empty, so IB answers the whole warmup.
 //!
-//! Gated as `ib_gateway.rs`: it returns at once, saying it was skipped,
-//! unless `NAUTILUS_IB_RUN=1` is set in the shell. It places no order. Its
-//! warmup reaches back 72 hours, so that it holds the pair's last bars on a
-//! weekend too:
+//! The test checks that:
+//!
+//! - The pair's 1-minute BID and ASK bars, which the data requirements carry, are requested as IB
+//!   serves them (see `strategy::warmup`).
+//! - The warmup completes.
+//! - Nautilus' rate of EUR in USD through them is in the cache at its end, as a trade sized at the
+//!   start reads it.
+//!
+//! Gated as `ib_gateway.rs`. It places no order. Its warmup reaches back 72 hours, so that it holds
+//! the pair's last bars on a weekend too:
 //!
 //! ```sh
 //! NAUTILUS_IB_RUN=1 cargo test --test live ib_pair_warmup:: -- --nocapture
@@ -43,8 +44,6 @@ use crate::common;
 
 const TRADER: &str = "HELIXTEST-050";
 
-/// The EMA crossover on SXR8.IBIS hour bars of IB's minute bars,
-/// converting through IDEALPRO's EUR/USD, warmed up over 72 hours.
 fn converting_ema_cross() -> EmaCrossConfig {
     EmaCrossConfig::load(
         r#"
@@ -69,16 +68,12 @@ fn converting_ema_cross() -> EmaCrossConfig {
 
 #[derive(Debug, Default)]
 struct Record {
-    /// The bar types of the bars of the responses, each once.
     answered: Vec<BarType>,
-    /// The rate of EUR in USD through IDEALPRO's pairs when the warmup
-    /// ended.
+
     rate: Option<Decimal>,
     failure: Option<String>,
 }
 
-/// Warms up and subscribes to its bars from where the warmup ends as a
-/// strategy does, reads the rate when the warmup ends, and stops the node.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
@@ -161,9 +156,9 @@ async fn a_live_start_warms_up_an_idealpro_pairs_bid_and_ask_bars_and_has_its_ra
         subscriptions: Subscriptions::new(requirements.bar_types.clone(), vec![], vec![]),
         record: Rc::clone(&record),
     };
-    // An empty catalog of its own: IB answers the whole warmup.
+
     let catalog = tempfile::tempdir().unwrap();
-    // Outside the catalog, as `Live` requires.
+
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
@@ -174,7 +169,6 @@ async fn a_live_start_warms_up_an_idealpro_pairs_bid_and_ask_bars_and_has_its_ra
     };
     let ran = Box::pin(tokio::time::timeout(
         Duration::from_secs(300),
-        // The probe trades nothing: it claims no instrument.
         live.run(&requirements, &warmup, probe, None),
     ))
     .await;

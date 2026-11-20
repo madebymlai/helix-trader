@@ -1,4 +1,4 @@
-//! LightGBM: gradient-boosted trees under L2 regression.
+//! LightGBM trains gradient-boosted trees under L2 regression.
 
 use anyhow::Context;
 use lightgbm3::{Booster, Dataset};
@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{Learner, Predictor, SavedModel, TrainingSet};
 
-/// LightGBM's settings, each named and meant as in LightGBM's parameters.
-/// The defaults of the rounds, the learning rate, the leaves and the rows a
-/// leaf (100, 0.05, 7 and 200) are regularized for a weak signal.
+/// LightGBM's settings, named as LightGBM's parameters are.
+///
+/// The defaults are regularized for a weak signal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct LightGbmConfig {
@@ -19,14 +19,14 @@ pub struct LightGbmConfig {
     #[serde(default = "default_learning_rate")]
     #[builder(default = default_learning_rate())]
     pub learning_rate: f64,
-    /// The most leaves of a tree.
+    /// The most leaves in a tree.
     #[serde(default = "default_num_leaves")]
     #[builder(default = default_num_leaves())]
     pub num_leaves: u32,
-    /// The fewest rows in a leaf, 200 by default and 20 at least: lightgbm3
-    /// builds LightGBM's dataset without parameters, and the dataset drops
-    /// each feature no split leaves 20 rows each side of, LightGBM's
-    /// default, so fewer would not be honored.
+    /// The fewest rows in a leaf, at least 20.
+    ///
+    /// lightgbm3 builds the dataset without parameters. LightGBM then drops each feature that has
+    /// no split leaving 20 rows on each side.
     #[serde(default = "default_min_data_in_leaf")]
     #[builder(default = default_min_data_in_leaf())]
     pub min_data_in_leaf: u32,
@@ -34,7 +34,7 @@ pub struct LightGbmConfig {
     #[serde(default = "default_feature_fraction")]
     #[builder(default = default_feature_fraction())]
     pub feature_fraction: f64,
-    /// The seed of every draw.
+    /// The seed for every draw.
     #[serde(default = "default_seed")]
     #[builder(default = default_seed())]
     pub seed: u32,
@@ -52,8 +52,8 @@ const fn default_num_leaves() -> u32 {
     7
 }
 
-/// The fewest rows in a leaf LightGBM's dataset honors: its default, as
-/// lightgbm3 builds the dataset without parameters.
+/// LightGBM's dataset default, which applies because lightgbm3 builds the dataset without
+/// parameters.
 const DATASET_MIN_DATA_IN_LEAF: u32 = 20;
 
 const fn default_min_data_in_leaf() -> u32 {
@@ -73,9 +73,8 @@ impl LightGbmConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if `min_data_in_leaf` is below 20: lightgbm3
-    /// builds LightGBM's dataset without parameters, so LightGBM's default
-    /// of 20 applies there whatever the setting.
+    /// Returns an error if `min_data_in_leaf` is below 20. That is LightGBM's dataset default, and
+    /// lightgbm3 applies it whatever the setting.
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.min_data_in_leaf >= DATASET_MIN_DATA_IN_LEAF,
@@ -87,9 +86,10 @@ impl LightGbmConfig {
         Ok(())
     }
 
-    /// The settings as LightGBM's parameters, fitting L2 regression.
-    /// LightGBM, built without OpenMP, trains on one thread; `deterministic`
-    /// and `force_row_wise` keep its results from depending on the machine.
+    /// Builds the LightGBM parameters.
+    ///
+    /// LightGBM is built without OpenMP, so it trains on one thread. `deterministic` and
+    /// `force_row_wise` keep its results from depending on the machine.
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "objective": "regression",
@@ -110,7 +110,8 @@ impl LightGbmConfig {
 impl Learner for LightGbmConfig {
     fn fit(&self, set: &TrainingSet) -> anyhow::Result<Box<dyn Predictor>> {
         let features: Vec<f64> = set.rows().flatten().copied().collect();
-        // LightGBM keeps its labels as f32.
+
+        // LightGBM stores labels as f32
         let labels: Vec<f32> = set.labels().iter().map(|&label| label as f32).collect();
         let dataset = Dataset::from_slice(&features, &labels, i32::try_from(set.width())?, true)?;
         Ok(Box::new(LightGbm::new(Booster::train(
@@ -125,7 +126,6 @@ impl Learner for LightGbmConfig {
     }
 }
 
-/// A LightGBM booster and the width of its rows.
 struct LightGbm {
     booster: Booster,
     width: i32,
@@ -160,9 +160,6 @@ mod tests {
     use super::*;
     use crate::model::learner::LearnerConfig;
 
-    /// 900 rows of two features whose label is 1 exactly where the first
-    /// feature is missing, a third of them, enough for leaves of 200 rows,
-    /// and 0 elsewhere, where the feature runs from 0 to 1, zero included.
     fn missing_is_one() -> TrainingSet {
         let mut features = Vec::new();
         let mut labels = Vec::new();
@@ -189,8 +186,6 @@ mod tests {
         }
     }
 
-    /// 300 rows of one feature, 0.0 to 0.9 by 0.1, its label 1 below 0.5
-    /// and 0 from it: the split leaves 150 rows each side.
     fn halves() -> TrainingSet {
         let features: Vec<f64> = (0..300_u32).map(|i| f64::from(i % 10) / 10.0).collect();
         let labels = features
@@ -200,13 +195,7 @@ mod tests {
         TrainingSet::new(1, features, labels).unwrap()
     }
 
-    /// Below 200 rows a side, the split is not made: the model predicts
-    /// the mean label, one half, on either side of it. With leaves of 150
-    /// rows allowed it is made, and, worked as the step below is, L2
-    /// starts every row at one half, a half short of either label, and
-    /// each of the 100 rounds takes 0.05 of what is left on each side: 0.5
-    /// * 0.95^100 is left, the model predicting 1 less that below the split
-    /// and that from it.
+    /// Below 200 rows on a side, no split is made and the model predicts the mean, 0.5.
     #[rstest]
     #[case::by_default(None, 0.5, 0.5)]
     #[case::set_to_fewer_rows(
@@ -230,8 +219,6 @@ mod tests {
         }
     }
 
-    /// 600 rows of one feature, 0.0 to 0.9 by 0.1, labeled 2 below 0.5
-    /// and -1 from it: 300 rows a side, enough for leaves of 200.
     fn step() -> TrainingSet {
         let features: Vec<f64> = (0..600_u32).map(|i| f64::from(i % 10) / 10.0).collect();
         let labels = features
@@ -241,11 +228,6 @@ mod tests {
         TrainingSet::new(1, features, labels).unwrap()
     }
 
-    /// Worked by hand: L2 starts every row at the mean label, 0.5, 1.5
-    /// short of either step, and each round's tree, split at the step,
-    /// takes 0.05 of what is left on each side. After 100 rounds 1.5 *
-    /// 0.95^100 = 0.008881 is left: the model predicts 1.991119 below the
-    /// step and -0.991119 from it.
     #[rstest]
     fn a_step_of_real_labels_is_learned_at_the_default_rate_over_the_default_rounds() {
         let model = LearnerConfig::LightGbm(LightGbmConfig::builder().build())
@@ -258,7 +240,6 @@ mod tests {
         }
     }
 
-    /// On 2,000 rows, enough for leaves of 200 rows.
     #[rstest]
     fn the_seed_reaches_lightgbm() {
         let fit = |seed| {

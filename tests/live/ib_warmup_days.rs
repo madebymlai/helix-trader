@@ -1,20 +1,18 @@
-//! A warmup of days on IB, end to end on the Docker paper gateway, with an
-//! empty catalog, so that IB answers all of it: the warmup asks in windows
-//! under a day, each of which IB's client asks as one request between its
-//! bounds, in seconds (see `strategy::warmup`'s `WINDOW`), and gets every
-//! minute bar IB's history holds over them, as read a page at a time, and
+//! Tests a warmup of days on IB, end to end on the Docker paper gateway. The catalog is empty, so
+//! IB answers all of the warmup. The warmup asks in windows under a day. Each window is one request
+//! between its bounds in seconds (see `strategy::warmup`'s `WINDOW`). The test checks that the
+//! warmup gets every minute bar IB's history holds over the windows, read a page at a time, and
 //! builds each hour bar from them once.
 //!
-//! Gated as `ib_gateway.rs`: it returns at once, saying it was skipped,
-//! unless `NAUTILUS_IB_RUN=1` is set in the shell. It places no order. It
-//! tells only within a session of the instrument, SXR8.IBIS or the one
-//! `NAUTILUS_IB_INSTRUMENT` names, on a day of no weekend in the 72 hours:
+//! Gated as `ib_gateway.rs` is. It places no order.
+//! It tells only when run within a session of the instrument, SXR8.IBIS or the one
+//! `NAUTILUS_IB_INSTRUMENT` names, on a day with no weekend in the 72 hours:
 //!
 //! ```sh
 //! NAUTILUS_IB_RUN=1 cargo test --test live ib_warmup_days:: -- --nocapture
 //! ```
 //!
-//! Client id 46 for the node, 47 for the reference.
+//! Client id 46 is for the node, and 47 for the reference.
 
 use std::{cell::RefCell, collections::BTreeSet, rc::Rc, time::Duration};
 
@@ -55,15 +53,11 @@ fn composite() -> BarType {
 
 #[derive(Debug, Default)]
 struct Record {
-    /// When the warmup was started.
     started: Option<Timestamp>,
-    /// The stamps of the minute bars of the responses.
     minutes: Vec<u64>,
     failure: Option<String>,
 }
 
-/// Warms up and subscribes to its bars from where the warmup ends as a
-/// strategy does, and stops the node when the warmup ends.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
@@ -134,9 +128,9 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
         subscriptions: Subscriptions::new(requirements.bar_types.clone(), vec![], vec![]),
         record: Rc::clone(&record),
     };
-    // An empty catalog of its own: IB answers the whole warmup.
+
     let catalog = tempfile::tempdir().unwrap();
-    // Outside the catalog, as `Live` requires.
+
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
@@ -147,7 +141,6 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
     };
     let ran = Box::pin(tokio::time::timeout(
         Duration::from_secs(300),
-        // The probe trades nothing: it claims no instrument.
         live.run(&requirements, &warmup, probe, None),
     ))
     .await;
@@ -157,7 +150,8 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
 
     assert_eq!(record.borrow().failure, None);
     assert!(!warmup.is_warming(), "the warmup did not complete");
-    // The minute in progress and the one before it are not IB's history yet.
+
+    // The minute in progress and the one before it are not IB's history yet
     let started = record.borrow().started.expect("a start");
     let (from, to) = (started - WARMUP, started - SignedDuration::from_mins(2));
     let source = composite().composite();

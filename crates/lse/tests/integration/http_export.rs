@@ -1,6 +1,6 @@
-//! An export over any span against the mock LSE peer: the days and hours
-//! it is asked in, halves of one LSE refuses as too wide, checksums, and the
-//! span LSE has not loaded.
+//! Tests exports against the mock LSE peer.
+//!
+//! They cover the days and hours asked, halving, checksums and the span not loaded.
 
 use std::num::NonZeroU32;
 
@@ -42,18 +42,15 @@ fn at(s: &str) -> Timestamp {
     s.parse().unwrap()
 }
 
-/// GOLD's trades in `futures` over `[from, to)`.
 fn gold(from: &str, to: &str) -> ExportQuery {
     let gold = LseSymbol::new("futures", "GOLD").unwrap();
     ExportQuery::series(&gold, Rows::TradeSlice, at(from), at(to))
 }
 
-/// GCZ6's `rows` over `[from, to)`, by its listing.
 fn gcz6(rows: Rows, from: &str, to: &str) -> ExportQuery {
     ExportQuery::listing("cme", GCZ26_PAIR_ID, rows, at(from), at(to))
 }
 
-/// The spans LSE was asked for, in order.
 fn asked(lse: &MockLse) -> Vec<(String, String)> {
     lse.calls()
         .iter()
@@ -70,7 +67,6 @@ fn span(from: &str, to: &str) -> (String, String) {
     (from.to_string(), to.to_string())
 }
 
-/// The spans of the files, in order.
 fn file_spans(exported: &Exported) -> Vec<(Timestamp, Timestamp)> {
     exported
         .files
@@ -79,12 +75,10 @@ fn file_spans(exported: &Exported) -> Vec<(Timestamp, Timestamp)> {
         .collect()
 }
 
-/// A day long past when asked.
 const LONG_AFTER: &str = "2026-11-13T16:00:00Z";
 
-/// An export is asked a UTC day at a time, and a book or orders a UTC
-/// hour, as LSE's docs ask for an hour or less of a busy contract's book
-/// or orders at a time ("The market: cme").
+/// LSE's docs ask for a busy contract's book or orders an hour or less at a time ("The market:
+/// cme").
 #[rstest]
 #[case::trades(
     gold("2026-10-20T23:00:00Z", "2026-10-21T01:00:00Z"),
@@ -124,10 +118,8 @@ async fn an_export_is_asked_a_utc_day_and_a_book_or_orders_a_utc_hour_at_a_time(
     assert_eq!(exported.unloaded_from, None);
 }
 
-/// A closed window ending at a midnight, or a book's at an hour, `[start,
-/// end]` asked as `[start, end + 1 ns)`: the midnight's instant is asked
-/// in the day's export, and the hour's in the hour before's, LSE serving
-/// an export across either.
+/// A closed `[start, end]` that ends at a midnight, or at an hour for a book, is asked as
+/// `[start, end + 1 ns)`. LSE serves an export across either.
 #[rstest]
 #[case::a_midnight(gold, "2026-10-20T00:00:00Z", "2026-10-21T00:00:00.000000001Z")]
 #[case::a_book_s_hour(
@@ -152,8 +144,8 @@ async fn a_span_ending_an_instant_past_a_midnight_or_a_book_s_hour_is_one_export
     assert_eq!(exported.unloaded_from, None);
 }
 
-/// LSE refuses the four seconds and their second half; the first half
-/// and the two quarters are served, the third quarter holding no row.
+/// LSE refuses the four seconds and the second half of them, and holds no row in the third
+/// quarter.
 #[tokio::test]
 async fn an_export_lse_refuses_as_too_wide_is_asked_again_in_halves_until_each_is_served() {
     let lse = MockLse::start(vec![
@@ -227,17 +219,15 @@ async fn a_file_whose_sha_256_is_not_lse_s_fails_naming_the_export() {
     }
 }
 
-// LSE stores a UTC day after it ends, the morning after. Asked at 16:00
-// on 22 October, the 22nd is the current day and the 21st the day
-// before.
+// LSE stores a UTC day the morning after it ends, so at 16:00 on 22 October the 22nd is current and
+// the 21st is the day before.
 const ON_THE_22ND: &str = "2026-10-22T16:00:00Z";
 
-/// Where the span LSE has not loaded starts as of `now`: the current day
-/// is not loaded whatever LSE answers; the day before is once LSE answers
-/// rows of it, in any of its hours, as LSE's answer cannot tell a day not
-/// loaded from one with no trading; and an earlier day is, rows or not.
-/// Each case gives the calls LSE was asked, the files it sent, and where
-/// the span not loaded starts.
+/// Checks where the span not loaded starts as of `now`:
+/// - The current day is not loaded, whatever LSE answers.
+/// - The day before is loaded once LSE answers rows of any hour of it, because its answer cannot
+///   tell a day not loaded from one with no trading.
+/// - An earlier day is loaded, whether or not it has rows.
 #[rstest]
 #[case::the_current_day_whatever_lse_answers(
     vec![Reply::file(GOLD_TRADES), Reply::file(GOLD_TRADES)],
@@ -251,8 +241,7 @@ const ON_THE_22ND: &str = "2026-10-22T16:00:00Z";
     ON_THE_22ND,
     (1, 1, None),
 )]
-// The 21st's export takes the 22nd's first instant, which LSE has not
-// loaded, rows of the 21st or not.
+// The 21st's export takes the 22nd's first instant, which is not loaded whatever rows the 21st has
 #[case::a_day_whose_export_takes_the_current_day_s_first_instant(
     vec![Reply::file(GOLD_TRADES)],
     gold("2026-10-21T00:00:00Z", "2026-10-22T00:00:00.000000001Z"),
@@ -265,7 +254,7 @@ const ON_THE_22ND: &str = "2026-10-22T16:00:00Z";
     ON_THE_22ND,
     (1, 0, Some("2026-10-21T10:00:00Z")),
 )]
-// The first hour of the book asked holds no rows, the second some.
+// The first hour holds no rows and the second holds some
 #[case::the_day_before_once_lse_answers_rows_of_any_hour_of_it(
     vec![Reply::refusal(404, DATA_UNAVAILABLE), Reply::file(GOLD_TRADES)],
     gcz6(Rows::Book, "2026-10-21T10:00:00Z", "2026-10-21T12:00:00Z"),

@@ -1,6 +1,5 @@
-//! The internal bars a strategy gets in a backtest: every bar has the open,
-//! high, low and close of its hour's minute quotes replayed, the first only
-//! those from the run start on. One node per thread, so one run per test.
+//! Tests the bars a strategy gets in a backtest. Each bar has the open, high, low and close of the
+//! minute quotes in its hour. The first bar uses only the quotes from the run start on.
 
 use std::path::{Path, PathBuf};
 
@@ -9,12 +8,9 @@ use rstest::rstest;
 
 use crate::common::{noise, ohlc, relative};
 
-/// From 12:30, off an hour, the bar closing 13:00 holds the quotes from
-/// 12:31 alone, those closing 14:00 and 15:00 their whole hours, the catalog
-/// given by its absolute path or by one relative to the working directory,
-/// as `--catalog` takes one. From 13:00, on an hour's close, the bar closing
-/// at the start is not replayed, its quotes all before it, and each bar of
-/// the run holds its whole hour.
+/// From 12:30, the bar closing 13:00 holds only the quotes from 12:31. From 13:00, the bar closing
+/// at the start is not replayed. The catalog path is absolute or relative to the working
+/// directory, as `--catalog` takes.
 #[rstest]
 #[case::off_an_hour(noise::at("12:30"), Path::to_path_buf, &["13:00", "14:00", "15:00"])]
 #[case::off_an_hour_on_a_relative_catalog(noise::at("12:30"), relative, &["13:00", "14:00", "15:00"])]

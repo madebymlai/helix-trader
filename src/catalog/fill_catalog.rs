@@ -1,21 +1,20 @@
-//! Fills the catalog with the history of the given instruments: the
-//! instruments and the series their strategy's bars are built from.
+//! Fills the catalog with the history of the given instruments and the series their strategy's
+//! bars are built from.
 //!
-//! Source-agnostic, no node: the data comes from a fetch function the
-//! caller passes, backed by an adapter's historical client (`venues::ib`).
-//! A series identifies bars by their full bar type and ticks by their kind
-//! and instrument. Per series it resumes after its stored range
-//! (`query_first_timestamp`, `query_last_timestamp`), checks the response,
-//! sorts it by `ts_init` and writes it with `write_instruments` and
-//! `write_data_enum` on a `ParquetDataCatalog` (`nautilus_persistence`),
-//! which stores each series under its data type and identifier. Nautilus
-//! does not persist requested data on its own.
+//! The module is source-agnostic and uses no node. The caller passes a fetch function, backed by
+//! an adapter's historical client (`venues::ib`). For each series the module:
+//! - Resumes after the stored range.
+//! - Checks the response.
+//! - Sorts it by `ts_init`.
+//! - Writes it with `write_data_enum`, which stores each series under its data type and
+//!   identifier.
 //!
-//! Temporary, with IB's fill that uses it: IB's data client answers
-//! without a `DataResponseEnvelope`, so Nautilus writes none of its
-//! answers back. Once nautilus_trader#5472 is fixed, IB fills through the
-//! node (see `node_fill`), and this file goes: helix-trader issue #4
-//! (<https://github.com/madebymlai/helix-trader/issues/4>).
+//! Nautilus does not persist requested data on its own.
+//!
+//! Temporary, together with IB's fill that uses it: IB's data client answers without a
+//! `DataResponseEnvelope`, so Nautilus writes none of its answers back. Once
+//! nautilus_trader#5472 is fixed, IB fills through the node (see `node_fill`), and this file
+//! goes: helix-trader issue #4 (<https://github.com/madebymlai/helix-trader/issues/4>).
 
 use std::collections::HashSet;
 
@@ -33,30 +32,26 @@ use nautilus_persistence::{
 
 use crate::strategy::requirements::{CatalogSeries, SeriesSlice};
 
-/// Fills `catalog` with `instruments`, then over `[start, end]` with each
-/// of `series`, fetched one
-/// series at a time through `fetch`.
+/// Fills `catalog` with `instruments`, then with each of `series` over `[start, end]`.
 ///
-/// Instruments already in the catalog are not written again. A series is
-/// stored over the windows asked for (widened to its oldest and newest
-/// item). Once stored, it resumes 1 ns after the end of that range,
-/// whatever `start` (no hole between the stored range and `start`): a
-/// covered window asks for nothing, and returned items at or before that
-/// point are dropped. A `start` before the stored range is an error, raised
-/// before fetching: extending history backwards is not supported.
+/// The fill fetches one series at a time through `fetch`.
 ///
-/// A fetch over `[from, to]` returns the items of the series with `ts_init`
-/// in it: the closed interval stored, as all of Nautilus' catalog intervals
-/// (the next is contiguous when it starts 1 ns after the end). Any error
-/// stops the run; series filled before it stay stored. An empty response on
-/// a series' first fill (naming the series and the window asked for), or an
-/// item of another series, is an error. Once a
-/// series is stored, an empty response, or one of only already stored
-/// items, means nothing new: nothing is written and the next series run.
-/// Items are stored sorted by `ts_init`, a bar per `ts_init`, and ticks as
-/// fetched, those of one `ts_init` in the order fetched: the fetch drops a
-/// tick it was given again, and ticks alike in every field are the venue's,
-/// each stored.
+/// Instruments already in the catalog are not written again. A series is stored over the windows
+/// asked for, widened to its oldest and newest item. It resumes 1 ns after the end of that range,
+/// whatever `start` is:
+/// - A covered window asks for nothing.
+/// - Returned items at or before that point are dropped.
+/// - A `start` before the stored range is an error, raised before fetching, because extending
+///   history backwards is not supported.
+///
+/// A fetch over `[from, to]` returns the items of the series with `ts_init` in that closed
+/// interval. Any error stops the run, and series filled before it stay stored.
+/// - An empty response on a series' first fill is an error.
+/// - An item of another series is an error.
+/// - Once the series is stored, an empty response writes nothing.
+///
+/// Items are stored sorted by `ts_init`, with one bar per `ts_init`. Ticks are stored as fetched.
+/// Ticks that are alike in every field come from the venue, and each is stored.
 pub async fn fill_catalog(
     catalog: &mut ParquetDataCatalog,
     instruments: Vec<InstrumentAny>,
@@ -108,11 +103,8 @@ pub async fn fill_catalog(
             items.retain(|item| item.ts_init() > last);
         }
         items.sort_by_key(HasTsInit::ts_init);
-        // One bar per close, a walk back's requests overlapping at their
-        // bounds. Ticks are kept as given: the fetch drops those it was
-        // given again, and two ticks alike in every field are two of the
-        // venue's, a venue stamping to the second (IB) giving such ticks
-        // with no id to tell them apart.
+        // One bar per close, since a walk back's requests overlap at their bounds. Ticks are kept
+        // as given, since a venue that stamps to the second (IB) gives ticks alike in every field.
         items.dedup_by(|later, earlier| match (later, earlier) {
             (Data::Bar(later), Data::Bar(earlier)) => later.ts_init == earlier.ts_init,
             _ => false,
@@ -129,17 +121,16 @@ pub async fn fill_catalog(
     Ok(())
 }
 
-/// Where a fill of `series` over the
-/// window `[start, end]` resumes, by what `catalog` stores of it: from
-/// `start` if it stores nothing of it, else 1 ns after its stored end,
-/// whatever `start`, so that no hole opens between the stored range and
-/// the window; none if that is at or after `end`, the fill asking its
-/// source nothing of the series. With the stored end, if any.
+/// Returns where a fill of `series` over `[start, end]` resumes, with the stored end, if any.
+///
+/// The fill resumes at `start` if `catalog` stores nothing of the series, else 1 ns after the
+/// stored end. It returns none if that point is at or after `end`.
 ///
 /// # Errors
 ///
-/// Returns an error if the catalog cannot be read, or if `start` is before
-/// the stored range: extending history backwards is not supported.
+/// Returns an error if:
+/// - The catalog cannot be read.
+/// - `start` is before the stored range, because extending history backwards is not supported.
 pub(crate) fn resumed(
     catalog: &ParquetDataCatalog,
     series: &CatalogSeries,
@@ -173,18 +164,18 @@ pub(crate) fn resumed(
     Ok(((from < end).then_some(from), last))
 }
 
-/// Fills `catalog` with `slices`, each a series on a contract over its
-/// slice (`DataRequirements::slices`, the requests of the node fill too),
-/// one `fill_catalog` per slice in order, with the instrument of the
-/// slice's contract among `instruments` and `fetch` as its fetch.
-/// Temporary: IB's fill until nautilus_trader#5472 is fixed, then IB fills
-/// through the node.
+/// Fills `catalog` with `slices` (`DataRequirements::slices`), one `fill_catalog` per slice.
+///
+/// Temporary: this is IB's fill until nautilus_trader#5472 is fixed. Then IB fills through the
+/// node.
 ///
 /// # Errors
 ///
-/// Returns an error if no instrument of `instruments` is a slice's
-/// contract, when that slice's turn comes, or as `fill_catalog`. The slices
-/// filled before stay stored.
+/// Returns an error if:
+/// - No instrument in `instruments` is a slice's contract, when that slice's turn comes.
+/// - `fill_catalog` fails.
+///
+/// The slices filled before the error stay stored.
 pub(crate) async fn fill_slices(
     catalog: &mut ParquetDataCatalog,
     instruments: &[InstrumentAny],
@@ -210,7 +201,6 @@ pub(crate) async fn fill_slices(
     Ok(())
 }
 
-/// Whether the venue returned an item of the requested series.
 fn is_of(item: &Data, series: &CatalogSeries) -> bool {
     match (item, series) {
         (Data::Bar(bar), CatalogSeries::Bars(expected)) => bar.bar_type == *expected,
@@ -222,8 +212,6 @@ fn is_of(item: &Data, series: &CatalogSeries) -> bool {
     }
 }
 
-/// The identifier the catalog stores `item` under, as `write_data_enum`
-/// keys it: the bar type of a bar, the instrument id of anything else.
 fn catalog_identifier(item: &Data) -> String {
     match item {
         Data::Bar(bar) => bar.bar_type.to_string(),
@@ -231,8 +219,7 @@ fn catalog_identifier(item: &Data) -> String {
     }
 }
 
-/// The first nanosecond after `last`; jiff reaches past any `UnixNanos`,
-/// so even `u64::MAX` has one.
+/// Returns the first nanosecond after `last`. jiff reaches past `u64::MAX` nanoseconds.
 fn just_after(last: UnixNanos) -> Timestamp {
     Timestamp::from(last) + SignedDuration::from_nanos(1)
 }
@@ -275,7 +262,6 @@ mod tests {
         ts.as_nanosecond().try_into().unwrap()
     }
 
-    /// A quote of `id` stamped `ts`.
     fn quote_at(id: InstrumentId, ts: u64) -> QuoteTick {
         QuoteTick::new(
             id,
@@ -288,8 +274,6 @@ mod tests {
         )
     }
 
-    /// Fills `instruments` and the quotes of each over `[start, end]`,
-    /// fetched through `fetch_quotes`.
     async fn fill_quotes(
         catalog: &mut ParquetDataCatalog,
         instruments: Vec<InstrumentAny>,
@@ -328,12 +312,8 @@ mod tests {
         .await
     }
 
-    /// The instrument and window the source was asked for, in nanoseconds.
     type Asked = (InstrumentId, u64, u64);
 
-    /// Fills `instruments` and their quotes over `[start, end]`
-    /// (nanoseconds) and returns the result with the windows the source was
-    /// asked for.
     async fn fill(
         catalog: &mut ParquetDataCatalog,
         instruments: Vec<InstrumentAny>,
@@ -369,7 +349,6 @@ mod tests {
         ParquetDataCatalog::new(dir.path(), None, None, None, None)
     }
 
-    /// The kinds of data `catalog` stores.
     fn stored_kinds(catalog: &ParquetDataCatalog) -> HashSet<CatalogDataType> {
         catalog.list_data_types().unwrap().into_iter().collect()
     }
@@ -397,7 +376,6 @@ mod tests {
         );
     }
 
-    /// Every file under `dir`, by path relative to it, with its bytes.
     fn files(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
         let mut files = vec![];
         let mut dirs = vec![dir.to_path_buf()];
@@ -451,8 +429,6 @@ mod tests {
         assert!(filled == written, "the files' bytes differ");
     }
 
-    /// Each instrument's quotes, sorted by `ts_init`; one given twice at a
-    /// stamp is two quotes, as a venue stamping to the second gives them.
     #[tokio::test]
     async fn quotes_are_written_and_read_back_per_instrument_sorted() {
         let dir = tempfile::tempdir().unwrap();
@@ -477,9 +453,8 @@ mod tests {
         assert_eq!(stored_quotes(&mut catalog, aapl_id), vec![5]);
     }
 
-    /// IB stamps its historical ticks to the second, and two of its ticks
-    /// alike in every field are two ticks: the quotes of one second are
-    /// stored as given, in the order given, one given twice stored twice.
+    /// IB stamps its historical ticks to the second, so quotes from one second are stored as
+    /// given.
     #[tokio::test]
     async fn every_quote_of_one_stamp_is_stored_as_given() {
         let dir = tempfile::tempdir().unwrap();
@@ -773,8 +748,6 @@ mod tests {
         .await;
         let err = r.unwrap_err().to_string();
         assert!(err.contains("quotes of ESZ21.GLBX"), "{err}");
-        // Stored over the first fill's window, 100 to 200 ns, and asked
-        // from 50 ns.
         assert!(
             err.contains("[100, 200]") && err.contains("1970-01-01T00:00:00.00000005Z"),
             "{err}"
@@ -852,8 +825,6 @@ mod tests {
 
     const MINUTE_NS: u64 = 60_000_000_000;
 
-    /// A source of one quote a minute: the quotes of `id` stamped 1 ns
-    /// before each minute's close over `[from, to]`.
     fn minute_quotes(id: InstrumentId, from: u64, to: u64) -> Vec<QuoteTick> {
         (from / MINUTE_NS + 1..=to / MINUTE_NS + 1)
             .map(|minute| quote_at(id, minute * MINUTE_NS - 1))
@@ -889,7 +860,6 @@ mod tests {
 
     const BARS: &str = "ESZ21.GLBX-1-MINUTE-LAST-EXTERNAL";
 
-    /// The minute bar of `BARS` stamped `ts`.
     fn bar_at(ts: u64) -> Bar {
         let price = Price::from("100.00");
         let ts = UnixNanos::from(ts);
@@ -905,8 +875,6 @@ mod tests {
         )
     }
 
-    /// Fills the instrument and the bars of `BARS` over `[start, end]` from
-    /// `source`, and returns the result with the windows asked for.
     async fn fill_bars(
         catalog: &mut ParquetDataCatalog,
         start: u64,
@@ -972,8 +940,6 @@ mod tests {
         );
     }
 
-    /// A quote, or bars of another bar type, in a response for bars: the
-    /// error names both series, and nothing is stored.
     #[rstest]
     #[case::a_quote(
         vec![Data::Bar(bar_at(10)), Data::Quote(quote_at(es_id(), 20))],
@@ -1009,7 +975,6 @@ mod tests {
         assert!(err.contains(&format!("bars of {BARS}")), "{err}");
     }
 
-    /// A trade of ES stamped `ts`.
     fn trade_at(ts: u64) -> TradeTick {
         let ts = UnixNanos::from(ts);
         TradeTick::new(
@@ -1023,7 +988,6 @@ mod tests {
         )
     }
 
-    /// A book depth snapshot of ES stamped `ts`.
     fn depth_at(ts: u64) -> OrderBookDepth {
         let mut depth = stub_depth10();
         let ts = UnixNanos::from(ts);
@@ -1031,10 +995,6 @@ mod tests {
         depth
     }
 
-    /// Fills the instrument and the series of requirements reading ES's
-    /// trades and book depth, no bars, over `[start, end]`, from a source
-    /// of trades at 10, 60 and 150 and snapshots at 20 and 180, and
-    /// returns the result with the windows asked for.
     async fn fill_ticks(
         catalog: &mut ParquetDataCatalog,
         start: u64,
@@ -1121,8 +1081,6 @@ mod tests {
         assert_eq!(depths, [20, 180]);
     }
 
-    /// ES's December 2021 contract, and its March 2022 one, as two
-    /// contracts a rolled root's slices stand on.
     fn contracts() -> Vec<InstrumentAny> {
         let mut march = futures_contract_es(None, None);
         march.id = InstrumentId::from("ESH22.GLBX");

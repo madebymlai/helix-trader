@@ -1,7 +1,4 @@
-//! The store and the models of the tests of a decision, the handle's among
-//! them: a strategy on the last mid of AUD/USD, and baselines predicting a
-//! known R, a side's or a meta's, whatever the row, published under a temp
-//! dir; and IC's gold for a target traded on it.
+//! Builds the store and models for the decision tests.
 
 use std::{path::Path, rc::Rc};
 
@@ -40,8 +37,7 @@ pub(crate) const STRATEGY: &str = "HANDLE-001";
 pub(crate) const AUD: &str = "AUD/USD.SIM";
 pub(crate) const GOLD: &str = "XAUUSD.ICMARKETS";
 
-/// XAUUSD as IC defines it (`crates/ctrader/README.md`, "Instruments and
-/// account"): whole ounces quoted in USD on ticks of a cent.
+/// Returns XAUUSD as IC defines it (`crates/ctrader/README.md`, "Instruments and account").
 pub(crate) fn gold() -> InstrumentAny {
     let margin = Decimal::ONE / Decimal::from(30);
     InstrumentAny::Cfd(
@@ -67,23 +63,18 @@ pub(crate) fn gold() -> InstrumentAny {
     )
 }
 
-/// The calibration of every meta model of the tests, its level line `0.1 +
-/// 0.5 E`: a meta predicting an R of 0.3 expects 0.25, one predicting nought
-/// 0.1.
+/// The level line `0.1 + 0.5 E` of every meta model.
 pub(crate) const CALIBRATION: Line = Line {
     alpha: 0.1,
     beta: 0.5,
 };
 
-/// The R a side's baseline of `tenths` predicts: `tenths` less 5, over 10,
-/// so above 5 a gain, below a loss and 5 nought.
+/// The R a baseline of `tenths` predicts: `(tenths - 5) / 10`.
 pub(crate) fn r(tenths: usize) -> f64 {
     (tenths as f64 - 5.0) / 10.0
 }
 
-/// The calibration of the pair of `config`'s sides leaving each side's
-/// prediction as it is, up to rounding: the level line `C' = C`, and of two
-/// sides the side call `D' = D`.
+/// The pair calibration, up to rounding: `C' = C`, and `D' = D` for two sides.
 pub(crate) fn unchanged(config: &ModelConfig) -> Ksplit {
     Ksplit {
         level: Line {
@@ -98,15 +89,11 @@ pub(crate) fn at(time: &str) -> Timestamp {
     time.parse().unwrap()
 }
 
-/// The last mid of AUD/USD, warm once a quote came.
 pub(crate) fn features() -> Rc<FeatureSet> {
     last_mid(InstrumentId::from(AUD)).build().unwrap()
 }
 
-/// Hourly decisions on a time-only target of 1 hour of AUD/USD at a risk
-/// of 0.5%, its unit the worth of its ATR of one hourly bar of the mids on
-/// its size at the reference stake, the long traded from an expected net R
-/// of nought, the baseline learner.
+/// Configures hourly decisions on a time-only target.
 pub(crate) fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
@@ -138,7 +125,6 @@ pub(crate) fn config() -> ModelConfig {
         .build()
 }
 
-/// `config`, the short traded too, from nought.
 pub(crate) fn both_sides() -> ModelConfig {
     ModelConfig {
         margins: Margins {
@@ -149,7 +135,6 @@ pub(crate) fn both_sides() -> ModelConfig {
     }
 }
 
-/// The meta model taking a trade from an expected net R of 0.15.
 pub(crate) fn meta() -> MetaConfig {
     MetaConfig {
         window: SignedDuration::from_hours(48),
@@ -160,7 +145,6 @@ pub(crate) fn meta() -> MetaConfig {
     }
 }
 
-/// `config`, its trades taken by `meta`.
 pub(crate) fn with_meta(meta: MetaConfig) -> ModelConfig {
     ModelConfig {
         meta: Some(meta),
@@ -168,7 +152,6 @@ pub(crate) fn with_meta(meta: MetaConfig) -> ModelConfig {
     }
 }
 
-/// What the strategy reads: the quotes of AUD/USD.
 pub(crate) fn requirements() -> DataRequirements {
     DataRequirements {
         bar_types: vec![],
@@ -181,8 +164,6 @@ pub(crate) fn requirements() -> DataRequirements {
     }
 }
 
-/// The venue of the dataset runs: a commission rate of 30 per million,
-/// 10 million USD.
 pub(crate) fn venue() -> DatasetVenue {
     DatasetVenue {
         commission: Commission::Rate(Decimal::new(3, 5)),
@@ -191,8 +172,6 @@ pub(crate) fn venue() -> DatasetVenue {
     }
 }
 
-/// The model of `features` and `config`, for a strategy of
-/// `requirements`.
 pub(crate) fn blueprint_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
@@ -207,7 +186,6 @@ pub(crate) fn blueprint_of(
     .unwrap()
 }
 
-/// The models of `features` and `config` under `models`.
 pub(crate) fn model_store(
     models: &Path,
     features: &Rc<FeatureSet>,
@@ -218,13 +196,10 @@ pub(crate) fn model_store(
         .unwrap()
 }
 
-/// The models of `config` under `models`, its long alone traded.
 pub(crate) fn store(models: &Path) -> ModelStore {
     model_store(models, &features(), &config())
 }
 
-/// A model set of `config` valid from `valid_from`, its long a baseline
-/// predicting an R of `r(tenths)` whatever the row, as `baseline_for` says.
 pub(crate) fn baseline(valid_from: &str, tenths: usize) -> StoredModelSet {
     model_set_of(
         &features(),
@@ -235,11 +210,6 @@ pub(crate) fn baseline(valid_from: &str, tenths: usize) -> StoredModelSet {
     )
 }
 
-/// A model set of `config` valid from `valid_from`: each side of `sides`,
-/// every side traded, the long first, a baseline predicting an R of
-/// `r(tenths)` of its tenths (`baseline_for`), their pair's calibration
-/// leaving them as they are (`unchanged`), and the meta model `meta`, if
-/// any.
 pub(crate) fn model_set_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
@@ -258,10 +228,7 @@ pub(crate) fn model_set_of(
     }
 }
 
-/// A baseline model of `config`'s `side`, on the side's features of
-/// `features` and the target's payoff, predicting an R of `r(tenths)`
-/// whatever the row, its baseline that R, as the store keeps it, probed on
-/// one row.
+/// A baseline for `config`'s `side` that predicts `r(tenths)` whatever the row, probed on one row.
 pub(crate) fn baseline_for(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
@@ -276,8 +243,7 @@ pub(crate) fn baseline_for(
     let config = config.clone();
     StoredModel {
         manifest: ModelManifest {
-            // Its strategy reads the quotes of what it trades, which the
-            // target's ATR, if any, is built from.
+            // The strategy reads the quotes of what it trades, which the target's ATR is built from
             fingerprint: blueprint_of(
                 features,
                 &config,
@@ -308,9 +274,7 @@ pub(crate) fn baseline_for(
     }
 }
 
-/// A baseline meta model of `config` predicting an R of `r(tenths)`
-/// whatever the row, calibrated by `CALIBRATION`, on the meta's features of
-/// `features`, its baseline that R, with no probe.
+/// A baseline meta model that predicts `r(tenths)` whatever the row, with no probe.
 pub(crate) fn meta_baseline(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,

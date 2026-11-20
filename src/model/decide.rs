@@ -1,46 +1,28 @@
-//! When a strategy decides, and what it publishes at each decision.
+//! Sets when a strategy decides and what it publishes at each decision.
 //!
-//! A strategy decides on a clock cadence (`DecisionRule`, from its
-//! config). A cadence is a Nautilus timer, `DECISION_TIMER`, which `start`
-//! sets from `on_start` on an epoch-aligned time: Nautilus fires it at
-//! that time plus whole intervals, so decisions sit on the fixed UTC grid
-//! of the interval's multiples whatever the run start, in a backtest as
-//! live. The strategy calls `decide` from `on_time_event` on that timer
-//! (`is_decision`).
+//! A strategy decides on a clock cadence (`DecisionRule`). The cadence is a Nautilus timer,
+//! `DECISION_TIMER`. `start` sets it on an epoch-aligned time, so decisions sit on the UTC grid of
+//! the interval's multiples, whatever the run start, in a backtest as live. The strategy calls
+//! `decide` from `on_time_event` when `is_decision`.
 //!
-//! A node builds the bars of a composite bar type a delay after their
-//! close (`warmup::bar_build_delay`), a backtest and a dataset run as late
-//! as a live node. So a strategy starts its cadence with that delay, and
-//! every decision fires `DECISION_MARGIN` later still, past the timer
-//! building the bar: each decision then sees the bar closed at its grid
-//! time, in a backtest as live.
+//! A node builds the bars of a composite bar type a delay after their close
+//! (`warmup::bar_build_delay`). The cadence starts with that delay. Each decision fires
+//! `DECISION_MARGIN` later still, past the timer that builds the bar.
 //!
-//! `decide` snapshots the features, if every one is initialized, and
-//! publishes them on the message bus as a `FeatureRow`, custom data keyed
-//! by the strategy's id (`FeatureRow::data_type`). Cold features give no
-//! decision and publish nothing.
+//! `decide` publishes the features on the message bus as a `FeatureRow` keyed by the strategy's id
+//! (`FeatureRow::data_type`). Cold features give no decision.
 //!
-//! Nor does a stale decision. A decision is fresh if the features read
-//! market data of the traded instrument made (`ts_init`) after the
-//! previous decision of the grid, an interval before, whether the
-//! strategy ran then or not: so the first decision of a run is judged as
-//! any other, and a warmup's data makes it fresh only if made within that
-//! interval. A closed market, a weekend's or a night's, would
-//! otherwise decide on its last quote, its targets the spread and the
-//! fees: a stale decision gives no row, no targets and no trade, in a
-//! dataset run as in a backtest or live, and is logged at debug.
+//! A stale decision gives none either, because it would trade a closed market on its last quote.
+//! A decision is fresh if the features read market data of the traded instrument with a
+//! `ts_init` after the previous decision on the grid, an interval before. This holds whether the
+//! strategy ran then or not. A stale decision gives no row, targets or trade, and is logged at
+//! debug.
 //!
-//! The market data is the quotes, trades, bars, depth and deltas of the
-//! traded instrument a feature reads (`FeatureSet::last_update`), whatever
-//! their kind or venue, and its last quote and trade in the cache, of the
-//! series of it the model handle subscribes: those the strategy reads, or
-//! the quotes its data requirements add when no series of the strategy
-//! reads the traded instrument (`StandardConfig::data_requirements`), with
-//! no calendar of sessions. Not the data of
-//! another instrument, which may trade while the traded one is closed, nor
-//! custom data, which may come on a weekend. The node builds no time bar
-//! for a period without data (`warmup::data_engine_config`), so a bar is
-//! data.
+//! The market data is the quotes, trades, bars, depth and deltas of the traded instrument that a
+//! feature reads (`FeatureSet::last_update`), plus its last quote and trade in the cache. There is
+//! no calendar of sessions. The quotes added by `StandardConfig::data_requirements` count when no
+//! series reads the traded instrument. Other instruments and custom data do not count. The node
+//! builds no time bar for a period without data (`warmup::data_engine_config`), so a bar is data.
 
 use std::sync::Arc;
 
@@ -61,24 +43,23 @@ use serde::Deserialize;
 
 use super::features::{FeatureSet, Fingerprint};
 
-/// The name of the timer of a clock cadence.
+/// The name of the clock cadence timer.
 pub const DECISION_TIMER: &str = "DECISION";
 
-/// How long after its grid time (and the node's bar build delay) a
-/// decision fires: past the data engine's timer building the bar that
-/// closes then, which fires on the same time. Nautilus runs a backtest's
-/// timers of one time in the order of their names, a live node's as their
-/// tasks wake, so a decision on the grid time itself could come before the
-/// bar. 10 ms is well past the 1 ms resolution of a live node's timers;
-/// the same margin in a backtest keeps both deciding on the same data.
+/// How long after its grid time plus the bar build delay a decision fires, past the timer that
+/// builds the bar.
+///
+/// Nautilus runs a backtest's timers for one time in the order of their names. A live node runs
+/// them as their tasks wake. 10 ms is well past a live node's 1 ms timer resolution.
 pub const DECISION_MARGIN: SignedDuration = SignedDuration::from_millis(10);
 
 /// When a strategy decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DecisionRule {
-    /// On a clock cadence: at every multiple of the interval since the Unix
-    /// epoch, such as `{ every = "15m" }`.
+    /// On a clock cadence, at every multiple of the interval since the Unix epoch.
+    ///
+    /// For example, `{ every = "15m" }`.
     Every(SignedDuration),
 }
 
@@ -87,18 +68,18 @@ pub enum DecisionRule {
 pub struct FeatureRow {
     /// The strategy that decided.
     pub strategy_id: StrategyId,
-    /// The value of each feature, in the order of the feature set's names.
+    /// The value of each feature, in the order of the names in the feature set.
     pub features: Vec<f64>,
     /// The time of the decision.
     pub ts_event: UnixNanos,
-    /// The time the row was made: the decision's too.
+    /// The time of the row, which is also the time of the decision.
     pub ts_init: UnixNanos,
 }
 
 impl DecisionRule {
     /// # Errors
     ///
-    /// Returns an error if a cadence's interval is not positive.
+    /// Returns an error if the cadence interval is not positive.
     pub fn validate(&self) -> anyhow::Result<()> {
         let Self::Every(interval) = self;
         anyhow::ensure!(
@@ -108,9 +89,7 @@ impl DecisionRule {
         Ok(())
     }
 
-    /// The rule deciding `delay` after its grid times as the fingerprint
-    /// reads it: the delay only if any, so that a rule deciding on its grid
-    /// reads as it did before the delay was keyed.
+    /// Keys the delay only if there is one, so a rule on its grid reads as before.
     fn fingerprint_part(self, delay: SignedDuration) -> String {
         let Self::Every(interval) = self;
         if delay.is_zero() {
@@ -125,17 +104,16 @@ impl DecisionRule {
     }
 }
 
-/// Starts the clock cadence of `rule` on `actor`, its decisions `delay`
-/// and `DECISION_MARGIN` after their grid times: `delay` is the node's bar
-/// build delay (`warmup::bar_build_delay`). The timer starts on the last
-/// decision time not after now, so it first fires on the next one. The
-/// rule is valid (`DecisionRule::validate`, which the model's blueprint
-/// runs as it is built).
+/// Starts the clock cadence of `rule` on `actor`.
+///
+/// Decisions fire `delay`, the bar build delay, plus `DECISION_MARGIN` after the grid times. The
+/// timer starts on the last decision time not after now. The rule must be valid
+/// (`DecisionRule::validate`).
 ///
 /// # Errors
 ///
-/// Returns an error if the clock is not yet `delay` and `DECISION_MARGIN`
-/// past the epoch, or Nautilus refuses the timer.
+/// Returns an error if the clock is not yet `delay` plus `DECISION_MARGIN` past the epoch, or
+/// Nautilus refuses the timer.
 pub fn start<A: DataActor + DataActorNative>(
     actor: &A,
     rule: DecisionRule,
@@ -165,24 +143,22 @@ pub fn start<A: DataActor + DataActorNative>(
     )
 }
 
-/// How long after its grid time a decision of a cadence deciding `delay`
-/// after its grid times fires (`start`).
 fn firing(delay: SignedDuration) -> SignedDuration {
     delay + DECISION_MARGIN
 }
 
-/// The grid time of the decision on `rule`, deciding `delay` after its
-/// grid times (`start`), that first reads what is made at `ts`: the first
-/// to fire at or after it. What is made at a decision's firing is read by
-/// it, as the data engine hands it over before the timer.
+/// Returns the grid time of the first decision on `rule` that fires at or after `ts`.
+///
+/// That decision reads what is made at `ts`, because the data engine hands it over before the
+/// timer.
 ///
 /// # Panics
 ///
-/// Panics if the rule is invalid (`DecisionRule::validate`), its interval
-/// past Nautilus' nanoseconds, or its decisions firing before their grid
-/// times (`delay` negative past `DECISION_MARGIN`), or if that decision
-/// would be before the epoch: `ts` an interval or more before the epoch's
-/// fires.
+/// Panics if:
+/// - The rule is invalid (`DecisionRule::validate`).
+/// - The interval is past Nautilus' nanoseconds.
+/// - The decisions fire before their grid times (`delay` negative past `DECISION_MARGIN`).
+/// - That decision would be before the epoch: `ts` is an interval or more before the epoch's fires.
 #[must_use]
 pub fn decision_of(rule: DecisionRule, delay: SignedDuration, ts: UnixNanos) -> UnixNanos {
     let DecisionRule::Every(interval) = rule;
@@ -204,25 +180,21 @@ pub fn decision_of(rule: DecisionRule, delay: SignedDuration, ts: UnixNanos) -> 
     }
 }
 
-/// Whether `event` is a decision of the clock cadence.
+/// Returns whether `event` is the timer of the clock cadence.
 #[must_use]
 pub fn is_decision(event: &TimeEvent) -> bool {
     event.name == DECISION_TIMER
 }
 
-/// Decides now, on `rule`, trading `instrument_id`: snapshots `features`
-/// if the decision is fresh and every feature is initialized, and
-/// publishes the row on the message bus, keyed by `strategy`'s id. A
-/// decision is fresh if a feature read data of `instrument_id`, or its
-/// last quote or trade in `strategy`'s cache was made, after the cadence's
-/// previous decision (see the module documentation); a stale one is
-/// skipped, logged at debug.
+/// Decides now on `rule`, trading `instrument_id`.
+///
+/// Publishes a row of `features` if the decision is fresh and every feature is initialized.
 ///
 /// # Panics
 ///
-/// Panics if `strategy` is not registered with a trader, or has no id, or
-/// if now is less than an interval after the epoch: there is no previous
-/// decision.
+/// Panics if:
+/// - `strategy` is not registered with a trader, or has no id.
+/// - Now is less than an interval after the epoch, so there is no previous decision.
 pub fn decide<S>(
     strategy: &S,
     features: &FeatureSet,
@@ -268,9 +240,7 @@ where
     Some(row)
 }
 
-/// The fingerprint of `features` and `rule`, its decisions `delay` after
-/// their grid times (`start`): the bar build delay, which moves every
-/// decision and so the rows.
+/// Returns the fingerprint of `features` and `rule`, keyed by the bar build delay `delay`.
 #[must_use]
 pub fn fingerprint(
     features: &FeatureSet,
@@ -283,7 +253,7 @@ pub fn fingerprint(
 }
 
 impl FeatureRow {
-    /// The data type of the rows of `strategy_id`.
+    /// Returns the data type of the feature rows of `strategy_id`.
     #[must_use]
     pub fn data_type(strategy_id: StrategyId) -> DataType {
         DataType::new(

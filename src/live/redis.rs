@@ -1,16 +1,16 @@
-//! The Redis behind the live node's cache: Nautilus persists the node's
-//! orders, positions and accounts there (`RedisCacheConfig`, a
-//! `CacheDatabaseFactory` from `nautilus_infrastructure`), loads them at the
-//! next start and reconciles them with the venues.
+//! Runs the Redis behind the live node's cache.
 //!
-//! Redis runs in Docker the way the IB Gateway does (`venues::ib`):
-//! one named container shared by every live process, started or reused,
-//! restarted always, its port on the loopback only. Its data is Redis'
-//! append-only file on a named volume, so it outlives the container. The
-//! image is pulled beforehand (`docker pull
-//! docker.io/library/redis:7.4.11-alpine`); the Docker socket comes from
-//! `DOCKER_HOST`, else the local default. No password: the port is bound to
-//! 127.0.0.1.
+//! Nautilus persists the node's orders, positions and accounts there (`RedisCacheConfig`). It
+//! loads them at the next start and reconciles them with the venues.
+//!
+//! Redis runs in Docker, as the IB Gateway does (`venues::ib`):
+//! - One named container serves every live process.
+//! - The container always restarts.
+//! - Its port is open on the loopback only, and it has no password.
+//! - Its append-only file is on a named volume, so data outlives the container.
+//!
+//! The image is pulled beforehand (`docker pull docker.io/library/redis:7.4.11-alpine`). The Docker
+//! socket comes from `DOCKER_HOST`, else the local default.
 
 use std::collections::HashMap;
 
@@ -24,19 +24,23 @@ use bollard::{
 use nautilus_infrastructure::redis::cache::RedisCacheConfig;
 
 const CONTAINER: &str = "helix-redis";
-/// Redis 7.4: Nautilus needs 6.2 or later.
+/// Redis 7.4. Nautilus needs 6.2 or later.
 const IMAGE: &str = "docker.io/library/redis:7.4.11-alpine";
 const VOLUME: &str = "helix-redis-data";
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 6379;
 
-/// Starts the Redis container, or reuses it, and returns the cache database
-/// on it. Nautilus' connection retries while Redis comes up.
+/// Starts the Redis container, or reuses it, and returns the cache database on it.
+///
+/// Nautilus' connection retries until Redis is up.
 ///
 /// # Errors
 ///
-/// Returns an error if Docker is unreachable, or if the container cannot
-/// be inspected, created (the image not pulled, the port taken) or started.
+/// Returns an error if:
+/// - Docker is unreachable.
+/// - The container cannot be inspected.
+/// - The container cannot be created, because the image is not pulled or the port is taken.
+/// - The container cannot be started.
 pub(super) async fn start() -> anyhow::Result<RedisCacheConfig> {
     let docker = Docker::connect_with_local_defaults()
         .context("connecting to Docker (DOCKER_HOST, else the local socket)")?;
@@ -81,8 +85,6 @@ async fn start_container(docker: &Docker) -> anyhow::Result<()> {
         .with_context(|| format!("starting {CONTAINER}"))
 }
 
-/// The container: the pinned image writing its append-only file to the
-/// named volume, the port on the loopback only, restarted always.
 fn container() -> ContainerCreateBody {
     let port_bindings = HashMap::from([(
         format!("{PORT}/tcp"),
@@ -111,10 +113,9 @@ fn container() -> ContainerCreateBody {
     }
 }
 
-/// The node's cache database: the container's Redis, Nautilus' defaults
-/// otherwise. Its host and port are the container's binding, set from the
-/// constants that bind it, so one value decides both; they happen to equal
-/// Nautilus' defaults with none set (`get_redis_url`,
+/// The node's cache database.
+///
+/// Its host and port equal Nautilus' defaults (`get_redis_url`,
 /// `crates/infrastructure/src/redis/mod.rs`), which this does not rely on.
 fn cache_database() -> RedisCacheConfig {
     RedisCacheConfig {
@@ -142,7 +143,6 @@ mod tests {
             ["redis-server", "--appendonly", "yes"]
         );
         let host = container.host_config.unwrap();
-        // Redis' working directory, where the append-only file goes.
         assert_eq!(host.binds.unwrap(), ["helix-redis-data:/data"]);
     }
 

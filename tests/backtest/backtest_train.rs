@@ -1,13 +1,13 @@
-//! Training at a time (`model::train`) on a fixture catalog with an edge:
-//! the dataset probe (`common::dataset`) replays the days the window lacks
-//! through `Backtest::run_dataset`, and LightGBM fits each side's realized
-//! R on the rows. IC's gold rises 4.00 over each even hour and falls back
-//! over each odd one (`ic::edge_quotes`), and the probe's one feature, `cheap`,
-//! marks where the hour starts: 1 at the bottom, 0 at the top. Each side
-//! learns its R from the feature, the long's high at the bottom, where it
-//! wins, and the short's at the top, and their pair is calibrated together
-//! on the calibration slice and published, each model reloading to its
-//! probes.
+//! Tests training at a time (`model::train`) on a fixture catalog with an edge.
+//!
+//! The dataset probe (`common::dataset`) replays the days the window lacks through
+//! `Backtest::run_dataset`. LightGBM fits each side's realized R on the rows. The window is 70
+//! hours from 02:00 of 20 October 2026, the training time being midnight of the 23rd.
+//!
+//! IC's gold rises 4.00 over each even hour and falls back over each odd one
+//! (`ic::edge_quotes`). The probe's one feature, `cheap`, is 1 at the bottom of the hour and 0 at
+//! the top. So the long learns a high R at the bottom and the short at the top. The two sides are
+//! calibrated together and published, and each model reloads to its probes.
 
 use std::{path::Path, rc::Rc};
 
@@ -34,13 +34,10 @@ use crate::common::{
     ic,
 };
 
-/// The price of gold at the bottom of each even hour of `ic::edge_quotes`,
-/// and the rise over it.
 const BOTTOM: f64 = ic::EDGE_BOTTOM;
 const RISE: f64 = ic::EDGE_RISE;
 
-/// Where the last mid is between the top of the hours, 4004.10, at 0, and
-/// their bottom, 4000.10, at 1, clamped.
+/// Computes `cheap` from the last mid, clamped: 0 at 4004.10 and 1 at 4000.10.
 #[derive(Default)]
 struct Cheap {
     mid: Option<f64>,
@@ -76,7 +73,6 @@ impl Feature for Cheap {
     }
 }
 
-/// The arguments of `Cheap`: none.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheapArgs {}
@@ -89,7 +85,6 @@ impl IndicatorArgs for CheapArgs {
     }
 }
 
-/// `Cheap`, `[indicators.cheap]`.
 const CHEAP: Declared<CheapArgs> = Declared::new("cheap");
 
 fn features() -> Rc<FeatureSet> {
@@ -103,10 +98,8 @@ fn features() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// The probe's decisions on `cheap`, learning the R of each side of the
-/// bracket by LightGBM, on leaves of 20 rows, on a window of 70 hours, the
-/// last 12 calibrated on, so that the 58 hours fitted on split, each slice
-/// of at least 5 rows; each side traded from an expected net R of nought.
+/// Builds the LightGBM config: leaves of 20 rows and a window of 70 hours, the last 12 of them for
+/// calibration.
 fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
@@ -132,8 +125,6 @@ fn training(catalog: &TempDir, models: &Path) -> Training {
         .unwrap()
 }
 
-/// The model set under `models` valid from `valid_from` of a training, as
-/// `training` keys it.
 fn model_set(models: &Path, valid_from: Timestamp) -> StoredModelSet {
     blueprint(features(), config())
         .model_store(models)
@@ -142,7 +133,6 @@ fn model_set(models: &Path, valid_from: Timestamp) -> StoredModelSet {
         .unwrap()
 }
 
-/// Quotes from 23:00 of the 19th of October 2026 to 03:00 of the 23rd.
 fn catalog() -> TempDir {
     let (from, to) = (
         ic::at("00:00:00") - SignedDuration::from_hours(25),
@@ -151,14 +141,11 @@ fn catalog() -> TempDir {
     ic::catalog_of(ic::edge_quotes(from, to), from, to)
 }
 
-/// Midnight of the 23rd: the window starts at 02:00 of the 20th.
 fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
 
-/// Each side published at t, in the model set valid from then, which
-/// holds their pair's calibration, and each side's model, reloaded by its
-/// learner, predicts its probes, rows of the calibration slice, to the bit.
+/// The probes are rows of the calibration slice.
 #[rstest]
 fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions() {
     let catalog = catalog();
@@ -181,8 +168,8 @@ fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions()
         .fingerprint()
         .unwrap()
         .to_string();
-    // A side's model reads the strategy's features, then the bracket's payoff
-    // features, the names the decision checks it against.
+
+    // A side's model reads the strategy's features, then the bracket's payoff features
     let names = side_names(features().names(), &target().payoff_names());
     let model_set = model_set(models.path(), t());
     assert_eq!(model_set.valid_from, t());

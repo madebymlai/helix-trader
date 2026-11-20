@@ -1,17 +1,15 @@
-//! A backtest of a strategy retrained on its schedule (`model::walk`), on a
-//! fixture catalog: the probe of `common::dataset` decides every hour on
-//! one feature, missing (NaN) from the first quote. Before the run, the
-//! dataset is built over the span and, at each daily retrain time of it, a
-//! model set published as a train would, its long a baseline of its own R,
-//! its calibration leaving it as it is (`common::dataset::baseline_of`),
-//! which names it. The walk has no edge for a train to earn on, so its trains
-//! would publish none (`backtest_train` trains on one). In the run, every
-//! decision of a period trades on the model published at its start, and
-//! the scores of each period are its model's, a constant, beside its own
-//! baseline, the training mean its manifest has.
-//! The build and the run are on the test's one thread, a node after
-//! another, each disposed before the next, as the binary's backtest runs
-//! them.
+//! Tests a strategy retrained on its schedule (`model::walk`), on a fixture catalog.
+//!
+//! The probe of `common::dataset` decides every hour on one feature, missing (NaN) from the first
+//! quote. The span covers 23 to 25 October 2026, with a retrain at each midnight. The catalog runs
+//! from 23:00 of the 22nd to 03:00 of the 26th, an hour before the span and the target's limit
+//! after it.
+//!
+//! Before the run, the dataset is built over the span. At each retrain time, a baseline model set
+//! is published as a train would (`common::dataset::baseline_of`), its long predicting a constant R
+//! of -0.2, -0.1 and 0 on the three days. The walk has no edge for a train to earn on
+//! (`backtest_train` trains on one). The build and the run share the test's one thread, a node
+//! after another, as the binary's backtest runs them.
 
 use std::{path::Path, rc::Rc};
 
@@ -43,8 +41,6 @@ fn features() -> Rc<FeatureSet> {
     missing().build().unwrap()
 }
 
-/// The probe's, of the long alone, retrained every day; every decision a
-/// long, to record its level.
 fn config_daily() -> ModelConfig {
     ModelConfig {
         retrain: Retrain::Every(SignedDuration::from_hours(24)),
@@ -56,9 +52,6 @@ fn config_daily() -> ModelConfig {
     }
 }
 
-/// Quotes from 23:00 of the 22nd of October 2026 to 03:00 of the 26th:
-/// the span's days, from an hour before them, to the span's end plus the
-/// target's limit.
 fn catalog() -> TempDir {
     walk(
         ic::at("00:00:00") + SignedDuration::from_hours(47),
@@ -66,13 +59,11 @@ fn catalog() -> TempDir {
     )
 }
 
-/// The span: the 23rd to the 25th, retrained at midnight of each.
 fn span() -> (Timestamp, Timestamp) {
     let start = ic::at("00:00:00") + SignedDuration::from_hours(48);
     (start, start + SignedDuration::from_hours(72))
 }
 
-/// The models of `config_daily` under `models`.
 fn model_store(models: &Path) -> ModelStore {
     blueprint(features(), config_daily())
         .model_store(models)
@@ -85,10 +76,8 @@ fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
         .unwrap()
 }
 
-/// Builds the dataset over the span, a node on this thread, as the
-/// binary's backtest builds it, and publishes at each retrain time of the
-/// span a baseline predicting an R of `r(tenths)`, `tenths` 3 at the
-/// span's start and one more each day.
+/// Builds the dataset, then publishes a baseline of `r(tenths)` at each retrain time, `tenths`
+/// being 3 at the span's start and one more each day.
 fn trained(catalog: &TempDir, models: &Path) {
     let (start, end) = span();
     let dataset = blueprint(features(), config_daily())
@@ -125,7 +114,6 @@ fn each_period_trades_on_the_model_trained_at_its_start() {
 
     trained(&catalog, models.path());
 
-    // The baselines published at each retrain (`trained`): -0.2, -0.1, 0.
     let means = [r(3), r(4), r(5)];
 
     let record = trade_on(
@@ -154,13 +142,6 @@ fn each_period_trades_on_the_model_trained_at_its_start() {
     assert_eq!(record.trades.len(), 72);
 }
 
-/// The model of each period expects one R on every decision of the period,
-/// its constant, which its own baseline, the training mean its manifest has
-/// (`common::dataset::baseline_of`), is too: -0.2, -0.1 and nought from the
-/// first period on (`trained`). On the same rows, the model errs as its
-/// baseline does, a skill of nought, its expectation never varies, no
-/// slope, and its mean R - E' is the mean R of the period's longs, read from
-/// the dataset, less its constant.
 #[rstest]
 fn each_period_scores_its_model_beside_that_models_own_baseline() {
     let catalog = catalog();

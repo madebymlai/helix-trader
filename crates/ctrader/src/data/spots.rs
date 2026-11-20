@@ -1,13 +1,10 @@
-//! Live quotes: cTrader's spot events merged into quotes by the rule of the
-//! tick history (`session::ticks::QuoteMerge`).
+//! Merges cTrader's spot events into live quotes, by the rule the tick history uses
+//! (`session::ticks::QuoteMerge`).
 //!
-//! A spot event carries a side only when it changed, and the time of the
-//! change (`subscribeToSpotTimestamp`); the first one after a subscription
-//! carries both. On the demo the spot events of a minute were the ticks
-//! history serves for it, side for side and millisecond for millisecond
-//! (`README.md`, "Live quotes"), so live quotes are the
-//! quotes a fill stores. Each quote is stamped `ts_event` = the spot's time
-//! and `ts_init` = its receipt.
+//! A spot event carries a side only when that side changed, with the time of the change
+//! (`subscribeToSpotTimestamp`). The first event after a subscription carries both sides. On the
+//! demo, the spot events of one minute matched the ticks history served for it (`README.md`, "Live
+//! quotes"). Each quote has the spot's time as `ts_event` and its receipt time as `ts_init`.
 
 use std::collections::HashMap;
 
@@ -24,14 +21,12 @@ use crate::{
     session::ticks::{Merged, QuoteMerge},
 };
 
-/// The live quotes of the instruments of a session, by cTrader symbol.
 #[derive(Debug)]
 pub(super) struct SpotQuotes {
     streams: HashMap<i64, Stream>,
     symbol_ids: HashMap<InstrumentId, i64>,
 }
 
-/// One instrument's live quotes.
 #[derive(Debug)]
 struct Stream {
     merge: QuoteMerge,
@@ -39,13 +34,13 @@ struct Stream {
 }
 
 impl SpotQuotes {
-    /// The live quotes of `instruments`, each with its cTrader `symbolId`;
-    /// none subscribed.
+    /// Returns the live quotes of `instruments`, each with its cTrader `symbolId`.
+    ///
+    /// No instrument is subscribed yet.
     ///
     /// # Errors
     ///
-    /// Returns an error if an instrument's quote size is off its size
-    /// precision.
+    /// Returns an error if an instrument's quote size is off its size precision.
     pub(super) fn new(instruments: &[(InstrumentAny, i64)]) -> anyhow::Result<Self> {
         let mut streams = HashMap::new();
         let mut symbol_ids = HashMap::new();
@@ -63,7 +58,7 @@ impl SpotQuotes {
         })
     }
 
-    /// The cTrader `symbolId` of `id`.
+    /// Returns the cTrader `symbolId` of `id`.
     ///
     /// # Errors
     ///
@@ -75,7 +70,7 @@ impl SpotQuotes {
             .with_context(|| format!("{id} is not an instrument the data client loaded"))
     }
 
-    /// Sends the live quotes of `id` from now on; returns its `symbolId`.
+    /// Sends the live quotes of `id` from now on, and returns its `symbolId`.
     ///
     /// # Errors
     ///
@@ -86,7 +81,7 @@ impl SpotQuotes {
         Ok(symbol_id)
     }
 
-    /// Sends no more live quotes of `id`; returns its `symbolId`.
+    /// Stops sending live quotes of `id`, and returns its `symbolId`.
     ///
     /// # Errors
     ///
@@ -97,14 +92,19 @@ impl SpotQuotes {
         Ok(symbol_id)
     }
 
-    /// Takes in `spot`, received at `ts_init`, and returns the quote to
-    /// send now: none for an instrument not subscribed, before both sides
-    /// are known, or for a crossed quote.
+    /// Takes in `spot`, received at `ts_init`, and returns the quote to send now.
+    ///
+    /// Returns no quote if:
+    /// - The instrument is not subscribed.
+    /// - Both sides are not yet known.
+    /// - The quote is crossed.
     ///
     /// # Errors
     ///
-    /// Returns an error if the spot is of a symbol the session did not
-    /// load, has no time, or a price off the instrument's precision.
+    /// Returns an error if:
+    /// - The spot is for a symbol the session did not load.
+    /// - The spot has no time.
+    /// - The spot's price is off the instrument's precision.
     pub(super) fn spot(
         &mut self,
         spot: &ProtoOaSpotEvent,
@@ -146,9 +146,7 @@ mod tests {
         self, SPOT_EVENT_EURUSD_ASK, SPOT_EVENT_EURUSD_BID, SPOT_EVENT_EURUSD_FIRST,
     };
 
-    /// EURUSD as the clients load it, 5 decimals, maximum order
-    /// 100,000,000, and its cTrader symbol id on the server the fixtures
-    /// come from.
+    /// Returns EURUSD as the clients load it, with its cTrader symbol id in the fixtures.
     fn eurusd() -> (InstrumentAny, i64) {
         (InstrumentAny::Cfd(testing::instrument("EURUSD")), 1)
     }
@@ -169,7 +167,6 @@ mod tests {
 
     const RECEIVED: UnixNanos = UnixNanos::new(1_793_017_476_613_000_000);
 
-    /// (ms of ts_event, bid, ask) of `quote`.
     fn prices(quote: &QuoteTick) -> (u64, String, String) {
         (
             quote.ts_event.as_u64() / 1_000_000,
@@ -191,7 +188,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // As captured: bid 111964, ask 111965 at 1793017476361 ms.
         assert_eq!(
             prices(&made),
             quote(1_793_017_476_361, "1.11964", "1.11965")
@@ -214,7 +210,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // The bid 111965 alone at 1793017480320 ms; the ask carried.
         assert_eq!(
             prices(&made),
             quote(1_793_017_480_320, "1.11965", "1.11965")
@@ -266,7 +261,6 @@ mod tests {
         );
     }
 
-    /// Synthetic: a spot of a symbol the session did not load.
     #[rstest]
     fn a_spot_of_a_symbol_not_loaded_is_an_error() {
         let mut quotes = subscribed();

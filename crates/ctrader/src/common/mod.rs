@@ -1,8 +1,6 @@
-//! What the rest of the adapter shares: Spotware's protobuf messages
-//! (`messages`, generated from the vendored `proto/`), the parsing of
-//! cTrader symbols into instruments (`parse`), the account check
-//! (`account`) and the token pair with the token file that keeps it
-//! renewed (`token`).
+//! What the adapter shares. `messages` holds the generated protobuf types, `parse` turns symbols
+//! into instruments, `account` checks the account, and `token` holds the token pair and the file
+//! that renews it.
 
 pub(crate) mod account;
 pub(crate) mod messages;

@@ -1,10 +1,8 @@
-//! IB's euro in US dollars on IDEALPRO as fill-catalog stores it from IB's
-//! history: EUR/USD.IDEALPRO, Nautilus' FX pair, and its 1-minute BID and
-//! ASK bars, each stamped at its close and of no volume, as IB's BID and
-//! ASK bars carry none. On Wednesday 21 October 2026, the day of
-//! `common::ic`. A strategy converting through the pair reads its rates
-//! from these bars, the first form of a pair IB's history serves
-//! (`venues::rate_series`).
+//! EUR/USD.IDEALPRO, Nautilus' FX pair, and its 1-minute BID and ASK bars as fill-catalog stores
+//! them from IB's history. The date is 21 October 2026, the day of `common::ic`.
+//!
+//! Each bar is stamped at its close and has no volume, as IB's BID and ASK bars carry none. A
+//! strategy that converts through the pair reads its rates from them (`venues::rate_series`).
 
 use std::path::Path;
 
@@ -20,16 +18,13 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 use super::ic::at;
 
-/// IB's euro in US dollars.
 pub(crate) const EURUSD: &str = "EUR/USD.IDEALPRO";
 
-/// EUR/USD on IDEALPRO, IB's cash FX pair, on 5 decimals.
 pub(crate) fn pair() -> InstrumentAny {
     let id = InstrumentId::from(EURUSD);
     InstrumentAny::CurrencyPair(default_fx_ccy(id.symbol, Some(id.venue)))
 }
 
-/// The pair's 1-minute bars priced at `price_type`, IB's own.
 pub(crate) fn bar_type(price_type: PriceType) -> BarType {
     BarType::new(
         InstrumentId::from(EURUSD),
@@ -38,8 +33,7 @@ pub(crate) fn bar_type(price_type: PriceType) -> BarType {
     )
 }
 
-/// The pair's bars priced at `price_type`, flat at `price`, one a minute
-/// closing from `from` + 1 minute to 12:00.
+/// Returns flat bars at `price`, one a minute, closing after `from` to 12:00.
 pub(crate) fn bars(price_type: PriceType, price: &str, from: Timestamp) -> Vec<Bar> {
     let price = Price::from(price);
     let mut bars = vec![];
@@ -60,8 +54,6 @@ pub(crate) fn bars(price_type: PriceType, price: &str, from: Timestamp) -> Vec<B
     bars
 }
 
-/// Stores the pair in the catalog in `dir`, and its BID bars at `bid` and
-/// ASK bars at `ask` from `from` to 12:00, stored over that window.
 pub(crate) fn store(dir: &Path, bid: &str, ask: &str, from: Timestamp) {
     store_definition(dir);
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
@@ -77,8 +69,6 @@ pub(crate) fn store(dir: &Path, bid: &str, ask: &str, from: Timestamp) {
     }
 }
 
-/// Stores the pair's definition alone in the catalog in `dir`, none of its
-/// bars.
 pub(crate) fn store_definition(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![pair()]).unwrap();

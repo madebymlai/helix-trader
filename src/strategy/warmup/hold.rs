@@ -1,69 +1,54 @@
-//! The hold of a live warmup's quotes, trades, book depth, deltas, custom
-//! data and bars: the
-//! warmup hands the indicators reading them, a model strategy's features,
-//! those of its responses as its merge hands them on, in time order across
-//! series (`merge`), holds the live ones the strategy
-//! hands it until its group ends, the last window answered, and then hands
-//! those over in the order they came; from then on live ones go straight
-//! through. A replay requests no warmup and holds nothing.
+//! Holds a live warmup's quotes, trades, book depth, deltas, custom data and bars.
 //!
-//! It stands in for Nautilus. Nautilus hands a live tick to the indicators
-//! an actor registered for it as the tick arrives (`DataActor::handle_quote`
-//! in `common/src/actor/data_actor.rs`), and a response's ticks to the same
-//! indicators (`handle_quotes_response`), holding nothing while a request is
-//! pending; it holds live ticks for its bar aggregators alone (`WarmupBuffer`
-//! in `data/src/engine/handlers.rs`, which `data/src/engine/bar.rs` gives
-//! them). A warmup is answered a window at a time,
-//! the node running between, so features registered for ticks read the live
-//! ones before the older windows, and time runs backwards for them. So the
-//! features are not registered for quotes and trades (`FeatureSet::register`)
-//! and the strategy hands the warmup its live ones (`model::handle`'s
-//! `model_data_hooks!`). Book depth and deltas Nautilus hands no indicator
-//! at all (`ActorIndicator` reads quotes, trades and bars): an actor gets
-//! them in its own handlers (`DataActor::on_book_depth`, `on_book_deltas`),
-//! as it gets a response's in `on_historical_book_depth` and
-//! `on_historical_book_deltas`, and Nautilus holds nothing for the handlers
-//! while a request is pending either. So the strategy hands the warmup its
-//! live depth and deltas from its handlers too, held as ticks are, and its
-//! custom data, which Nautilus hands an actor's `on_data` and
-//! `on_historical_data` alone, likewise. Nautilus holds live data for a
-//! request's bar aggregator only until that request completes
-//! (`cleanup_request_bar_aggregators` in `data/src/engine/bar.rs`), so the
-//! live bars it builds then would reach indicators registered for them
-//! while the other requests still answer older windows: the bar
-//! indicators are registered with Nautilus for nothing either, and the
-//! strategy hands the warmup its live and replayed bars (`on_bar`), held
-//! as ticks are. Once
-//! Nautilus holds live data for an actor's indicators and handlers while a
-//! request of it with `update_subscriptions` is pending, releasing them in
-//! time order after the response and deduplicated against it, this module
-//! goes: helix-trader issue #16
-//! (<https://github.com/madebymlai/helix-trader/issues/16>), upstream
-//! nautilus_trader#5675. Until the merge goes too (`merge`,
-//! helix-trader#46), which hands a request's history on after its
-//! completion, the features stay fed through the warmup, live data then
-//! passed straight through; after it, they are registered for quotes,
-//! trades and bars again, the strategy hands the warmup no ticks and no
-//! bars, and its handlers hand its depth, deltas and custom data to the
-//! features straight.
+//! The warmup hands a response's ticks to the indicators that read the features. It hands them on
+//! in the time order `merge` gives across series. It holds live ticks until its group ends, then
+//! hands them over in the order they came. After that, live ticks go straight through. A replay
+//! requests no warmup and holds nothing.
 //!
-//! A live tick the history holds is dropped, held or not, judged within its
-//! series, the quotes, the trades, the depth or the deltas of one
-//! instrument, the custom data of one data type, or the bars of one bar
-//! type, a batch of deltas by its last delta's time, a bar by its close.
-//! The series' seam is
-//! the latest `ts_event` of its ticks the warmup handed over; a live tick of
-//! the series made at or before it (`ts_event`) is dropped, one made after
-//! it handed over. Made at the seam itself, it is the venue's resend of the
-//! history's last tick, which IC and IB send on a subscription, or another
-//! tick of that instant, which the history, answered after it, is taken to
-//! hold; made before it, it is older than what the features read, and would
-//! run their time backwards. `ts_init` is not compared: a client stamps a
-//! live tick's on receipt (cTrader, `crates/ctrader/src/data/spots.rs`) and
-//! a history's as the venue or the catalog gives it, so a resent tick's
-//! comes after the history's with its `ts_event` the same, and Nautilus
-//! trims a response to the warmup's end by `ts_init`. A series with no
-//! history drops nothing; a new warmup forgets the seams of the one before.
+//! This module stands in for Nautilus. Nautilus hands a live tick to an actor's indicators as it
+//! arrives (`DataActor::handle_quote` in `common/src/actor/data_actor.rs`). It holds nothing while
+//! a request is pending, except for bar aggregators (`WarmupBuffer` in
+//! `data/src/engine/handlers.rs`). A warmup is answered a window at a time. Features registered
+//! for ticks would therefore read the live ticks before the older windows, and time would run
+//! backwards. So:
+//! - The features are not registered for quotes, trades and bars (`FeatureSet::register`).
+//! - The strategy hands the warmup its live ticks (`model::handle`'s `model_data_hooks!`) and bars
+//!   (`on_bar`).
+//!
+//! Nautilus hands book depth and deltas to no indicator, and custom data to `on_data` alone. The
+//! strategy hands the warmup these from its handlers too.
+//!
+//! Nautilus holds live data for a request's bar aggregator only until that request completes
+//! (`cleanup_request_bar_aggregators` in `data/src/engine/bar.rs`). The bars the aggregator builds
+//! then would reach indicators while other requests still answer older windows.
+//!
+//! This module goes once Nautilus does all of the following while a request with
+//! `update_subscriptions` is pending:
+//! - Holds live data for an actor's indicators and handlers.
+//! - Releases it in time order after the response.
+//! - Deduplicates it against the response.
+//!
+//! Tracking: helix-trader issue #16 (<https://github.com/madebymlai/helix-trader/issues/16>),
+//! upstream nautilus_trader#5675. Until the merge goes too (`merge`, helix-trader#46), the
+//! features stay fed through the warmup.
+//!
+//! The history drops a live tick it holds, whether the tick was held or not. It judges each tick
+//! within its series:
+//! - Quotes, trades, depth and deltas: one series per instrument.
+//! - Custom data: one series per data type.
+//! - Bars: one series per bar type.
+//!
+//! A batch of deltas is judged by its last delta's time, and a bar by its close. A series' seam is
+//! the latest `ts_event` the warmup handed over for it. The warmup drops a live tick made at or
+//! before the seam:
+//! - At the seam, the tick is the venue's resend of the history's last tick (IC and IB send one on
+//!   a subscription) or another tick of that instant.
+//! - Before the seam, the tick would run the features' time backwards.
+//!
+//! `ts_init` is not compared. A client stamps a live tick's `ts_init` on receipt (cTrader,
+//! `crates/ctrader/src/data/spots.rs`), so a resent tick's `ts_init` comes after the history's.
+//! Nautilus also trims a response to the warmup's end by `ts_init`. A series with no history drops
+//! nothing. A new warmup forgets the seams of the one before.
 
 use std::{cell::RefCell, collections::HashMap, fmt::Debug, rc::Rc};
 
@@ -75,62 +60,47 @@ use super::{
     tick::{Series, Tick},
 };
 
-/// What hands a warmup's quotes, trades, depth, deltas, custom data and
-/// bars to the indicators reading them, holding the live ones while a live
-/// start's group is pending.
 #[derive(Default)]
 pub(super) struct Hold {
-    /// What the quotes and trades are handed to.
     indicators: Vec<SharedActorIndicator>,
-    /// What the bars are handed to.
     bars: Vec<SharedActorIndicator>,
-    /// What the depth and deltas are handed to.
     books: Vec<Rc<dyn BookIndicator>>,
-    /// What the custom data is handed to.
     custom: Vec<Rc<dyn CustomIndicator>>,
-    /// The live ticks held while a group is pending, in the order they
-    /// came; none when live ticks go straight through.
+    /// Live ticks held while a group is pending. `None` means they go straight through.
     held: RefCell<Option<Vec<Tick>>>,
-    /// The seam of each series: the latest `ts_event` of its ticks the
-    /// history handed over.
+    /// The latest `ts_event` the history handed over, per series.
     seams: RefCell<HashMap<Series, UnixNanos>>,
 }
 
 impl Hold {
-    /// Hands the quotes and trades to `indicator` too.
     pub(super) fn feeding(&mut self, indicator: SharedActorIndicator) {
         self.indicators.push(indicator);
     }
 
-    /// Hands the bars to `indicator` too.
     pub(super) fn feeding_bars(&mut self, indicator: SharedActorIndicator) {
         self.bars.push(indicator);
     }
 
-    /// Hands the depth and deltas to `books` too.
     pub(super) fn feeding_books(&mut self, books: Rc<dyn BookIndicator>) {
         self.books.push(books);
     }
 
-    /// Hands the custom data to `custom` too.
     pub(super) fn feeding_custom(&mut self, custom: Rc<dyn CustomIndicator>) {
         self.custom.push(custom);
     }
 
-    /// Holds the live ticks from now, a live start's group pending, with
-    /// no seam yet.
     pub(super) fn hold(&self) {
         *self.held.borrow_mut() = Some(Vec::new());
         self.seams.borrow_mut().clear();
     }
 
-    /// Hands `tick`, of a response, as the merge hands it on, to the
-    /// indicators, its series' seam moved to it if it is the latest.
+    /// Hands the response `tick` to the indicators.
+    ///
+    /// Moves the series' seam to `tick` if `tick` is the latest in its series.
     ///
     /// # Errors
     ///
-    /// Returns an error if an indicator reading it fails: the first such
-    /// error.
+    /// Returns an error if an indicator fails.
     pub(super) fn history(&self, tick: &Tick) -> anyhow::Result<()> {
         self.seams
             .borrow_mut()
@@ -140,13 +110,13 @@ impl Hold {
         self.hand(tick)
     }
 
-    /// Takes `tick`, a live one: held while a group is pending, else handed
-    /// to the indicators unless the history holds it.
+    /// Holds the live `tick` while a group is pending.
+    ///
+    /// Otherwise hands it on, unless the history holds it.
     ///
     /// # Errors
     ///
-    /// Returns an error if an indicator reading it fails: the first such
-    /// error.
+    /// Returns an error if an indicator fails.
     pub(super) fn live(&self, tick: Tick) -> anyhow::Result<()> {
         if let Some(held) = self.held.borrow_mut().as_mut() {
             held.push(tick);
@@ -155,16 +125,15 @@ impl Hold {
         self.pass(&tick)
     }
 
-    /// Takes `tick`, a live one Nautilus built from the live data it held
-    /// for a request and hands no handler, a bar it built into the cache
-    /// alone at the request's completion: held among the live ticks held in
-    /// time order, before the first initialized after it (`ts_init`), the
-    /// ticks it was built from before it, as a replay hands a bar after the
-    /// data of its instant; with none held, handed as `live` hands one.
+    /// Handles `tick` like `live`, for a bar Nautilus built into the cache alone at a request's
+    /// completion.
+    ///
+    /// While held, the bar goes before the first held tick with a later `ts_init`, as a replay
+    /// hands a bar after the data of its instant.
     ///
     /// # Errors
     ///
-    /// Returns an error if an indicator reading it fails, as `live`.
+    /// Returns an error if an indicator fails.
     pub(super) fn built_live(&self, tick: Tick) -> anyhow::Result<()> {
         if let Some(held) = self.held.borrow_mut().as_mut() {
             let at = held
@@ -177,14 +146,14 @@ impl Hold {
         self.pass(&tick)
     }
 
-    /// Hands the ticks held over, in the order they came, but those the
-    /// history holds, the group having ended; from now on live ticks go
-    /// straight through. Nothing held, nothing to do.
+    /// Hands the held ticks over in the order they came, except those the history holds.
+    ///
+    /// Live ticks then go straight through.
     ///
     /// # Errors
     ///
-    /// Returns an error if an indicator reading a tick fails, the first of
-    /// which ends the hand-over: the ticks after it are lost.
+    /// Returns an error if an indicator fails. The hand-over then ends, and the ticks after the
+    /// failure are lost.
     pub(super) fn release(&self) -> anyhow::Result<()> {
         let Some(held) = self.held.take() else {
             return Ok(());
@@ -207,7 +176,6 @@ impl Hold {
         Ok(())
     }
 
-    /// Hands `tick` to the indicators unless the history holds it.
     fn pass(&self, tick: &Tick) -> anyhow::Result<()> {
         if self.holds(tick) {
             return Ok(());
@@ -215,8 +183,6 @@ impl Hold {
         self.hand(tick)
     }
 
-    /// Whether the history holds `tick`: made at or before its series'
-    /// seam.
     fn holds(&self, tick: &Tick) -> bool {
         self.seams
             .borrow()

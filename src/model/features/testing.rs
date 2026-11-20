@@ -1,7 +1,4 @@
-//! The features of the harness' tests: the last mid of an instrument's
-//! quotes, the same over the bracket's width, a count of an instrument's
-//! book depth and deltas, and a count of a custom series' points, declared
-//! and set in `[indicators]` as a strategy's features are.
+//! Declares features for the tests in `[indicators]`.
 
 use std::rc::Rc;
 
@@ -19,24 +16,17 @@ use crate::{
     },
 };
 
-/// The last mid of a quote, Nautilus' exponential average of one,
-/// `[indicators.mid]`.
 pub(crate) const MID: Declared<EmaArgs> = Declared::new("mid");
 
-/// `[indicators.mid]`, as `[indicators]` holds it.
 pub(crate) fn tables() -> IndicatorsConfig {
     toml::from_str(r#"mid = { period = 1, price_type = "MID" }"#).unwrap()
 }
 
-/// The features of one, `mid`, the last mid of `instrument_id`, warm once
-/// a quote came.
 pub(crate) fn last_mid(instrument_id: InstrumentId) -> FeatureSetBuilder {
     FeatureSet::builder().feature(&[Series::quotes(instrument_id)], MID, &tables())
 }
 
-/// The last mid of a quote over the bracket's width there: initialized once
-/// a quote came and the width has a length; reading a width never handed,
-/// it panics.
+/// The last mid of a quote over the bracket's width there. Reading a width never handed panics.
 pub(crate) struct MidOverWidth {
     mid: Option<f64>,
     width: Option<Rc<BracketWidth>>,
@@ -90,7 +80,6 @@ impl OverBracket for MidOverWidth {
     }
 }
 
-/// The arguments of `MidOverWidth`: none.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MidOverWidthArgs {}
@@ -106,11 +95,8 @@ impl IndicatorArgs for MidOverWidthArgs {
     }
 }
 
-/// `[indicators.over]`.
 pub(crate) const OVER: Declared<MidOverWidthArgs> = Declared::new("over");
 
-/// The features of one, `over`, the last mid of `instrument_id` over the
-/// bracket's `width` there.
 pub(crate) fn mid_over(instrument_id: InstrumentId, width: &Rc<BracketWidth>) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("over = {}").unwrap();
     FeatureSet::builder()
@@ -118,11 +104,9 @@ pub(crate) fn mid_over(instrument_id: InstrumentId, width: &Rc<BracketWidth>) ->
         .feature(&[Series::quotes(instrument_id)], OVER, &tables)
 }
 
-/// A count of the depth and deltas a feature gets, `[indicators.book]`.
 pub(crate) const BOOK: Declared<BookCountArgs> = Declared::new("book");
 
-/// The features of two, the count of `instrument_id`'s depth snapshots,
-/// then of its batches of deltas, each warm once one came.
+/// Two features, each warm once one came: the count of depth snapshots, then of delta batches.
 pub(crate) fn book_counts(instrument_id: InstrumentId) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("book = {}").unwrap();
     FeatureSet::builder()
@@ -130,8 +114,6 @@ pub(crate) fn book_counts(instrument_id: InstrumentId) -> FeatureSetBuilder {
         .feature(&[Series::deltas(instrument_id)], BOOK, &tables)
 }
 
-/// A feature counting the depth and deltas it gets, initialized by the
-/// first, its value the count.
 pub(crate) struct BookCount {
     count: usize,
 }
@@ -168,7 +150,6 @@ impl Feature for BookCount {
     }
 }
 
-/// The arguments of `BookCount`: none.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BookCountArgs {}
@@ -181,18 +162,13 @@ impl IndicatorArgs for BookCountArgs {
     }
 }
 
-/// A count of the custom data a feature gets, `[indicators.custom]`.
 pub(crate) const CUSTOM: Declared<CustomCountArgs> = Declared::new("custom");
 
-/// The features of one, the count of the points of `series`, warm once one
-/// came.
 pub(crate) fn custom_count(series: &CustomSeries) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("custom = {}").unwrap();
     FeatureSet::builder().feature(&[Series::Custom(series.clone())], CUSTOM, &tables)
 }
 
-/// A feature counting the custom data it gets, initialized by the first,
-/// its value the count.
 pub(crate) struct CustomCount {
     count: usize,
 }
@@ -232,7 +208,6 @@ impl CustomHandler for CustomCount {
     }
 }
 
-/// The arguments of `CustomCount`: none.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CustomCountArgs {}

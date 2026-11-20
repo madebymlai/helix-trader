@@ -46,7 +46,6 @@ const TOML: &str = r#"
     risk = "0.5%"
 "#;
 
-/// The fields of the config errors refusing `toml`.
 fn error_fields(toml: &str) -> Vec<String> {
     let err = EmaCrossConfig::load(toml).unwrap_err();
     let errors = match err.downcast_ref::<ConfigError>() {
@@ -105,13 +104,11 @@ fn defaults_its_base_and_leaves_the_oms_to_the_venue() {
         config.base.strategy_id,
         Some(StrategyId::from("EMA_CROSS-001"))
     );
-    // Its id alone: Nautilus tags its orders with the id's tag.
+    // Nautilus tags orders with the id's tag
     assert_eq!(config.base.order_id_tag, None);
     assert_eq!(config.base.oms_type, None);
 }
 
-/// Its periods are read from `[indicators]` and its exits are its code's:
-/// neither is a top-level key.
 #[rstest]
 #[case::a_period("fast_period = 5", "fast_period")]
 #[case::exits("hold = \"1h\"", "hold")]
@@ -127,9 +124,6 @@ fn rejects_fast_period_not_below_slow() {
     assert_eq!(error_fields(&toml), ["indicators.fast.period"]);
 }
 
-/// It trades one instrument: two or none are refused under the list. With
-/// no instrument traded, nothing is asked of the series: the count is the
-/// violation, alone.
 #[rstest]
 #[case::two(
     "instruments = [{ instrument_id = \"ESM24.CME\" }, { instrument_id = \"ESH24.CME\" }]"
@@ -152,8 +146,6 @@ fn rejects_a_trade_instrument_without_bars() {
     assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
 }
 
-/// `TOML` with `series` listed after its bars series of the traded
-/// instrument.
 fn listing(series: &str) -> String {
     TOML.replace(
         "price_type = \"MID\" } },\n",
@@ -161,12 +153,8 @@ fn listing(series: &str) -> String {
     )
 }
 
-/// The crossover reads the first bars series of the traded instrument
-/// alone: a series listed beside it is read by nothing, refused under its
-/// listing, naming it. So are a second bars series of the traded
-/// instrument; bars of another; ticks, even of the instrument it trades;
-/// and custom data, LSE's daily 10-year US yield, its type registered as
-/// the process does at its start.
+/// Only the first bars series of the traded instrument is read, and any other series is refused
+/// under its listing.
 #[rstest]
 #[case::a_second_bars_series_of_the_trade_instrument(
     r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 2, aggregation = "HOUR", price_type = "MID" } }"#,
@@ -194,8 +182,6 @@ fn rejects_a_series_it_does_not_read_as_unread(#[case] series: &str, #[case] nam
     }
 }
 
-/// The crossover reads its bars series once: listed again, it is refused
-/// under its second listing, naming it.
 #[rstest]
 fn rejects_its_bars_series_listed_twice() {
     let toml = listing(
@@ -213,8 +199,6 @@ fn rejects_its_bars_series_listed_twice() {
     assert!(value.contains("ESM24.CME-1-HOUR-MID-INTERNAL"), "{value}");
 }
 
-/// The traded instrument without bars, its own error, is reported with
-/// the standard ones.
 #[rstest]
 fn reports_a_trade_instrument_without_bars_with_the_standard_violations() {
     let toml = TOML
@@ -231,8 +215,6 @@ fn reports_a_trade_instrument_without_bars_with_the_standard_violations() {
     );
 }
 
-/// Each series read by nothing is reported under its field, with the
-/// standard violations and the crossover's own.
 #[rstest]
 fn reports_every_unread_series_with_the_other_violations() {
     let toml = listing(
@@ -258,9 +240,6 @@ fn price(s: &str) -> Decimal {
     s.parse().unwrap()
 }
 
-/// A long takes profit 1% above the close and stops 0.5% below it: 620.60
-/// plus 1%, less 0.5%. A short takes profit 1% below the close and stops
-/// 0.5% above it: 600.60 less 1%, plus 0.5%.
 #[rstest]
 #[case::long("620.60", OrderSide::Buy, "626.806", "617.497")]
 #[case::short("600.60", OrderSide::Sell, "594.594", "603.603")]
@@ -276,7 +255,6 @@ fn a_trade_takes_profit_a_percent_and_stops_half_a_percent_from_the_close(
     );
 }
 
-/// Trades AUD/USD.
 const CONFIG: &str = r#"
     [data]
     series = [
@@ -293,20 +271,16 @@ const CONFIG: &str = r#"
     risk = "0.5%"
 "#;
 
-/// 2026-10-26T10:00:00Z, the time of the restart.
+/// The restart, 2026-10-26T10:00:00Z.
 const NOW: u64 = 1_792_922_400_000_000_000;
 const MINUTE: u64 = 60_000_000_000;
 
-/// The strategy registered without a node on `cache` at `now`, started,
-/// and its clock.
 fn started(cache: &Rc<RefCell<Cache>>, now: u64) -> (EmaCross, Rc<RefCell<VirtualClock>>) {
     let (mut strategy, clock) = registered(cache, now, CONFIG);
     DataActor::on_start(&mut strategy).unwrap();
     (strategy, clock)
 }
 
-/// The strategy of `config` registered without a node on `cache` at
-/// `now`, and its clock.
 fn registered(
     cache: &Rc<RefCell<Cache>>,
     now: u64,
@@ -316,8 +290,6 @@ fn registered(
     register(strategy, cache, now)
 }
 
-/// `strategy` registered without a node on `cache` at `now`, and its
-/// clock.
 fn register(
     mut strategy: EmaCross,
     cache: &Rc<RefCell<Cache>>,
@@ -345,8 +317,6 @@ fn register(
     (strategy, clock)
 }
 
-/// A cache holding `instrument` and the SIM venue's margin account,
-/// 100,000 USD.
 fn holding(instrument: InstrumentAny) -> Rc<RefCell<Cache>> {
     let cache = Rc::new(RefCell::new(Cache::default()));
     let balance = Money::from("100000 USD");
@@ -369,10 +339,8 @@ fn holding(instrument: InstrumentAny) -> Rc<RefCell<Cache>> {
     cache
 }
 
-/// A long decided on a bar closing at 0.70000 20 minutes before a restart,
-/// its entry filled into a position of its own: started again at the
-/// restart, the strategy sets the trade's time again, 4 hours after its
-/// send.
+/// A long is decided at 0.70000 20 minutes before a restart, and its entry fills into a position.
+/// The restart sets its time again, 4 hours after its send.
 #[rstest]
 fn a_restart_sets_the_time_of_its_open_trade_again() {
     let aud = InstrumentAny::CurrencyPair(audusd_sim());
@@ -443,8 +411,6 @@ fn a_restart_sets_the_time_of_its_open_trade_again() {
     );
 }
 
-/// AUD/USD of the config priced in quarters of a tenth of a pip, 0.00025 a
-/// tick, finer prices than its ticks.
 fn aud_in_quarter_ticks() -> InstrumentAny {
     InstrumentAny::CurrencyPair(
         CurrencyPair::builder()
@@ -463,10 +429,6 @@ fn aud_in_quarter_ticks() -> InstrumentAny {
     )
 }
 
-/// A long decided on a bar closing at 0.70010: its take profit, 0.707101,
-/// and its stop, 0.6965995, are on the nearest of the instrument's ticks,
-/// not merely at its precision (0.70710, 0.69660), and its one R is the
-/// close's distance to that stop, 0.00360.
 #[rstest]
 fn a_trade_takes_profit_and_stops_on_the_nearest_ticks_its_one_r_to_its_stop() {
     let cache = holding(aud_in_quarter_ticks());
@@ -503,10 +465,8 @@ fn a_trade_takes_profit_and_stops_on_the_nearest_ticks_its_one_r_to_its_stop() {
     );
 }
 
-/// Nautilus' sizer reads a trade's P&L as a multiple of a distance in
-/// price, which an inverse instrument's is not: the crossover trading
-/// Bybit's inverse BTC/USD perpetual refuses to start, naming it, and
-/// asks the data engine for nothing, neither a warmup nor a subscription.
+/// Nautilus' sizer reads P&L as a multiple of a price distance. An inverse instrument's P&L is
+/// not.
 #[rstest]
 fn trading_an_inverse_instrument_it_refuses_to_start() {
     let (handler, sent) = get_typed_into_message_saving_handler::<DataCommand>(None);
@@ -527,14 +487,12 @@ fn trading_an_inverse_instrument_it_refuses_to_start() {
     assert!(sent.is_empty(), "{sent:?}");
 }
 
-/// IC's AUD/USD, a pair priced and sized as Nautilus' AUD/USD.
 fn ic_aud() -> InstrumentAny {
     let mut pair = audusd_sim();
     pair.id = InstrumentId::from("AUDUSD.ICMARKETS");
     InstrumentAny::CurrencyPair(pair)
 }
 
-/// The crossover on IC's AUD/USD, its equity converted through IC's EURUSD.
 fn converting() -> EmaCrossConfig {
     let toml = CONFIG.replace("AUD/USD.SIM", "AUDUSD.ICMARKETS").replace(
         "risk = \"0.5%\"",
@@ -543,10 +501,8 @@ fn converting() -> EmaCrossConfig {
     EmaCrossConfig::load(&toml).unwrap()
 }
 
-/// Live, the crossover warms up at its start on the quotes of its
-/// conversion pair, IC's EURUSD, over its warmup, ending now, so that the
-/// cache holds a rate when it sizes a trade at the start, then subscribes
-/// to them from now.
+/// Live, the strategy requests the quotes of IC's EURUSD over its warmup, which ends now. That
+/// way the cache holds a rate when it sizes a trade.
 #[rstest]
 fn live_it_warms_up_its_conversion_pairs_quotes_then_subscribes_to_them_from_its_start() {
     let (handler, sent) = get_typed_into_message_saving_handler::<DataCommand>(None);

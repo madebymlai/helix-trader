@@ -1,20 +1,23 @@
-//! The binary's refusals of a command line before it runs anything: a flag
-//! its subcommand does not take, one it requires left out, two that
-//! conflict, a value it cannot read, a strategy it does not know, a window
-//! or a train's span not ending after its start, a config it cannot load,
-//! and a train of a strategy with no model. Each exits non-zero, its stderr naming the flag
-//! or the facts ahead of the usage clap prints after a refusal, printing
-//! nothing and creating no catalog. The binary runs
-//! in a directory of its own with no environment, so that neither the
-//! shell nor a `.env` above the crate's root gives a flag its value: the
-//! flags fall back on the environment, which `main` loads from `.env`
-//! before it parses them.
+//! Tests the binary's refusals of a command line before it runs anything. It refuses:
+//! - a flag its subcommand does not take
+//! - a required flag left out
+//! - two flags that conflict
+//! - a value it cannot read
+//! - an unknown strategy
+//! - a window, or a train's span, that does not end after its start
+//! - a config it cannot load
+//! - a train for a strategy with no model
+//!
+//! Each refusal exits non-zero and puts the flag or the facts in stderr ahead of clap's usage,
+//! with no output and no catalog created.
+//!
+//! The binary runs in a directory of its own with no environment, as the flags fall back on the
+//! environment, which `main` loads from `.env`.
 
 use std::process::Command;
 
 use rstest::rstest;
 
-/// A fill-catalog's required arguments.
 const FILL_CATALOG: [&str; 8] = [
     "fill-catalog",
     "ema",
@@ -26,7 +29,6 @@ const FILL_CATALOG: [&str; 8] = [
     "2024-03-01T12:30:00Z",
 ];
 
-/// A backtest's required arguments but its costs.
 const BACKTEST: [&str; 8] = [
     "backtest",
     "ema",
@@ -38,13 +40,10 @@ const BACKTEST: [&str; 8] = [
     "2024-03-01T12:30:00Z",
 ];
 
-/// A backtest's costs.
 const COSTS: [&str; 4] = ["--commission", "3 EUR", "--balance", "10000 EUR"];
 
-/// A live run's required arguments.
 const LIVE: [&str; 4] = ["live", "ema", "--config", "ema.toml"];
 
-/// A train's required arguments.
 const TRAIN: [&str; 6] = [
     "train",
     "model_ema",
@@ -54,7 +53,6 @@ const TRAIN: [&str; 6] = [
     "2026-10-23",
 ];
 
-/// A config the strategy cannot load: it lists no series.
 const BAD_CONFIG: &str = r#"
 [data]
 series = []
@@ -65,13 +63,11 @@ instruments = [{ instrument_id = "ESM24.CME" }]
 risk = "0.5%"
 "#;
 
-/// `parts` joined into one command line.
 fn argv<'a>(parts: &[&[&'a str]]) -> Vec<&'a str> {
     parts.concat()
 }
 
-/// Each value joined to its flag, so that clap reads a value such as
-/// `-0.035 USD` or `-1s` as the value, not as a flag of its own.
+/// Joins each value to its flag, so that clap reads `-0.035 USD` or `-1s` as a value, not a flag.
 #[rstest]
 #[case::fill_catalog_given_an_ib_account(
     argv(&[&FILL_CATALOG, &["--account", "DU1234567"]]),
@@ -277,8 +273,8 @@ fn the_binary_refuses_a_command_line_naming_why_and_runs_nothing(
         String::from_utf8_lossy(&output.stderr),
     );
     assert!(!output.status.success(), "{stdout}{stderr}");
-    // Clap follows its refusal with the subcommand's usage, which lists
-    // every flag it takes.
+
+    // Clap follows its refusal with the usage, which lists every flag
     let refusal = stderr.split("\nUsage:").next().unwrap();
     for part in named {
         assert!(refusal.contains(part), "{part}: {stderr}");

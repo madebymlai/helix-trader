@@ -1,5 +1,4 @@
-//! LSE's HTTP client against the mock LSE peer (`lse::testing::MockLse`):
-//! each call's request, key and typed answer, LSE's refusals and retries.
+//! LSE's HTTP client against the mock LSE peer (`lse::testing::MockLse`).
 
 use std::{num::NonZeroU32, time::Duration};
 
@@ -38,7 +37,6 @@ fn client(lse: &MockLse, calls_per_minute: u32) -> LseHttpClient {
     .unwrap()
 }
 
-/// GOLD in `futures` over the captured second.
 fn gold_second() -> ExportQuery {
     let gold = LseSymbol::new("futures", "GOLD").unwrap();
     ExportQuery::series(
@@ -76,13 +74,14 @@ async fn an_export_asks_lse_s_selection_with_the_key_and_gets_the_file() {
     assert_eq!(query, expected);
 }
 
-/// LSE's refusals that asking again cannot lift: a plan the key lacks;
-/// `data-unavailable` for a market storing no trades, no empty selection,
-/// whose message alone begins "No stored data for this selection" (LSE's
-/// docs, "Refusal codes"); `data-unavailable` as a 400, which says the
-/// market serves no such rows, as a derived market's quotes, only a 404
-/// being no rows; and a 429 of a quota, as the rows a day, which reset at
-/// 00:00 UTC, so that no wait of a run's gets past them.
+/// LSE's refusals that asking again cannot lift:
+/// - A plan that the key lacks.
+/// - `data-unavailable` for a market that stores no trades. Only its message tells it from an
+///   empty selection, and the message begins "No stored data for this selection" (LSE's docs,
+///   "Refusal codes").
+/// - `data-unavailable` as a 400, meaning the market serves no such rows, as with a derived
+///   market's quotes. Only a 404 means no rows.
+/// - A 429 for a quota, such as the rows a day, which resets at 00:00 UTC.
 #[rstest]
 #[case::a_plan_the_key_lacks(
     Reply::refusal(403, PLAN_REQUIRED),
@@ -128,8 +127,8 @@ async fn no_stored_row_and_no_session_are_no_file(#[case] refusal: &str) {
     assert_eq!(file, None);
 }
 
-/// LSE's file comes in a 200 beside its SHA-256 (LSE's docs, "Files"):
-/// a 202 is how LSE once answered an export it was still building.
+/// LSE sends a file as a 200 with its SHA-256 (LSE's docs, "Files"). LSE once answered an export
+/// still building with a 202.
 #[rstest]
 #[case::a_202(Reply::file(GOLD_TRADES).with_status(202), 202)]
 #[case::a_200_without_lse_s_sha_256(Reply::file(GOLD_TRADES).without_checksum(), 200)]
@@ -149,9 +148,6 @@ async fn an_answer_other_than_a_200_beside_lse_s_sha_256_is_no_file_but_an_unexp
     assert_eq!(lse.calls().len(), 1);
 }
 
-/// LSE's documented 429, its wait cut to two seconds: longer than the
-/// retry's own first backoff of a second, so that the second call shows
-/// the `Retry-After` was waited out.
 #[tokio::test]
 async fn a_429_of_calls_is_waited_out_by_its_retry_after_then_asked_again() {
     let lse = MockLse::start(vec![
@@ -169,8 +165,7 @@ async fn a_429_of_calls_is_waited_out_by_its_retry_after_then_asked_again() {
     assert!(waited >= Duration::from_secs(2), "{waited:?}");
 }
 
-/// LSE's docs, "Files": a download that is cut is requested again from
-/// the start.
+/// LSE's docs ("Files") say to request a download that is cut again from the start.
 #[tokio::test]
 async fn a_file_cut_short_is_fetched_again() {
     let lse = MockLse::start(vec![Reply::cut_file(GOLD_TRADES), Reply::file(GOLD_TRADES)]);
@@ -181,8 +176,6 @@ async fn a_file_cut_short_is_fetched_again() {
     assert_eq!(lse.calls().len(), 2);
 }
 
-/// A whole file LSE built before sending, whose SHA-256 is not the one
-/// LSE gave: the export is named by LSE's id, for LSE to look into.
 #[tokio::test]
 async fn a_file_whose_sha_256_is_not_lse_s_fails_naming_lse_s_export_asked_once() {
     let lse = MockLse::start(vec![
@@ -203,7 +196,7 @@ async fn a_file_whose_sha_256_is_not_lse_s_fails_naming_lse_s_export_asked_once(
     assert_eq!(lse.calls().len(), 1);
 }
 
-/// 120 calls a minute: one every half second.
+/// 120 calls a minute allow one call every half second.
 #[tokio::test]
 async fn calls_come_no_faster_than_the_calls_a_minute_allow() {
     let lse = MockLse::start(vec![Reply::file(GOLD_TRADES), Reply::file(GOLD_TRADES)]);
@@ -219,8 +212,6 @@ async fn calls_come_no_faster_than_the_calls_a_minute_allow() {
     assert!(apart >= Duration::from_millis(450), "{apart:?}");
 }
 
-/// Two exports at once, each file taking 300 ms: the second is asked
-/// once the first has come.
 #[tokio::test]
 async fn one_export_downloads_at_a_time() {
     let slow = || Reply::file(GOLD_TRADES).after(Duration::from_millis(300));
@@ -238,7 +229,6 @@ async fn one_export_downloads_at_a_time() {
     assert!(second.received >= first.answered, "{first:?} {second:?}");
 }
 
-/// US10Y in the daily bond yields from 9 to 12 November.
 fn us10y_days() -> ReferenceQuery {
     ReferenceQuery::new(
         "bond_yields",
@@ -273,7 +263,7 @@ async fn the_reference_catalogue_names_the_time_column_of_each_collection() {
     assert_eq!(call.api_key.as_deref(), Some(API_KEY));
 }
 
-/// A body made up for the test: valid JSON with no collections.
+/// A made-up body: valid JSON with no collections.
 #[tokio::test]
 async fn a_catalogue_not_as_lse_s_docs_describe_it_is_an_error_saying_so() {
     let lse = MockLse::start(vec![Reply::json(r#"{"collections": []}"#)]);
@@ -333,7 +323,7 @@ async fn a_reference_selection_with_no_stored_row_is_no_file() {
     assert_eq!(file, None);
 }
 
-/// LSE's catalogue lists ESZ6's two listings, of 2016 and of 2026.
+/// LSE's catalogue lists the two listings of ESZ6, for 2016 and for 2026.
 #[tokio::test]
 async fn a_lookup_asks_lse_s_catalogue_for_a_symbol_s_listings() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6)]);
@@ -368,8 +358,6 @@ async fn a_lookup_asks_lse_s_catalogue_for_a_symbol_s_listings() {
     );
 }
 
-/// A listing's rows are selected by its number and by `data`, no
-/// symbol or timeframe beside them.
 #[tokio::test]
 async fn an_export_of_a_listing_asks_for_its_rows_by_its_pair_id() {
     let lse = MockLse::start(vec![Reply::file(GCZ26_QUOTES)]);

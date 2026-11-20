@@ -1,6 +1,5 @@
-//! What a warmup hands its indicators, ticks and bars alike, and the series
-//! each belongs to: what the merge of its history (`merge`) and the hold of
-//! its live ticks and bars (`hold`) both carry.
+//! The data a warmup hands to its indicators, and the series each item belongs to. `merge` and
+//! `hold` carry both.
 
 use std::fmt::Display;
 
@@ -16,23 +15,21 @@ use nautilus_model::{
 
 use crate::strategy::requirements::TickSeries;
 
-/// A quote, a trade, a snapshot of a book's depth, a batch of its deltas, a
-/// point of custom data or a bar: all a warmup hands its indicators, named
-/// for the most of them.
+/// A quote, trade, depth snapshot, batch of deltas, custom data point or bar.
 #[derive(Debug, Clone)]
 pub(super) enum Tick {
     Quote(QuoteTick),
     Trade(TradeTick),
-    /// Boxed: ten levels a side, against a quote's few fields.
+    /// Boxed because a depth snapshot holds ten levels a side, while a quote has few fields.
     Depth(Box<OrderBookDepth>),
     Deltas(OrderBookDeltas),
     Custom(CustomData),
     Bar(Bar),
 }
 
-/// The series of a tick: the quotes, the trades, the depth or the deltas
-/// of one instrument, the custom data of one data type, or the bars of one
-/// standard bar type, as a node caches them (`BarType::standard`).
+/// The series a tick belongs to, as a node caches it.
+///
+/// Bars use their standard bar type (`BarType::standard`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum Series {
     Quotes(InstrumentId),
@@ -44,7 +41,6 @@ pub(super) enum Series {
 }
 
 impl Series {
-    /// The series of `tick`'s ticks.
     pub(super) fn of(tick: &TickSeries) -> Self {
         let id = tick.instrument_id;
         match tick.data {
@@ -69,16 +65,13 @@ impl Tick {
         }
     }
 
-    /// What the tick takes held: its own size and what it keeps on the
-    /// heap, a batch of deltas its deltas, a snapshot of depth its box, a
-    /// point of custom data its data, the data's own heap counted by the
-    /// length of its JSON (`CustomDataTrait::to_json`), and its data
-    /// type's names.
+    /// Returns the bytes the tick takes while held.
+    ///
+    /// A custom data point's heap counts as the length of its JSON (`CustomDataTrait::to_json`).
     ///
     /// # Errors
     ///
-    /// Returns an error if a point of custom data cannot be written as JSON,
-    /// naming its data type.
+    /// Returns an error if a custom data point cannot be written as JSON, naming its data type.
     pub(super) fn size(&self) -> anyhow::Result<usize> {
         let heap = match self {
             Self::Quote(_) | Self::Trade(_) | Self::Bar(_) => 0,
@@ -100,8 +93,6 @@ impl Tick {
         Ok(size_of::<Self>() + heap)
     }
 
-    /// When the tick was initialized, as a replay orders it: a history's
-    /// as its venue or the catalog stamps it, a bar's at its close.
     pub(super) fn ts_init(&self) -> UnixNanos {
         match self {
             Self::Quote(quote) => quote.ts_init,
@@ -113,8 +104,9 @@ impl Tick {
         }
     }
 
-    /// When the tick was made, a batch of deltas when its last delta was, a
-    /// bar when it closed.
+    /// Returns when the tick was made.
+    ///
+    /// A batch uses its last delta, and a bar uses its close.
     pub(super) fn ts_event(&self) -> UnixNanos {
         match self {
             Self::Quote(quote) => quote.ts_event,

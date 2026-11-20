@@ -1,11 +1,8 @@
-//! Test support: the log records of a test, which runs itself alone in a
-//! process of its own to read them (`alone`, then `capture`), for a test
-//! whose contract is what is logged. Nautilus has no log capture of its
-//! own: its tests each install a `log::Log` of their own, as this one.
+//! Test support that captures the log records of a test run alone in its own process (`alone`,
+//! then `capture`). Nautilus has no such support: its tests each install a `log::Log`.
 
 use std::{process::Command, sync::Mutex};
 
-/// Every log record of the process, its level and its message.
 struct Captured(Mutex<Vec<String>>);
 
 impl log::Log for Captured {
@@ -23,20 +20,19 @@ impl log::Log for Captured {
 
 static CAPTURED: Captured = Captured(Mutex::new(Vec::new()));
 
-/// Set in the process a test runs itself in (`alone`).
 const ALONE: &str = "HELIX_TRADER_TEST_ALONE";
 
-/// Whether this is the process the test `name` of the module `module`
-/// (its `module_path!()`) runs itself in, alone, so that the logger it
-/// installs (`capture`) is the process's: the test binary's own process
-/// holds Nautilus' logger, which the first node of a test installs, and
-/// which a logger installed before would make it refuse. Else runs it so,
-/// and checks that it ran and passed.
+/// Returns whether this process is the one running test `name` in `module` alone.
+///
+/// If not, runs the test alone in a new process.
+///
+/// The test binary's own process holds Nautilus' logger, which refuses a logger installed before
+/// it.
 pub(crate) fn alone(module: &str, name: &str) -> bool {
     if std::env::var_os(ALONE).is_some() {
         return true;
     }
-    // The test's path in the binary: its module's, the crate left out.
+    // The test's path in the binary, without the crate
     let (_, module) = module.split_once("::").unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
@@ -57,19 +53,17 @@ pub(crate) fn alone(module: &str, name: &str) -> bool {
     false
 }
 
-/// Installs the process's logger, which keeps every record at `level` or
-/// above, from a test run `alone`.
+/// Installs the process's logger. It keeps records at `level` or above.
 ///
 /// # Panics
 ///
-/// Panics if the process has a logger already.
+/// Panics if the process already has a logger.
 pub(crate) fn capture(level: log::LevelFilter) {
     log::set_logger(&CAPTURED).unwrap();
     log::set_max_level(level);
 }
 
-/// The records kept so far, each its level and its message,
-/// `WARN the message`.
+/// Returns the records kept so far, each as `WARN the message`.
 pub(crate) fn lines() -> Vec<String> {
     CAPTURED.0.lock().unwrap().clone()
 }

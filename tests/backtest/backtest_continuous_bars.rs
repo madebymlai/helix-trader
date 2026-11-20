@@ -1,10 +1,8 @@
-//! Bars on a rolled root (`common::rolls`: GC.GLBX, rolling from GCQ26.GLBX
-//! to GCZ26.GLBX at 00:00 UTC on 29 July 2026): Nautilus' continuous bars,
-//! fed the transition table with its roll prices read from the catalog,
-//! August's last trade of its slice (3992.00, 1 ns before the roll) and
-//! December's first (4041.00, at the roll), a spread of 49.00. 30-minute
-//! LAST bars over a run from 23:00 to 01:00. One node per thread, so one
-//! run per test.
+//! Tests Nautilus' continuous bars on a rolled root (`common::rolls`: GC.GLBX, rolling from
+//! GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July 2026). The roll prices come from the catalog.
+//! They are August's last trade (3992.00, 1 ns before the roll) and December's first (4041.00, at
+//! the roll), so the spread is 49.00. The bars are 30-minute LAST bars over a run from 23:00 to
+//! 01:00.
 
 use helix_trader::backtest::{Backtest, Commission};
 use jiff::Timestamp;
@@ -26,8 +24,6 @@ use crate::common::{
 
 const BARS: &str = "GC.GLBX-30-MINUTE-LAST-INTERNAL";
 
-/// A backtest of the bars on the root over `[23:00 Tuesday, 01:00
-/// Wednesday]` on `catalog`.
 fn backtest(catalog: &TempDir) -> Backtest {
     Backtest {
         catalog: catalog.path().to_path_buf(),
@@ -44,19 +40,16 @@ fn backtest(catalog: &TempDir) -> Backtest {
     }
 }
 
-/// A flat bar closing at `close`, at `price`.
 fn flat(close: Timestamp, price: &str) -> Ohlc {
     let price = Price::from(price);
     (close, price, price, price, price)
 }
 
-/// What a recorder of the root's bars got: its bars and their volumes.
 struct Got {
     bars: Vec<Ohlc>,
     volumes: Vec<Quantity>,
 }
 
-/// Runs a recorder of the root's bars in `mode` through `backtest`.
 fn run(backtest: &Backtest, mode: ContinuousFutureAdjustmentType) -> Got {
     let continuous = backtest.continuous_bars(mode).unwrap();
     let (recorder, record) = Recorder::continuous(BarType::from(BARS), continuous);
@@ -77,8 +70,6 @@ fn backward_spread_bars_shift_the_pre_roll_bars_by_the_spread() {
         ContinuousFutureAdjustmentType::BackwardSpread,
     );
 
-    // August's trades plus 49.00, December's as they are; those before
-    // 23:00 are not replayed.
     assert_eq!(
         got.bars,
         [
@@ -87,9 +78,10 @@ fn backward_spread_bars_shift_the_pre_roll_bars_by_the_spread() {
             flat(wednesday("01:00:00"), "4042.00"),
         ]
     );
-    // December's trade at the roll (4041.00, its post price) reaches no
-    // bar: the engine rolls the subscription on a timer at the roll, and
-    // the backtest delivers the trade first, to August's subscription.
+
+    // December's trade at the roll (4041.00) reaches no bar, because the engine rolls the
+    // subscription on a timer at the roll, and the backtest delivers the trade first, to August's
+    // subscription.
     assert_eq!(got.volumes, [Quantity::from(1); 3]);
 }
 
@@ -102,7 +94,6 @@ fn forward_spread_bars_shift_the_post_roll_bars_by_the_spread() {
         ContinuousFutureAdjustmentType::ForwardSpread,
     );
 
-    // August's trades as they are, December's less 49.00.
     assert_eq!(
         got.bars,
         [
@@ -122,8 +113,7 @@ fn forward_ratio_bars_scale_the_post_roll_bars_by_the_ratio() {
         ContinuousFutureAdjustmentType::ForwardRatio,
     );
 
-    // August's trades as they are, December's times 3992.00 / 4041.00:
-    // 4042.00 × 3992 / 4041 = 3992.98788, to the cent 3992.99.
+    // August's trades as they are and December's times 3992.00 / 4041.00, so 4042.00 gives 3992.99
     assert_eq!(
         got.bars,
         [

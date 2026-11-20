@@ -1,11 +1,10 @@
-//! A strategy's feature set fed by Nautilus and its decisions on a clock
-//! cadence (`model::features`, `model::decide`): the probe declares a
-//! moving average of the last three quote mids and one of the last two
-//! hour bars' closes, registers them and decides every 30 minutes,
-//! recording the rows published. On a ramp of a cent a minute, the rows
-//! hold exactly the data up to each decision, the bar closing at a
-//! decision included, and none before both features are initialized. One
-//! node per thread, so one run per test.
+//! Tests a feature set fed by Nautilus, and decisions on a clock cadence (`model::features`,
+//! `model::decide`). The features are moving averages of the last three quote mids and the last two
+//! hour bars' closes, decided every 30 minutes. On a ramp of a cent a minute, the rows hold exactly
+//! the data up to each decision, including the bar closing at it. No row comes before both features
+//! are initialized.
+//!
+//! The mid is 100 at 09:00, and a cent more each minute. The run starts at 09:00 and ends at 12:45.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -41,28 +40,20 @@ use crate::common::{
 
 const STRATEGY: &str = "FEATURES-001";
 
-/// The probe's decisions, every 30 minutes.
 const EVERY: DecisionRule = DecisionRule::Every(SignedDuration::from_mins(30));
 
-/// The mean of the last three quote mids, `[indicators.mid_3_quotes]`.
 const MID_3_QUOTES: Declared<SmaArgs> = Declared::new("mid_3_quotes");
-/// The mean of the last two hour bars' closes, `[indicators.close_2_hours]`.
 const CLOSE_2_HOURS: Declared<SmaArgs> = Declared::new("close_2_hours");
 
-/// `hh:mm` UTC on the day of the ramp, Wednesday 7 January 2026.
 fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
 }
 
-/// The mid of the minute closing at `close`: 100 at 09:00, a cent more
-/// each minute.
 fn mid(close: Timestamp) -> f64 {
     let minutes = close.duration_since(at("09:00")).as_mins();
     100.0 + 0.01 * minutes as f64
 }
 
-/// Decides on its features every 30 minutes and records each row
-/// published for it.
 #[derive(Debug)]
 struct FeatureProbe {
     core: StrategyCore,
@@ -120,8 +111,8 @@ impl DataActor for FeatureProbe {
         decide::start(self, EVERY, SignedDuration::ZERO)
     }
 
-    /// Hands the features its quotes and bars: the set is registered with
-    /// Nautilus for nothing, a model strategy's warmup handing it its data.
+    /// A model strategy's warmup would hand them data. Here the set is registered with Nautilus for
+    /// nothing.
     fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
         self.features.handle_quote(quote)
     }
@@ -153,12 +144,8 @@ fn each_decision_publishes_the_features_of_the_data_up_to_it() {
         .run(probe)
         .unwrap();
 
-    // A decision on the half hour fires 10 ms after it. Then the last three
-    // quotes close on it and the two minutes before, a mean of the mid a
-    // minute before, the next quote closing a minute later; the last two
-    // bars close on the hour at or before it, the one closing on it
-    // included. The decisions at 09:30, 10:00 and 10:30 come before the
-    // second bar.
+    // A decision fires 10 ms after the half hour, so the quotes feature is the mid a minute before.
+    // The decisions at 09:30, 10:00 and 10:30 come before the second bar.
     let expected = [
         (
             "11:00",

@@ -1,5 +1,5 @@
-//! The fake, for tests: the row's first feature is the prediction, so a
-//! test steers the model through its features.
+//! The fake model, for tests. It predicts the row's first feature, so a test steers the model
+//! through its features.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -23,9 +23,9 @@ impl Learner for Fake {
     }
 }
 
-/// The model and its saved text, JSON named by the adapter, so that no
-/// other adapter loads it. `mean` is that of the training labels, the
-/// prediction where the first feature is missing.
+/// Saved as JSON with the adapter's tag, so no other adapter loads it.
+///
+/// `mean` is the mean of the labels. It is the prediction when the first feature is missing.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Saved {
@@ -55,7 +55,6 @@ mod tests {
 
     use crate::model::learner::{LearnerConfig, TrainingSet};
 
-    /// Fitted on labels whose mean is (2.5 - 1.0 + 3.5 + 2.0) / 4 = 1.75.
     fn model() -> crate::model::learner::Model {
         let set = TrainingSet::new(2, vec![0.9; 8], vec![2.5, -1.0, 3.5, 2.0]).unwrap();
         LearnerConfig::Fake {}.fit(&set).unwrap()

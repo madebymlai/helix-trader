@@ -1,5 +1,6 @@
-//! The factory the node creates the data client by, from its config (see
-//! `config`), named `LSE`.
+//! The factory the node uses to create the data client.
+//!
+//! The factory is named `LSE`.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -19,8 +20,7 @@ use crate::{common::consts::LSE_CLIENT, config::LseDataClientConfig, data::LseDa
 pub struct LseDataClientFactory;
 
 impl LseDataClientFactory {
-    /// The factory, named `LSE`: the node creates the client under that
-    /// name, its client id.
+    /// Returns the factory.
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -28,17 +28,16 @@ impl LseDataClientFactory {
 }
 
 impl DataClientFactory for LseDataClientFactory {
-    /// The client named `name`, on its config's keys and API, each key not
-    /// given read from its variable, reading the instruments it converts
-    /// data of from `cache` and the time a request is asked at from
-    /// `clock`, the node's.
+    /// Creates the client named `name`.
+    ///
+    /// Reads each key missing from `config` from its environment variable.
     ///
     /// # Errors
     ///
-    /// Returns an error if `config` is not an `LseDataClientConfig`, if no
-    /// key is given or in `LSE_API_KEY`, `LSE_CME_API_KEY` or
-    /// `LSE_NASDAQ_API_KEY`, or if an HTTP
-    /// client cannot be built.
+    /// Returns an error if:
+    /// - `config` is not an `LseDataClientConfig`.
+    /// - No key is given in `config`, `LSE_API_KEY`, `LSE_CME_API_KEY` or `LSE_NASDAQ_API_KEY`.
+    /// - An HTTP client cannot be built.
     fn create(
         &self,
         name: &str,

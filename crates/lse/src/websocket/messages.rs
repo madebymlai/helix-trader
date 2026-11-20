@@ -1,7 +1,7 @@
-//! The JSON frames of LSE's sockets (LSE's WebSocket documentation,
-//! "Protocol"): those the client sends (`LseWsAction`), and those LSE sends
-//! (`LseWsFrame`), each an object tagged by its `type`, the fields the
-//! client does not read left out.
+//! The JSON frames on LSE's sockets (LSE's WebSocket documentation, "Protocol").
+//!
+//! The client sends `LseWsAction` frames, and LSE sends `LseWsFrame` frames. Each frame is an
+//! object tagged by its `type`. The types leave out the fields the client does not read.
 
 use std::fmt::Display;
 
@@ -12,23 +12,22 @@ use serde_json::{Map, Value};
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum LseWsAction<'a> {
-    /// The key, answering the socket's welcome.
+    /// Sends the key in answer to the socket's welcome.
     Auth { api_key: &'a str },
-    /// The ticks of a symbol, from now on.
+    /// Streams ticks for a symbol from now on.
     Subscribe { symbol: &'a str },
-    /// No more ticks of a symbol.
+    /// Stops ticks for a symbol.
     Unsubscribe { symbol: &'a str },
-    /// The ticks of every listed contract of an underlying's options, its
-    /// chain, from now on: one subscription however many contracts.
+    /// Subscribes to every listed contract in an underlying's option chain as one subscription.
     SubscribeOptions { underlying: &'a str },
-    /// No more ticks of an underlying's chain.
+    /// Stops ticks for an underlying's option chain.
     UnsubscribeOptions { underlying: &'a str },
-    /// The application keepalive, which LSE answers with a pong.
+    /// Keeps the application alive. LSE answers with a pong.
     Ping,
 }
 
 impl LseWsAction<'_> {
-    /// The frame's text.
+    /// Returns the frame's text.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("an action serializes")
     }
@@ -38,11 +37,11 @@ impl LseWsAction<'_> {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LseWsFrame {
-    /// The socket's first frame, before the key.
+    /// The socket's first frame, sent before the key.
     Welcome,
-    /// The key accepted: what the socket streams to it.
+    /// LSE accepted the key. The frame lists what the socket streams to it.
     Authenticated(LseWsAuthenticated),
-    /// A subscription accepted, under the symbol's current spelling.
+    /// LSE accepted a subscription. The frame gives the symbol's current spelling.
     Subscribed {
         symbol: String,
     },
@@ -50,30 +49,30 @@ pub enum LseWsFrame {
     Unsubscribed {
         symbol: String,
     },
-    /// The subscription of an underlying's chain accepted.
+    /// LSE accepted the subscription to an underlying's option chain.
     OptionsSubscribed {
         underlying: String,
     },
-    /// The subscription of an underlying's chain ended.
+    /// The subscription to an underlying's option chain ended.
     OptionsUnsubscribed {
         underlying: String,
     },
     Tick(LseTick),
     /// The answer to a ping.
     Pong,
-    /// The catalogue, answering a listing.
+    /// The catalogue, sent in answer to a listing.
     Symbols,
-    /// A refusal, of the key or of a subscription.
+    /// LSE refused the key or a subscription.
     Error(LseWsRefusal),
 }
 
 /// What the socket streams to the key it accepted.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LseWsAuthenticated {
-    /// The symbols the socket streams, as it spells them. LSE accepts a
-    /// subscription to a symbol it does not list, and sends nothing.
+    /// The symbols the socket streams. LSE accepts a subscription to an unlisted symbol and sends
+    /// nothing.
     pub symbols: Vec<LseWsListed>,
-    /// The symbols one connection of the key may stream at once.
+    /// The number of symbols one connection of the key may stream at once.
     pub max_subscriptions: Option<usize>,
 }
 
@@ -83,12 +82,14 @@ pub struct LseWsListed {
     pub symbol: String,
 }
 
-/// A tick: its symbol as the socket spells it, LSE's time of it, its
-/// price, the best bid and ask, and its volume, the size of the trade, 0
-/// on a quote (LSE's WebSocket documentation, "The tick"). A series' tick
-/// is read as a quote, its price and volume left: a futures tick's price is
-/// its bid (LSE's captures). An option contract's is read as a trade, of
-/// its price and volume, the US options feed carrying trades alone.
+/// A tick with a symbol, LSE's time, price, best bid and ask, and volume (LSE's WebSocket
+/// documentation, "The tick").
+///
+/// The volume is the trade's size, and it is 0 on a quote.
+///
+/// The client reads a series' tick as a quote and ignores its price and volume, because a futures
+/// tick's price is its bid (LSE's captures). It reads an option contract's tick as a trade,
+/// because the US options feed carries trades alone.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LseTick {
     pub symbol: String,
@@ -100,8 +101,7 @@ pub struct LseTick {
     pub volume: Option<f64>,
 }
 
-/// LSE's refusal: its code, its message, and what else it gives, such as
-/// `max_connections`.
+/// LSE's refusal, with a code, a message and any other details, such as `max_connections`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct LseWsRefusal {
     pub code: String,
@@ -111,8 +111,8 @@ pub struct LseWsRefusal {
 }
 
 impl Display for LseWsRefusal {
-    /// `LIMIT_REACHED: Max 16 symbols on this key.`, then its details, as
-    /// `(max_connections 1, open_connections 1)`.
+    /// Writes `LIMIT_REACHED: Max 16 symbols on this key.`, then `(max_connections 1,
+    /// open_connections 1)`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
         if !self.details.is_empty() {
@@ -142,8 +142,6 @@ mod tests {
         serde_json::from_str(text).unwrap()
     }
 
-    /// The captured frames, each as its type, their fields beyond those
-    /// read ignored.
     #[rstest]
     fn every_captured_frame_reads_as_its_type() {
         assert!(matches!(frame(WS_WELCOME), LseWsFrame::Welcome));
@@ -165,9 +163,8 @@ mod tests {
         );
     }
 
-    /// A chain's acknowledgements, as captured, name its underlying; an
-    /// option's tick, as LSE's WebSocket documentation gives it ("The
-    /// tick"), is a trade, its price and its size, the tick's volume.
+    /// An option's tick is a trade, so the price is the trade price and the volume is its size
+    /// (LSE's WebSocket documentation, "The tick").
     #[rstest]
     fn the_documented_option_frames_read_as_their_types() {
         let LseWsFrame::OptionsSubscribed { underlying } = frame(WS_OPTIONS_SUBSCRIBED_AAPL) else {
@@ -188,7 +185,7 @@ mod tests {
         );
     }
 
-    /// Trimmed to the futures it lists (see `test_data/README.md`).
+    /// The frame is trimmed to the futures it lists (see `test_data/README.md`).
     #[rstest]
     fn the_authenticated_frame_gives_the_symbols_listed_and_the_subscriptions_allowed() {
         let LseWsFrame::Authenticated(authenticated) = frame(WS_AUTHENTICATED_FUTURES) else {
@@ -200,9 +197,6 @@ mod tests {
         assert_eq!(authenticated.symbols.len(), 33);
     }
 
-    /// LSE's refusals, captured: a second connection on a key of one, its
-    /// limit and its count of those open in its details, and a key LSE
-    /// does not know, of no details.
     #[rstest]
     #[case::too_many_connections(
         WS_TOO_MANY_CONNECTIONS,

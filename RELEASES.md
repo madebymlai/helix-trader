@@ -66,6 +66,7 @@ Released on TBD (UTC).
 
 ### Internal Improvements
 
+- Changed the code's comments to `docs/documenting-code.md`'s standard, a third fewer words in shorter sentences, as Nautilus writes them
 - Added issue templates: bug report, enhancement request and upstream tracking, each with its rules
 - Changed the model feature set to supply its warmup inputs from feature declarations
 - Changed walk-forward scoring to evaluate each side once per row and use the same meta verdict as trading decisions
@@ -83,6 +84,7 @@ Released on TBD (UTC).
 
 ### Documentation Updates
 
+- Changed `docs/testing.md` to ask for test doc comments only where they clarify, as Nautilus does, and a test file's scenario in its module doc
 - Added `docs/documenting-code.md`, Nautilus' standard for comments and doc comments adapted to helix
 - Added the Apache-2.0 license, `LICENSE`, as the `license` of every crate
 - Changed `docs/architecture.md` to state the architecture as rules, each naming the module that owns it

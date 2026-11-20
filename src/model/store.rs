@@ -1,76 +1,55 @@
-//! The model store: the model sets a strategy's trains published, each
-//! valid from the retrain time it was trained at.
+//! Stores the model sets that a strategy's trains publish, each valid from its retrain time.
 //!
-//! A model set is one train's models (`StoredModelSet`): the model of
-//! each side the strategy trades, with the calibration of their pair, and
-//! the meta's, if the strategy has one, every model set of a strategy with
-//! a meta holding one. It is self-contained: its models are fixed as of its
-//! retrain time, by that train alone, from the data and the config, none
-//! derived from another model set nor changed by a later train; its meta
-//! learned from an out-of-fold pair its train fitted and did not publish
-//! (`train`). A decision uses the latest model set
-//! valid at or before it, its sides and its meta together, so no meta ever
-//! decides beside the sides of another train, and no side beside another
-//! train's other side.
+//! A model set (`StoredModelSet`) holds the models of one train:
+//! - Each side traded, with the calibration of their pair.
+//! - The meta, if the strategy has one. Every model set then holds one.
 //!
-//! A strategy's model sets are in one directory, of its strategy id, its
-//! dataset's fingerprint (the features, the decision rule, the target and
-//! the venue settings of its dataset runs, see `dataset::fingerprint`) and
-//! its model set key: every training setting of its models, the sides'
-//! (the learner and its settings, the retrain interval, the window, the
-//! calibration and the fewest rows of a slice) and the margins of both
-//! sides, which decide the side picked on each row and so the meta's rows,
-//! then the meta's (its learner and settings, window, calibration, margin
-//! and fewest rows) or none, and the store `VERSION`. So a model set is
-//! only ever listed beside model sets of the same features, costs,
-//! training, margins and meta, and of the same manifest. Backtest and live
-//! read the same list.
+//! A model set is self-contained. Its train alone fixes it as of its retrain time, and it derives
+//! nothing from another model set. Its meta is learned from an out-of-fold pair that the train does
+//! not publish (`train`). A decision uses the latest model set valid at or before it, sides and
+//! meta together.
 //!
-//! A strategy's model store (`ModelStore`) is built of its model's blueprint
-//! (`blueprint::ModelBlueprint`), and only there, which computes the
-//! fingerprint once and keys the directory with it. The model store holds
-//! each side the margins trade, with its margin and its feature names (the
-//! strategy's, then the target's payoff names, `features::side_names`),
-//! and the meta level, if any, with its config and its feature names; it
-//! publishes and lists the model sets, and hands out their swap, each
-//! model checked against its level's feature names and the fingerprint. A
-//! train reads a level's feature names from it, so the names a model is
-//! published with are those it is checked against.
+//! A strategy's model sets are in one directory, named by:
+//! - The strategy id.
+//! - The dataset's fingerprint (`dataset::fingerprint`).
+//! - The model set key.
 //!
-//! `Swap` is how the model sets are used: at each decision, in time
-//! order, the latest valid then, loaded and checked before use, all its
-//! models together. A model set failing a check is refused with an error
-//! naming it and the check, no decision is made on it nor on the one before
-//! it, and it is read again at the next decision, so that a model set that
-//! loads once mended is used from then.
+//! The key covers the store `VERSION` and every training setting of the models:
+//! - The sides' learner and settings, retrain interval, window, calibration and fewest rows.
+//! - The margins of both sides, which decide the meta's rows.
+//! - The meta's settings, or none.
 //!
-//! A model set is a directory, `<valid from>/` (an RFC 3339 time), holding
-//! its manifest, `model_set.json` (`ModelSetManifest`), and the
-//! directory of the publish that wrote it, which holds a file per model,
-//! `long.json`, `short.json` and `meta.json`. A publish writes its models'
-//! files in a directory of its own, named by the process and the publish,
-//! each synced to disk, and the directories naming them, then the manifest
-//! naming that directory, written beside its name, synced and renamed onto
-//! it: the manifest is the model set's commit marker, a model set without
-//! one is not listed, a crash or a power loss leaves none listed with its
-//! models' files cut short, and publishers at once, in a
-//! backtest and a live node say, never write each other's files, the last
-//! manifest renamed naming the models of one publish. A model's file is its
-//! manifest (`ModelManifest`), the schema (the feature names in order, the
-//! fingerprint), the target spec and side, the learner, the meta's
-//! calibration, its level line (a side's is its pair's, the model set's,
-//! `calibration::Ksplit`), the time of the meta's out-of-fold pair, its baseline (the training mean of the R it
-//! learned on the rows it was fitted and calibrated on) and probe rows, of
-//! its calibration slice, with the predictions the model made on them when
-//! fitted, before any calibration, and the model as its adapter saved it. A
-//! side's model predicts R (`SideModel`), its pair calibrating both sides'
-//! predictions at once (`Pair::expect`); a meta's predicts the R of the
-//! trade of the side picked, every prediction calibrated (`LoadedModel`);
-//! each carries its baseline (`Baselined`). A model whose manifest has the
-//! other level's calibration is refused at load. A reloaded model is checked
-//! by predicting the probes, never by its bytes. A missing feature, NaN, has
-//! no JSON number: a probe row writes NaN and the infinities as strings, and
-//! so does a probe's prediction.
+//! Backtest and live read the same list.
+//!
+//! Only a model's blueprint (`blueprint::ModelBlueprint`) builds a `ModelStore`. The blueprint
+//! computes the fingerprint once. The store holds each level's feature names. A train publishes its
+//! models with them, and each model is checked against them.
+//!
+//! `Swap` uses the latest valid model set at each decision, loaded and checked as a whole. If a
+//! model set fails a check, `Swap` refuses it with an error naming the model set and the check. No
+//! decision is made on it or on the one before it. It is read again at the next decision.
+//!
+//! A model set is a directory `<valid from>/` (RFC 3339). It holds:
+//! - Its manifest `model_set.json` (`ModelSetManifest`).
+//! - The directory of the publish that wrote it, with a file per model: `long.json`, `short.json`
+//!   and `meta.json`.
+//!
+//! A publish works in this order:
+//! 1. It writes and syncs the models in a directory named by the process and the publish.
+//! 2. It writes the manifest, naming that directory, to a temporary file beside the manifest path.
+//! 3. It syncs that file and renames it onto the manifest path.
+//!
+//! The manifest is the commit marker. A model set without one is not listed, so:
+//! - A crash leaves no listed model set with cut-short files.
+//! - Concurrent publishers never write each other's files, and the last manifest names the models
+//!   of one publish.
+//!
+//! A model's file holds its manifest (`ModelManifest`) and the model as its adapter saved it. A
+//! side's model predicts R, and its pair calibrates both sides at once (`Pair::expect`). A meta's
+//! model predicts the R of the trade of the side picked, calibrated by its level line
+//! (`LoadedModel`). Loading refuses a model whose manifest has the other level's calibration. A
+//! reloaded model is checked by predicting its probes, never by its bytes. JSON has no NaN, so a
+//! probe row and prediction write NaN and the infinities as strings.
 
 use std::{
     fmt::Debug,
@@ -97,44 +76,34 @@ use super::{
 };
 use crate::strategy::risk::R;
 
-/// The name of a model set's manifest, in its directory.
 const MANIFEST: &str = "model_set.json";
 
-/// The name of a meta model's file, in the directory of its model set's
-/// publish; a side's is its side's name.
+/// The name of a meta model's file. A side model's file is named after its side.
 const META: &str = "meta";
 
-/// The extension of a model's file.
 const EXTENSION: &str = "json";
 
-/// The publishes of this process so far, which tell its directories and
-/// temporary files apart.
+/// The publishes of this process so far, which tell its directories and temporary files apart.
 static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 
-/// The version of what a published model set holds, its manifests
-/// (`ModelSetManifest`, `ModelManifest`), its layout and how it is read.
-/// Keyed with the model set key (`model_set_directory`): bumped by hand
-/// whenever that changes, which keys every store anew, so that no
-/// model set of another layout is read and every model is trained again,
-/// on the datasets as they are.
+/// The version of the manifests, layout and reading of a published model set.
+///
+/// It is keyed with the model set key (`model_set_directory`). Bump it by hand when they change,
+/// which keys every store anew and trains every model again.
 const VERSION: u32 = 12;
 
-/// A strategy's models: the model sets its trains published, keyed by the
-/// one fingerprint of its dataset and its model set key, each side its
-/// margins trade and its meta model, if it has one.
+/// A strategy's published model sets, keyed by its dataset's fingerprint and its model set key.
 #[derive(Debug, Clone)]
 pub struct ModelStore {
-    /// The directory of its model set key, its model sets in it.
     directory: PathBuf,
-    /// The fingerprint of its dataset, which each model is checked against.
+    /// The fingerprint each model is checked against.
     fingerprint: String,
     /// Each side traded, the long first.
     sides: Vec<SideLevel>,
     meta: Option<MetaLevel>,
 }
 
-/// A side of a model store: the side, its margin and the names of its
-/// model's features.
+/// A side of a model store, with its margin and the feature names of its model.
 #[derive(Debug, Clone)]
 pub struct SideLevel {
     side: Side,
@@ -142,54 +111,44 @@ pub struct SideLevel {
     feature_names: Vec<String>,
 }
 
-/// The meta level of a model store: the meta model's config and the names of
-/// its features.
+/// The meta level of a model store, with its config and feature names.
 #[derive(Debug, Clone)]
 pub struct MetaLevel {
     config: MetaConfig,
     feature_names: Vec<String>,
 }
 
-/// One train's models as they are published and read back: valid from its
-/// retrain time, the model of each side the strategy trades, the long
-/// first, the calibration of their pair, fitted on both sides' predictions,
-/// and the meta's model, if and only if the strategy has a meta.
-/// Self-contained: the models of one train, fixed as of its retrain time,
-/// none derived from another model set.
+/// One train's models as published and read back.
+///
+/// It holds each side traded, the long first, the calibration of their pair, and a meta model if
+/// and only if the strategy has a meta.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredModelSet {
     pub valid_from: Timestamp,
-    /// Each side traded, the long first, its manifest naming its side.
+    /// Each side traded, the long first.
     pub sides: Vec<StoredModel>,
     pub calibration: Ksplit,
     pub meta: Option<StoredModel>,
 }
 
-/// What a model set's manifest holds, written last as its commit marker.
+/// A model set's manifest, written last as its commit marker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ModelSetManifest {
-    /// The directory of the publish its models' files are in, within the
-    /// model set's.
+    /// The directory of the publish that holds the model files.
     publish: String,
-    /// The calibration of its sides' pair.
     calibration: Ksplit,
 }
 
-/// A model set loaded and checked, as a decision uses it: its sides'
-/// pair, and its meta's model if the strategy has a meta, all of one train,
-/// fixed as of its retrain time and none derived from another model set.
+/// A model set loaded and checked, as a decision uses it.
 #[derive(Debug)]
 pub struct ModelSet {
     pair: Pair,
     meta: Option<LoadedModel>,
 }
 
-/// The models of the sides a strategy trades of one model set, one of
-/// each, loaded and checked together, or a train holds before publishing
-/// them, with the calibration fitted on them.
+/// The side models of one model set, loaded and checked together, with their calibration.
 #[derive(Debug)]
 pub struct Pair {
-    /// Each side traded, the long first, and its model.
     models: Vec<(Side, SideModel)>,
     calibration: Ksplit,
 }
@@ -198,44 +157,35 @@ pub struct Pair {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredModel {
     pub manifest: ModelManifest,
-    /// The model as its adapter saved it, for the manifest's learner to
-    /// load.
     pub model: SavedModel,
 }
 
 /// What a published model is, enough to check it before use.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelManifest {
-    /// The fingerprint of the features, the decision rule, the target and
-    /// the venue of its dataset runs.
+    /// The fingerprint of its dataset.
     pub fingerprint: String,
-    /// The names of the features, in the order of a row's values.
+    /// The feature names, in the order of a row's values.
     pub feature_names: Vec<String>,
-    /// The target spec.
     pub target: TargetConfig,
-    /// The side of the target the model learned; none for a meta model,
-    /// which learns the trade of the side picked.
+    /// The side learned. None for a meta model, which learns the trade of the side picked.
     pub side: Option<Side>,
     pub learner: LearnerConfig,
-    /// A meta model's calibration, the level line of its predictions of R,
-    /// as a one-sided pair's (`Ksplit`); none of a side's, which its pair
-    /// calibrates (`StoredModelSet::calibration`).
+    /// A meta model's level line, as a one-sided pair's (`Ksplit`). None for a side model, which
+    /// its pair calibrates (`StoredModelSet::calibration`).
     pub calibration: Option<Line>,
-    /// The time of a meta model's out-of-fold pair: the time the pair whose
-    /// picks it learned from was fitted as of, a meta's window before its
-    /// model set's; none of a side's.
+    /// The time that the out-of-fold pair was fitted as of. A meta learned from its picks. None for
+    /// a side model.
     pub out_of_fold: Option<Timestamp>,
-    /// The model's baseline, the constant model its scores are read
-    /// beside: the training mean of the R it learned on the rows it was
-    /// fitted and calibrated on.
+    /// The constant model that its scores are read beside. It is the training mean of R on the rows
+    /// the model was fitted and calibrated on.
     pub baseline: f64,
-    /// Rows of its calibration slice and the model's predictions on them,
-    /// before any calibration.
+    /// Rows of the model's calibration slice, with the predictions made on them before any
+    /// calibration.
     pub probes: Vec<Probe>,
 }
 
-/// A row and the prediction of a model on it when it was fitted, before
-/// any calibration.
+/// A row and the prediction a model made on it when fitted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Probe {
     #[serde(with = "values")]
@@ -245,13 +195,13 @@ pub struct Probe {
 }
 
 impl StoredModel {
-    /// The meta model, loaded by its manifest's learner with its level line
-    /// and checked as `checked` does.
+    /// Returns the meta model, loaded with its level line and checked as `checked` does.
     ///
     /// # Errors
     ///
-    /// Returns an error if the model cannot be loaded, fails a check, or its
-    /// manifest has no level line, as a side's.
+    /// Returns an error if:
+    /// - The model cannot be loaded or fails a check.
+    /// - Its manifest has no level line, as a side's.
     pub fn load(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<LoadedModel> {
         let Some(calibration) = self.manifest.calibration else {
             anyhow::bail!("its manifest has no level line, which every meta model has");
@@ -263,14 +213,12 @@ impl StoredModel {
         })
     }
 
-    /// The side model, loaded and checked as `checked` does, which its pair
-    /// calibrates.
+    /// Returns the side model, loaded and checked as `checked` does.
     ///
     /// # Errors
     ///
-    /// Returns an error if the model cannot be loaded or fails a check (see
-    /// `checked`), or if its manifest has a calibration of its own, as a
-    /// meta's.
+    /// Returns an error if the model cannot be loaded or fails a check (see `checked`), or if its
+    /// manifest has a calibration of its own, as a meta model's.
     fn load_side(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<SideModel> {
         anyhow::ensure!(
             self.manifest.calibration.is_none(),
@@ -283,11 +231,12 @@ impl StoredModel {
         ))
     }
 
-    /// The model, loaded by its manifest's learner and checked against a
-    /// strategy of `feature_names` and `fingerprint`: the manifest's
-    /// feature names in order and fingerprint are the strategy's, the model
-    /// takes as many features, and it predicts each probe to the bit as
-    /// when fitted.
+    /// Loads the model and checks it against the strategy's `feature_names` and `fingerprint`.
+    ///
+    /// The checks are:
+    /// - The manifest's names and fingerprint match.
+    /// - The model takes as many features as the manifest names.
+    /// - The model predicts each probe to the bit, as when fitted.
     ///
     /// # Errors
     ///
@@ -328,29 +277,23 @@ impl StoredModel {
     }
 }
 
-/// A meta model as a strategy and a score use it: loaded, predicting the
-/// realized R of the trade of the side picked, every prediction calibrated
-/// by its level line, with its baseline.
+/// A loaded meta model.
+///
+/// It predicts the R of the trade of the side picked, calibrated by its level line.
 #[derive(Debug)]
 pub struct LoadedModel {
     model: Model,
     calibration: Line,
-    /// The training mean of R on the rows it was fitted and calibrated on
-    /// (`ModelManifest::baseline`).
     baseline: f64,
 }
 
-/// A model as the store loads it, with the baseline of its manifest
-/// (`ModelManifest::baseline`), which its scores are read beside: a
-/// meta's (`LoadedModel`) and a side's (`SideModel`) alike.
+/// A loaded model with its baseline (`ModelManifest::baseline`).
 pub(super) trait Baselined {
-    /// The training mean of what the model learned on the rows it was
-    /// fitted and calibrated on.
     fn baseline(&self) -> f64;
 }
 
 impl LoadedModel {
-    /// The calibrated expected R of the trade of `row`.
+    /// Returns the calibrated expected R of the trade of `row`.
     ///
     /// # Errors
     ///
@@ -360,9 +303,9 @@ impl LoadedModel {
     }
 }
 
-/// A side's model as a strategy and a score use it: loaded, predicting the
-/// realized R of its side's trade, which its pair calibrates
-/// (`Pair::expect`), with its baseline, the training mean of R.
+/// A loaded side model.
+///
+/// It predicts the R of its side's trade, which its pair calibrates (`Pair::expect`).
 #[derive(Debug)]
 pub struct SideModel {
     model: Model,
@@ -370,14 +313,13 @@ pub struct SideModel {
 }
 
 impl SideModel {
-    /// The side's model `model` fitted, its baseline `baseline`.
+    /// Returns a side model of the fitted `model`, with its baseline `baseline`.
     #[must_use]
     pub const fn new(model: Model, baseline: f64) -> Self {
         Self { model, baseline }
     }
 
-    /// The R of the side's trade of `row` the model predicts, before its
-    /// pair's calibration.
+    /// Returns the R predicted for `row`, before its pair's calibration.
     ///
     /// # Errors
     ///
@@ -400,12 +342,10 @@ impl Baselined for SideModel {
 }
 
 impl ModelStore {
-    /// The models, under `root`, of the model of `blueprint`, its dataset's
-    /// fingerprint `fingerprint`, its blueprint's on the venue of its
-    /// dataset runs (`ModelBlueprint::fingerprint`), and trained as its
-    /// config says: each side its margins trade, and its meta model if its
-    /// config has a meta section, in the directory of that fingerprint and
-    /// its model set key (`model_set_directory`).
+    /// Returns the store of `blueprint` under `root`.
+    ///
+    /// The store is in the directory of `fingerprint` (`ModelBlueprint::fingerprint`) and the model
+    /// set key (`model_set_directory`).
     ///
     /// # Errors
     ///
@@ -440,15 +380,15 @@ impl ModelStore {
         })
     }
 
-    /// The directory of its model set key, its model sets in it.
+    /// Returns the directory of its model set key.
     #[must_use]
     pub fn directory(&self) -> &Path {
         &self.directory
     }
 
-    /// Whether a strategy trades on its model sets at `now`: a model set
-    /// is valid by then (`Swap::at`). Its models may still fail their checks
-    /// as they load.
+    /// Returns whether a model set is valid by `now` (`Swap::at`).
+    ///
+    /// Its models may still fail their checks.
     ///
     /// # Errors
     ///
@@ -457,30 +397,31 @@ impl ModelStore {
         Ok(self.model_sets()?.iter().any(|&time| time <= now))
     }
 
-    /// Each side the margins trade, the long first.
+    /// Iterates over each side that the margins trade, the long first.
     pub fn sides(&self) -> impl Iterator<Item = &SideLevel> {
         self.sides.iter()
     }
 
-    /// The side `side`, if the margins trade it.
+    /// Returns the side `side`, if the margins trade it.
     #[must_use]
     pub fn side(&self, side: Side) -> Option<&SideLevel> {
         self.sides.iter().find(|level| level.side == side)
     }
 
-    /// The meta level, if the config has a meta section.
+    /// Returns the meta level, if the config has a meta section.
     #[must_use]
     pub const fn meta(&self) -> Option<&MetaLevel> {
         self.meta.as_ref()
     }
 
-    /// The times its model sets are valid from, in order: those whose
-    /// manifest is written; none if nothing was published.
+    /// Returns the times its model sets are valid from, in order.
+    ///
+    /// Only model sets whose manifest is written are listed.
     ///
     /// # Errors
     ///
-    /// Returns an error if its directory cannot be read, or a model set
-    /// with a manifest is named by no time.
+    /// Returns an error if its directory cannot be read, or a model set with a manifest is named
+    /// by no time.
     pub fn model_sets(&self) -> anyhow::Result<Vec<Timestamp>> {
         let entries = match fs::read_dir(&self.directory) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
@@ -509,19 +450,17 @@ impl ModelStore {
         Ok(times)
     }
 
-    /// Publishes `model_set`, valid from its time: its models' files
-    /// written in a directory of this publish, named by the process and the
-    /// publish, and synced to disk with the directories naming them, then
-    /// its manifest, naming that directory, written beside its name, synced
-    /// and renamed onto it, replacing the model set valid from then, if
-    /// any. Returns the model set's directory, named by its time in the
-    /// store's.
+    /// Publishes `model_set` and returns its directory.
+    ///
+    /// It replaces the model set valid from the same time, if any. The manifest is written last
+    /// (see the module docs).
     ///
     /// # Errors
     ///
-    /// Returns an error if a side's model names no side, the model set
-    /// holds a meta model and the strategy has no meta or the reverse, or a
-    /// file or a directory cannot be written or synced.
+    /// Returns an error if:
+    /// - A side's model names no side.
+    /// - The model set holds a meta model and the strategy has no meta, or the reverse.
+    /// - A file or a directory cannot be written or synced.
     pub fn publish(&self, model_set: &StoredModelSet) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(
             model_set.meta.is_some() == self.meta.is_some(),
@@ -557,8 +496,8 @@ impl ModelStore {
         if let Some(meta) = &model_set.meta {
             write(&models.join(file(META)), meta)?;
         }
-        // The models' files, synced each as written, are named on disk
-        // before the manifest listing them is written.
+
+        // The models' files are named on disk before the manifest listing them is written
         sync_directory(&models)
             .and_then(|()| sync_directory(&directory))
             .with_context(|| format!("syncing the model set {}", directory.display()))?;
@@ -575,12 +514,11 @@ impl ModelStore {
         Ok(directory)
     }
 
-    /// The model set valid from `valid_from`, as published: the model of
-    /// each side traded and its meta's, if the strategy has a meta.
+    /// Returns the model set valid from `valid_from`, as published.
     ///
     /// # Errors
     ///
-    /// Returns an error if there is none, or a file of it cannot be read.
+    /// Returns an error if there is none, or one of its files cannot be read.
     pub fn read(&self, valid_from: Timestamp) -> anyhow::Result<StoredModelSet> {
         let manifest = self.manifest(valid_from)?;
         let models = self.model_set(valid_from).join(&manifest.publish);
@@ -602,8 +540,9 @@ impl ModelStore {
         })
     }
 
-    /// The model sets as a strategy swaps them in (`Swap`), each loaded
-    /// and checked as `load` does; none in use yet.
+    /// Returns the model sets as a strategy swaps them in.
+    ///
+    /// Each is loaded and checked as `load` does.
     #[must_use]
     pub fn swap(&self) -> Swap<ModelSet> {
         let models = self.clone();
@@ -614,17 +553,16 @@ impl ModelStore {
         })
     }
 
-    /// The model set valid from `valid_from`, loaded and checked: each
-    /// side's model against the side models' feature names and the
-    /// fingerprint (`StoredModel::load_side`), calibrated as a pair by the
-    /// model set's calibration, and the meta's, if the strategy has a meta,
-    /// against the meta's.
+    /// Loads the model set valid from `valid_from`.
+    ///
+    /// Each model is checked against its level's feature names and the fingerprint.
     ///
     /// # Errors
     ///
-    /// Returns an error if it cannot be read, its meta model included, a
-    /// model fails its checks, naming its level, or the calibration is not
-    /// of as many sides as the pair.
+    /// Returns an error if:
+    /// - The model set cannot be read, including its meta model.
+    /// - A model fails its checks, naming its level.
+    /// - The calibration is for a different number of sides than the pair has.
     fn load(&self, valid_from: Timestamp) -> anyhow::Result<ModelSet> {
         let stored = self.read(valid_from)?;
         let models = stored
@@ -654,7 +592,7 @@ impl ModelStore {
         })
     }
 
-    /// The manifest of the model set valid from `valid_from`.
+    /// Returns the manifest of the model set valid from `valid_from`.
     ///
     /// # Errors
     ///
@@ -663,20 +601,19 @@ impl ModelStore {
         read(&self.model_set(valid_from).join(MANIFEST))
     }
 
-    /// The directory of the model set valid from `valid_from`.
     fn model_set(&self, valid_from: Timestamp) -> PathBuf {
         self.directory.join(valid_from.to_string())
     }
 
-    /// A model set of the store named by no time, so that listing it fails
-    /// while its model sets can still be read.
+    /// A path that names a model set by no time.
+    ///
+    /// Listing fails on it while the model sets still read.
     #[cfg(test)]
     fn unlistable(&self) -> PathBuf {
         self.directory.join("no time")
     }
 
-    /// Makes listing the model sets fail (`model_sets`), until
-    /// `mend_listing`.
+    /// Makes `model_sets` fail until `mend_listing`.
     #[cfg(test)]
     pub(super) fn break_listing(&self) {
         fs::create_dir_all(self.unlistable()).unwrap();
@@ -689,15 +626,16 @@ impl ModelStore {
         fs::remove_dir_all(self.unlistable()).unwrap();
     }
 
-    /// Removes the manifest of the model set valid from `valid_from`, as a
-    /// publish stopped before it leaves the model set.
+    /// Removes a model set's manifest, as a publish that stopped before writing it would leave
+    /// it.
     #[cfg(test)]
     pub(super) fn drop_manifest(&self, valid_from: Timestamp) {
         fs::remove_file(self.model_set(valid_from).join(MANIFEST)).unwrap();
     }
 
-    /// Makes publishing a model set fail (`publish`), listing them still
-    /// finding none: the directory of the model set key a link to nowhere.
+    /// Makes `publish` fail while listing still finds no model sets.
+    ///
+    /// The directory becomes a link to nowhere.
     #[cfg(test)]
     pub(super) fn break_publishing(&self) {
         fs::create_dir_all(self.directory.parent().unwrap()).unwrap();
@@ -712,16 +650,14 @@ impl SideLevel {
         self.side
     }
 
-    /// The expected net R from which the side is traded
-    /// (`ModelConfig::margins`).
+    /// Returns the expected net R from which the side is traded (`ModelConfig::margins`).
     #[must_use]
     pub const fn margin(&self) -> R {
         self.margin
     }
 
-    /// The names of the side model's features, in the order of its rows
-    /// (`features::side_names`): the strategy's, then the target's payoff
-    /// names.
+    /// Returns the feature names of the side model, in the order of its rows
+    /// (`features::side_names`).
     #[must_use]
     pub fn feature_names(&self) -> &[String] {
         &self.feature_names
@@ -734,8 +670,7 @@ impl MetaLevel {
         &self.config
     }
 
-    /// The names of the meta's features, in the order of its rows
-    /// (`features::meta_names`).
+    /// Returns the feature names of the meta, in the order of its rows (`features::meta_names`).
     #[must_use]
     pub fn feature_names(&self) -> &[String] {
         &self.feature_names
@@ -743,13 +678,13 @@ impl MetaLevel {
 }
 
 impl ModelSet {
-    /// Its sides' pair.
+    /// Returns the pair of its sides.
     #[must_use]
     pub const fn pair(&self) -> &Pair {
         &self.pair
     }
 
-    /// Its meta's model, none if the strategy has no meta.
+    /// Returns its meta model, or none if the strategy has no meta.
     #[must_use]
     pub const fn meta(&self) -> Option<&LoadedModel> {
         self.meta.as_ref()
@@ -757,13 +692,14 @@ impl ModelSet {
 }
 
 impl Pair {
-    /// The pair of `models`, each side traded, the long first, and its
-    /// model, calibrated by `calibration`.
+    /// Returns the pair of `models`, calibrated by `calibration`.
+    ///
+    /// The models are each side traded, the long first.
     ///
     /// # Errors
     ///
-    /// Returns an error if `calibration` is not of as many sides: a side
-    /// call of two, none of one.
+    /// Returns an error if `calibration` is for a different number of sides than `models` has. A
+    /// calibration with a side call is for two sides, and one without is for one.
     pub fn new(models: Vec<(Side, SideModel)>, calibration: Ksplit) -> anyhow::Result<Self> {
         anyhow::ensure!(
             calibration.side_call.is_some() == (models.len() == 2),
@@ -781,8 +717,7 @@ impl Pair {
         })
     }
 
-    /// The calibrated expectation of the decision of each side's row `rows`:
-    /// each side's model's prediction on its row, calibrated together.
+    /// Returns the calibrated expectation of the decision, from each side's row in `rows`.
     ///
     /// # Errors
     ///
@@ -796,13 +731,13 @@ impl Pair {
         Ok(self.calibration.apply(&predictions))
     }
 
-    /// The calibration of its sides' predictions.
+    /// Returns the calibration of the predictions of its sides.
     #[must_use]
     pub const fn calibration(&self) -> Ksplit {
         self.calibration
     }
 
-    /// The model of `side`.
+    /// Returns the model of `side`.
     ///
     /// # Panics
     ///
@@ -819,12 +754,11 @@ impl Pair {
     }
 }
 
-/// The name of the file of the model `name`, a side's or the meta's.
 fn file(name: &str) -> String {
     format!("{name}.{EXTENSION}")
 }
 
-/// Writes `value` as JSON to `path`, synced to disk (`synced`).
+/// Writes `value` as JSON to `path` (`synced`).
 ///
 /// # Errors
 ///
@@ -834,8 +768,7 @@ fn write(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
         .with_context(|| format!("writing the model {}", path.display()))
 }
 
-/// Writes `contents` to the file `path` and syncs it to disk, so that a
-/// crash or a power loss after leaves it whole.
+/// Writes `contents` to `path` and syncs it, so that a crash afterwards leaves it whole.
 ///
 /// # Errors
 ///
@@ -846,8 +779,9 @@ fn synced(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// Syncs the entries of the directory `path` to disk, so that a file
-/// created or renamed in it is found there after a crash or a power loss.
+/// Syncs the entries of the directory `path`.
+///
+/// A file created or renamed in it then survives a crash.
 ///
 /// # Errors
 ///
@@ -857,39 +791,32 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
     fs::File::open(path)?.sync_all()
 }
 
-/// Off Unix a directory cannot be opened to sync it: its entries are the
-/// file system's to persist.
+/// Off Unix a directory cannot be opened to sync it.
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The JSON of the file `path`.
+/// Returns the JSON of the file `path`.
 ///
 /// # Errors
 ///
-/// Returns an error if the file is missing, cannot be read, or holds no
-/// `T`, naming it.
+/// Returns an error if the file is missing, cannot be read, or holds no `T`. The error names the
+/// file.
 fn read<T: DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
     let json = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&json).with_context(|| format!("reading {}", path.display()))
 }
 
-/// The directory, under `root`, of the stores of `strategy_id` whose
-/// dataset has `fingerprint` (`dataset::fingerprint`): its id, then the
-/// fingerprint.
 fn dataset_directory(root: &Path, strategy_id: StrategyId, fingerprint: Fingerprint) -> PathBuf {
     root.join(strategy_id.as_str())
         .join(fingerprint.to_string())
 }
 
-/// The directory, under `root`, of the model sets of `strategy_id` whose
-/// dataset has `fingerprint`, its models trained as `config` says, of the
-/// store `version` (`VERSION`): its dataset's, then its model set key, the
-/// side models' training settings (the learner and its settings, the
-/// retrain interval, the window, the calibration and the fewest rows of a
-/// slice), the margins of both sides, the meta's training settings or none
-/// (`meta_settings`), and the version.
+/// Returns the directory under `root` for the model sets of `strategy_id`, `fingerprint`, `config`
+/// and store `version` (`VERSION`).
+///
+/// It is the dataset's directory, then the model set key.
 ///
 /// # Errors
 ///
@@ -913,11 +840,9 @@ fn model_set_directory(
     Ok(dataset_directory(root, strategy_id, fingerprint).join(key.to_string()))
 }
 
-/// The retrain `retrain` as the model set key holds it, its interval or
-/// never: a strategy retrained at another interval, or never, publishes to
-/// and reads from another store, so a weekly-retrained strategy never
-/// trades on a model set a daily-retrained one published between its
-/// retrains, nor a strategy never retrained on a retrained one's.
+/// Returns the retrain as the model set key holds it.
+///
+/// Another interval, or never, is another store.
 fn retrain_setting(retrain: Retrain) -> String {
     match retrain {
         Retrain::Every(every) => format!("retrain every {}", every.as_nanos()),
@@ -925,9 +850,9 @@ fn retrain_setting(retrain: Retrain) -> String {
     }
 }
 
-/// The margins `margins` as the model set key holds them, each in R,
-/// `long 0.5R short none`, so that a store keyed by margins of another
-/// unit, money, is another store.
+/// Returns the margins as the model set key holds them, each in R, as in `long 0.5R short none`.
+///
+/// Margins in another unit are another store.
 fn margins_text(margins: Margins) -> String {
     let margin = |margin: Option<R>| margin.map_or_else(|| "none".to_string(), |r| r.to_string());
     format!(
@@ -937,9 +862,7 @@ fn margins_text(margins: Margins) -> String {
     )
 }
 
-/// The training settings of the meta `meta` as the model set key holds
-/// them: its learner, window, calibration, margin in R and fewest rows of a
-/// slice; `no meta` of none.
+/// Returns the meta's training settings as the model set key holds them, or `no meta` for none.
 ///
 /// # Errors
 ///
@@ -958,22 +881,17 @@ fn meta_settings(meta: Option<&MetaConfig>) -> anyhow::Result<String> {
     ))
 }
 
-/// The model sets of a model store as a strategy swaps them in, decision by
-/// decision in time order: at each, the latest valid then, read as an `M`
-/// and checked against the strategy before use. One failing a check is
-/// refused, with an error naming it and the check, and no model set is in
-/// use until it loads: it is read again at the next decision. A model store
-/// hands it out (`ModelStore::swap`).
+/// The model sets of a model store as a strategy swaps them in, decision by decision in time order
+/// (`ModelStore::swap`).
+///
+/// A model set that fails a check is refused, and none is in use until it loads. It is read again
+/// at the next decision.
 pub struct Swap<M> {
-    /// The model set valid from a time, read and checked.
     read_at: Box<dyn Fn(Timestamp) -> anyhow::Result<M>>,
-    /// The model set in use, and its valid-from.
     current: Option<(Timestamp, M)>,
 }
 
 impl<M> Swap<M> {
-    /// Swaps in the model sets `read_at` reads and checks, by their
-    /// valid-from; none in use yet.
     fn new(read_at: impl Fn(Timestamp) -> anyhow::Result<M> + 'static) -> Self {
         Self {
             read_at: Box::new(read_at),
@@ -981,14 +899,15 @@ impl<M> Swap<M> {
         }
     }
 
-    /// The model set in use at `now`, and its valid-from, among those
-    /// valid from `valid_froms`, the store's list in order: the latest valid
-    /// then, swapped in if not in use yet; none if none is valid yet.
+    /// Returns the model set in use at `now`, and its valid-from.
+    ///
+    /// It is the latest model set valid then among `valid_froms`, in order. It is swapped in if not
+    /// in use yet.
     ///
     /// # Errors
     ///
-    /// Returns an error if the latest fails its checks, naming it and the
-    /// check: it is read again at the next call.
+    /// Returns an error if the latest model set fails its checks. The error names it and the
+    /// check.
     pub fn at(
         &mut self,
         now: Timestamp,
@@ -1004,8 +923,9 @@ impl<M> Swap<M> {
             .is_none_or(|(valid_from, _)| *valid_from != latest)
         {
             self.current = None;
-            // One message of the whole chain: Nautilus logs an error a
-            // strategy's handler returns by its message alone.
+
+            // Nautilus logs an error a strategy's handler returns by its message alone, so the
+            // message carries the whole chain.
             let model_set = (self.read_at)(latest).map_err(|e| {
                 anyhow::anyhow!("no new entry until the model set valid from {latest} loads: {e:#}")
             })?;
@@ -1019,7 +939,6 @@ impl<M> Swap<M> {
     }
 }
 
-/// A swap reads as the model set in use.
 impl<M: Debug> Debug for Swap<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(stringify!(Swap))
@@ -1028,9 +947,9 @@ impl<M: Debug> Debug for Swap<M> {
     }
 }
 
-/// A row of values as JSON: a number each, NaN and the infinities, which
-/// JSON has no number for, as `"NaN"`, `"inf"` and `"-inf"`; and one value
-/// alike (`one`).
+/// A row of values as JSON.
+///
+/// NaN and the infinities are `"NaN"`, `"inf"` and `"-inf"`. `one` is for a single value.
 mod values {
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -1159,8 +1078,6 @@ mod tests {
             .build()
     }
 
-    /// A meta model taking the trades of the side picked from an expected
-    /// net R of 0.55.
     fn meta_config() -> MetaConfig {
         MetaConfig::builder()
             .window(SignedDuration::from_hours(48))
@@ -1171,7 +1088,6 @@ mod tests {
             .build()
     }
 
-    /// `config()`, its trades taken by `meta_config()`.
     fn with_meta() -> ModelConfig {
         ModelConfig {
             meta: Some(meta_config()),
@@ -1179,7 +1095,6 @@ mod tests {
         }
     }
 
-    /// The model of `config`.
     fn blueprint(config: &ModelConfig) -> ModelBlueprint {
         ModelBlueprint::new(
             StrategyId::from(STRATEGY),
@@ -1190,12 +1105,10 @@ mod tests {
         .unwrap()
     }
 
-    /// The models under `root` of `config`.
     fn models(root: &Path, config: &ModelConfig) -> ModelStore {
         blueprint(config).model_store(root).unwrap()
     }
 
-    /// What the strategy reads: the quotes of gold.
     fn requirements() -> DataRequirements {
         DataRequirements {
             bar_types: vec![],
@@ -1208,8 +1121,6 @@ mod tests {
         }
     }
 
-    /// The venue of the dataset runs: a commission rate of 30 per million,
-    /// 10 million USD.
     fn venue() -> DatasetVenue {
         DatasetVenue {
             commission: Commission::Rate(Decimal::new(3, 5)),
@@ -1222,8 +1133,6 @@ mod tests {
         time.parse().unwrap()
     }
 
-    /// The calibration of a pair of both sides, its level line `0.1 + 0.5 C`
-    /// and its side call's slope 1.5.
     const PAIR: Ksplit = Ksplit {
         level: Line {
             alpha: 0.1,
@@ -1232,9 +1141,7 @@ mod tests {
         side_call: Some(1.5),
     };
 
-    /// A fake model of `side`, a meta's of none, on a feature `mid`, probed
-    /// on `rows`, its baseline the mean of its training labels, 1/2; a
-    /// meta's calibrated by the line `0.1 + 0.5 E`.
+    /// A fake model of `side`, or a meta model if `side` is none, probed on `rows`.
     fn model(side: Option<Side>, rows: &[Vec<f64>]) -> StoredModel {
         let set = TrainingSet::new(1, vec![0.2, 0.7], vec![0.0, 1.0]).unwrap();
         let fitted = LearnerConfig::Fake {}.fit(&set).unwrap();
@@ -1263,8 +1170,6 @@ mod tests {
         }
     }
 
-    /// A model set of both sides valid from `valid_from`, each a fake
-    /// probed on `rows`, calibrated by `PAIR`, and a meta's if `meta`.
     fn model_set(valid_from: &str, rows: &[Vec<f64>], meta: bool) -> StoredModelSet {
         StoredModelSet {
             valid_from: at(valid_from),
@@ -1288,9 +1193,6 @@ mod tests {
         assert_eq!(models.read(at(MIDNIGHT)).unwrap(), published);
     }
 
-    /// Every model set of a strategy with a meta holds a meta model, and
-    /// none of one without holds one: a publish of either otherwise is
-    /// refused, naming the meta, and publishes nothing.
     #[rstest]
     #[case::without_a_meta_for_a_strategy_with_one(with_meta(), false)]
     #[case::with_a_meta_for_a_strategy_without_one(config(), true)]
@@ -1331,8 +1233,7 @@ mod tests {
             .map(|probe| (probe.row[0], probe.prediction))
             .unzip();
         assert_eq!(bits(&rows_read), bits(&rows.concat()));
-        // The fake predicts the first feature, the training mean, 1/2,
-        // where it is missing.
+
         assert_eq!(
             bits(&predictions),
             bits(&[0.5, f64::INFINITY, f64::NEG_INFINITY, -0.0])
@@ -1357,9 +1258,6 @@ mod tests {
         );
     }
 
-    /// A model set's manifest is written last: one whose models are
-    /// written and its manifest not, as a crash before it leaves, is not
-    /// listed, so no decision uses it, nor does a model store trade on it.
     #[rstest]
     fn a_model_set_whose_manifest_is_missing_is_not_listed() {
         let dir = tempfile::tempdir().unwrap();
@@ -1379,9 +1277,6 @@ mod tests {
         assert!(models.trades_by(at(noon)).unwrap());
     }
 
-    /// A publish writes its manifest after its models: one stopped by a
-    /// model it cannot publish, the short's naming no side, after the
-    /// long's is written, fails naming it and lists no model set.
     #[rstest]
     fn a_publish_stopped_before_its_last_model_lists_no_model_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -1416,10 +1311,6 @@ mod tests {
         );
     }
 
-    /// Two publishers of a model set at the same time, say a backtest and
-    /// a live node's retrain, each write their own models and manifest
-    /// before the rename: neither fails, and the model set reads back
-    /// whole, its models those of one publish.
     #[rstest]
     fn publishers_at_the_same_time_at_once_each_publish_a_whole_model_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -1439,8 +1330,6 @@ mod tests {
         assert_eq!(models.read(at(MIDNIGHT)).unwrap(), published);
     }
 
-    /// A model set published again at its time replaces the first whole:
-    /// its sides and its meta, the second's probed on other rows.
     #[rstest]
     fn publishing_at_the_same_time_replaces_the_model_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -1456,29 +1345,19 @@ mod tests {
         assert_eq!(models.read(at(MIDNIGHT)).unwrap(), second);
     }
 
-    /// `config` changed by `change`.
     fn changed(config: ModelConfig, change: fn(&mut ModelConfig)) -> ModelConfig {
         let mut config = config;
         change(&mut config);
         config
     }
 
-    /// `with_meta()`, its meta changed by `change`.
     fn meta_changed(change: fn(&mut MetaConfig)) -> ModelConfig {
         let mut config = with_meta();
         change(config.meta.as_mut().unwrap());
         config
     }
 
-    /// A model set published under `with_meta()` is listed there alone:
-    /// any other setting of the sides or of the meta selects another
-    /// model set key. Another learner, retrain interval, window,
-    /// calibration, minimum of rows or target is other training; a model of
-    /// another margin of either side, as one priced at another reference
-    /// stake, the config's risk of the dataset balance, which a dataset's
-    /// rows and a model's payoff features are priced at, would decide
-    /// otherwise; and a meta's other settings, or none, are another meta.
-    /// The strategy trains again rather than reuse them.
+    /// The reference stake is the config's risk applied to the dataset balance.
     #[rstest]
     #[case::another_learner(changed(with_meta(), |config| config.learner = LearnerConfig::Baseline {}))]
     #[case::retrained_weekly(changed(with_meta(), |config| {
@@ -1522,8 +1401,6 @@ mod tests {
         assert!(listed(&other).is_empty());
     }
 
-    /// Bumping the store version is another model set key: no model set
-    /// of another layout is read, and every model is trained again.
     #[rstest]
     fn bumping_the_store_version_keys_another_store() {
         let config = with_meta();
@@ -1542,17 +1419,10 @@ mod tests {
         assert_ne!(at(VERSION), at(VERSION + 1));
     }
 
-    /// The directory of a fixed strategy's model sets under a models root,
-    /// as a literal: its id, its dataset's fingerprint, then its model set
-    /// key, of its sides' training settings, the margins of both sides in R,
-    /// `long 0.5R short 0.5R`, so that no model set published under a
-    /// margin of another unit is listed, its meta's settings, its margin in
-    /// R, `0.55R`, among them, or none, and the store `VERSION`. A change
-    /// that rekeyed every store, leaving the model sets published to it
-    /// behind, fails here. A deliberate rekey, a bump of `VERSION` or of
-    /// `dataset::VERSION`, or a new input to the dataset's fingerprint or to
-    /// the model set key, updates the literals here; a rekey of the dataset
-    /// updates the pinned dataset identifier too
+    /// The directory as a literal: id, dataset fingerprint, then model set key.
+    ///
+    /// A change that rekeys every store, leaving the model sets behind, fails here. A deliberate
+    /// rekey updates the literals and also the pinned dataset identifier
     /// (`dataset::tests::a_fixed_strategys_dataset_keeps_its_identifier`).
     #[rstest]
     #[case::without_a_meta(
@@ -1577,9 +1447,6 @@ mod tests {
         );
     }
 
-    /// A strategy trades on a model set valid by then: a store holding no
-    /// model set, or one valid later alone, has none to trade on yet; with
-    /// a meta section alike, each model set holding a meta model.
     #[rstest]
     #[case::without_a_meta(config(), false)]
     #[case::with_a_meta(with_meta(), true)]
@@ -1599,10 +1466,6 @@ mod tests {
         assert!(!trades(before));
     }
 
-    /// A meta model's every prediction of R is calibrated by its level line,
-    /// and its probes are its predictions before it: the fake predicts the
-    /// first feature, 0.25, calibrated by the line `0.1 + 0.5 E` to an
-    /// expected R of 0.225.
     #[rstest]
     fn a_loaded_meta_model_predicts_through_its_calibration() {
         let stored = model(None, &[vec![0.75]]);
@@ -1616,9 +1479,6 @@ mod tests {
         assert!((prediction - 0.225).abs() < 1e-12, "{prediction}");
     }
 
-    /// A side's model has no calibration of its own, its pair's being the
-    /// model set's, and a meta's its own level line: each loaded as the
-    /// other's level is refused.
     #[rstest]
     fn a_model_is_refused_at_the_other_levels_load() {
         let side = model(Some(Side::Long), &[]);
@@ -1637,12 +1497,6 @@ mod tests {
         assert!(meta_as_side.contains("side"), "{meta_as_side}");
     }
 
-    /// The fake long and short of a model set valid from midnight, on a
-    /// feature `mid`, then the entry cost of the time-only target, each
-    /// predicting its row's mid: the long's 0.4 and the short's 0.1 are C =
-    /// 0.25 and D = 0.3, calibrated by the model set's line `0.1 + 0.5 C`
-    /// and slope 1.5 to C' = 0.225 and D' = 0.45, the long expecting 0.45R
-    /// and the short nought.
     #[rstest]
     fn a_model_sets_pair_expects_each_sides_r_through_its_calibration() {
         let dir = tempfile::tempdir().unwrap();
@@ -1679,9 +1533,6 @@ mod tests {
         }
     }
 
-    /// A side's manifest of an earlier store version: its pair's
-    /// calibration in its manifest, naming the pair, beside `current`'s
-    /// fields.
     fn pair_calibrated_side(mut current: serde_json::Value) -> serde_json::Value {
         let manifest = current["manifest"].as_object_mut().unwrap();
         manifest.insert(
@@ -1695,8 +1546,6 @@ mod tests {
         current
     }
 
-    /// A side's manifest of an earlier store version: Platt's calibration
-    /// and a payoff record, beside `current`'s fields.
     fn platt_side(mut current: serde_json::Value) -> serde_json::Value {
         let manifest = current["manifest"].as_object_mut().unwrap();
         manifest.insert(
@@ -1710,8 +1559,6 @@ mod tests {
         current
     }
 
-    /// The manifests of earlier store versions are no models of this one:
-    /// a model set holding one is refused as it is read, naming its file.
     #[rstest]
     #[case::of_a_pair_calibrated_side(pair_calibrated_side)]
     #[case::of_a_platt_side(platt_side)]

@@ -1,11 +1,10 @@
-//! IC Markets' gold carries IC's margin (`common::ic`: 1 / 30, the demo
-//! account's 1:30), and the backtest runs unleveraged, so a position locks
-//! what IC locks. On 1,000 USD a recorder buys 5 oz on the 10:00 bar, at
-//! 4006.10 (20,030.50 USD, twenty times the balance): IC's margin, 667.68
-//! USD, fits, and the order fills. It buys 5 more on the 11:00 bar, at
-//! 4012.15: their margin, 668.69 USD, exceeds what the first left free
-//! (1,000 less its margin and its commission of 0.60), and Nautilus' risk
-//! engine denies it. One node per thread, so one run per test.
+//! IC Markets' gold carries IC's margin from `common::ic`: 1 / 30, the demo account's 1:30. The
+//! backtest runs unleveraged.
+//!
+//! A recorder starts with 1,000 USD. It buys 5 oz on the 10:00 bar at 4006.10. The margin of 667.68
+//! USD fits, so the order fills. It buys 5 on the 11:00 bar at 4012.15, which needs 668.69 USD.
+//! Only 331.72 is free (1,000 less margin and 0.60 commission), so Nautilus' risk engine denies
+//! the order.
 
 use nautilus_model::{
     data::BarType,

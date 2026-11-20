@@ -1,38 +1,30 @@
-//! The model port: a learner fits a model on a training set or loads a
-//! saved one, and the model predicts and saves.
+//! The model port. A learner fits a model on a training set or loads a saved one, and the model
+//! predicts and saves.
 //!
-//! Each model library is an adapter behind the port, chosen by a variant of
-//! `LearnerConfig`, the learner section of a strategy's TOML (`kind`
-//! names the adapter, its settings sit beside it). Adding a library is one
+//! Each model library is an adapter behind the port. A variant of `LearnerConfig` chooses it, in
+//! the learner section of a strategy's TOML (`kind` names the adapter). Adding a library takes one
 //! adapter module and one variant. The adapters:
 //!
-//! - `lightgbm`: LightGBM's gradient-boosted trees under L2 regression, its
-//!   settings defaulting to ones regularized for a weak signal.
-//! - `perpetual`: PerpetualBooster's gradient-boosted trees on squared loss,
-//!   stopped by a budget instead of tuned settings; its settings need a
-//!   memory limit. It fits far slower than LightGBM and saves models many
-//!   times larger.
-//! - `baseline`: the training mean, the benchmark every score is read
-//!   against.
-//! - `fake`: the row's first feature, for tests that need to steer the
-//!   prediction; test support, behind the crate's `test-support` feature.
+//! - `lightgbm`: gradient-boosted trees under L2 regression, with defaults regularized for a weak
+//!   signal.
+//! - `perpetual`: gradient-boosted trees on squared loss, stopped by a budget. It needs a memory
+//!   limit, fits far slower than LightGBM and saves models many times larger.
+//! - `baseline`: the training mean, the benchmark every score is read against.
+//! - `fake`: the row's first feature, to steer predictions in tests. It is behind the
+//!   `test-support` feature.
 //!
-//! A training set's labels are real values, fitted on their squared error:
-//! the model predicts a row's expected label. A model predicts from a row of
-//! features in the order it was fitted on. NaN means missing in every
-//! adapter, with no setup. The port, not the adapter, checks the width of a
-//! row before predicting, so a row of the wrong width is an error, never a
-//! panic of a library nor a prediction from shifted columns.
+//! Labels are real values fitted on squared error. The model predicts a row's expected label from
+//! features in the order it was fitted on. NaN means missing in every adapter. The port, not the
+//! adapter, checks a row's width before predicting. A wrong width is therefore an error, never a
+//! library panic nor a prediction from shifted columns.
 //!
-//! A saved model is the adapter's own text, loaded back by the same learner
-//! config. Some libraries do not save the same bytes twice, so whether a
-//! reload is faithful is told by its predictions, never by the saved bytes.
-//! Fitting is deterministic: the same set and the same settings, seed
-//! included, give the same predictions to the bit.
+//! A saved model is the adapter's own text, loaded back by the same learner config. Some libraries
+//! do not save the same bytes twice, so the predictions tell whether a reload is faithful. Fitting
+//! is deterministic: the same set and settings, seed included, give the same predictions to the
+//! bit.
 //!
-//! `Model` holds the adapter behind a hand-written `Debug`, which is all a
-//! strategy needs to hold it. It is neither `Send` nor `Sync` (LightGBM's
-//! booster is neither), so a model stays on the thread that loaded it.
+//! `Model` is neither `Send` nor `Sync` (LightGBM's booster is neither), so a model stays on the
+//! thread that loaded it.
 
 mod baseline;
 mod lightgbm;
@@ -47,8 +39,9 @@ pub use lightgbm::LightGbmConfig;
 pub use perpetual::PerpetualConfig;
 use serde::{Deserialize, Serialize};
 
-/// The learner of a strategy's model, loaded from TOML, such as
-/// `learner = { kind = "lightgbm", num_iterations = 200 }`.
+/// The learner of a strategy's model, loaded from TOML.
+///
+/// An example is `learner = { kind = "lightgbm", num_iterations = 200 }`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LearnerConfig {
@@ -57,10 +50,11 @@ pub enum LearnerConfig {
     LightGbm(LightGbmConfig),
     /// PerpetualBooster, with its settings.
     Perpetual(PerpetualConfig),
-    /// The mean of the training labels, whatever the row.
+    /// The mean of the training labels for every row.
     Baseline {},
-    /// The row's first feature; the mean of the training labels where it is
-    /// missing. Test support, behind the crate's `test-support` feature.
+    /// The row's first feature, or the mean of the training labels where it is missing.
+    ///
+    /// Test support, behind the crate's `test-support` feature.
     #[cfg(feature = "test-support")]
     Fake {},
 }
@@ -70,8 +64,8 @@ impl LearnerConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the settings are ones the library would not
-    /// honor (see `LightGbmConfig::validate`).
+    /// Returns an error if the settings are ones the library would not honor (see
+    /// `LightGbmConfig::validate`).
     pub fn validate(&self) -> anyhow::Result<()> {
         match self {
             Self::LightGbm(config) => config.validate(),
@@ -85,8 +79,7 @@ impl LearnerConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the library fails to fit, such as on settings
-    /// it refuses.
+    /// Returns an error if the library fails to fit, such as on settings it refuses.
     pub fn fit(&self, set: &TrainingSet) -> anyhow::Result<Model> {
         Ok(Model::new(self.kind(), self.learner().fit(set)?))
     }
@@ -121,8 +114,9 @@ impl LearnerConfig {
     }
 }
 
-/// The rows a model is fitted on: features row by row, all of one width,
-/// and each row's label, a real value.
+/// The rows a model is fitted on.
+///
+/// It holds features row by row, all of one width, and each row's label.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingSet {
     width: usize,
@@ -131,16 +125,18 @@ pub struct TrainingSet {
 }
 
 impl TrainingSet {
-    /// A set of `labels.len()` rows of `width` features each, `features`
-    /// holding them row after row; NaN marks a missing feature. The labels
-    /// are fitted on their squared error: the model predicts a row's
-    /// expected label.
+    /// Returns a set of `labels.len()` rows of `width` features each.
+    ///
+    /// `features` holds the rows one after another. NaN marks a missing feature. The labels are
+    /// fitted on their squared error.
     ///
     /// # Errors
     ///
-    /// Returns an error if there is no row, `width` is zero, `features`
-    /// does not hold `width` features for each label, or a label is not a
-    /// finite number.
+    /// Returns an error if:
+    /// - There is no row.
+    /// - `width` is zero.
+    /// - `features` does not hold `width` features for each label.
+    /// - A label is not a finite number.
     pub fn new(width: usize, features: Vec<f64>, labels: Vec<f64>) -> anyhow::Result<Self> {
         if let Some(label) = labels.iter().find(|label| !label.is_finite()) {
             anyhow::bail!("a label of {label} is not a finite number");
@@ -160,38 +156,36 @@ impl TrainingSet {
         })
     }
 
-    /// The number of features of each row.
+    /// Returns the number of features in each row.
     #[must_use]
     pub const fn width(&self) -> usize {
         self.width
     }
 
-    /// Each row's features, in order.
     fn rows(&self) -> impl Iterator<Item = &[f64]> {
         self.features.chunks_exact(self.width)
     }
 
-    /// Each row's label, in order.
     #[must_use]
     fn labels(&self) -> &[f64] {
         &self.labels
     }
 
-    /// The mean of the labels.
     #[must_use]
     fn mean(&self) -> f64 {
         self.labels.iter().sum::<f64>() / self.labels.len() as f64
     }
 }
 
-/// A model as its adapter saved it: text, loaded back by the learner config
-/// that fitted it.
+/// A model as its adapter saved it.
+///
+/// It is text, loaded back by the learner config that fitted it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SavedModel(String);
 
 impl SavedModel {
-    /// The saved text.
+    /// Returns the saved text.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -215,19 +209,19 @@ impl Model {
         Self { kind, predictor }
     }
 
-    /// The number of features of a row.
+    /// Returns the number of features in a row.
     #[must_use]
     pub fn width(&self) -> usize {
         self.predictor.width()
     }
 
-    /// The prediction on `row`, from its features in the order the model
-    /// was fitted on, the row's expected label; NaN marks a missing feature.
+    /// Returns the prediction on `row`, which is its expected label.
+    ///
+    /// NaN marks a missing feature.
     ///
     /// # Errors
     ///
-    /// Returns an error if `row` is not of the model's width, or the
-    /// library fails to predict.
+    /// Returns an error if `row` does not have the model's width, or the library fails to predict.
     pub fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
         anyhow::ensure!(
             row.len() == self.width(),
@@ -239,7 +233,7 @@ impl Model {
         self.predictor.predict(row)
     }
 
-    /// The model as text, for the learner config that fitted it to load.
+    /// Returns the model as text, for the learner config that fitted it to load.
     ///
     /// # Errors
     ///
@@ -258,15 +252,15 @@ impl Debug for Model {
     }
 }
 
-/// The port's learner side, one implementation per adapter.
 trait Learner {
     fn fit(&self, set: &TrainingSet) -> anyhow::Result<Box<dyn Predictor>>;
 
     fn load(&self, saved: &SavedModel) -> anyhow::Result<Box<dyn Predictor>>;
 }
 
-/// The port's model side, one implementation per adapter. `predict` is
-/// given rows of `width` features only.
+/// The model side of the port, one per adapter.
+///
+/// `predict` is given rows of `width` features only.
 trait Predictor {
     fn width(&self) -> usize;
 
@@ -284,11 +278,10 @@ mod tests {
     const ROWS: usize = 600;
     const WIDTH: usize = 4;
 
-    /// Draws uniform on [0, 1] from a fixed seed.
     fn uniform() -> impl FnMut() -> f64 {
         let mut state = 0x5eed_u64;
         move || {
-            // splitmix64: a known, dependency-free generator.
+            // splitmix64: a known, dependency-free generator
             state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
             let mut z = state;
             z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -297,7 +290,6 @@ mod tests {
         }
     }
 
-    /// `row`, its third feature missing if `missing`.
     fn with_missing(row: &[f64], missing: bool) -> impl Iterator<Item = f64> + '_ {
         row.iter().enumerate().map(move |(column, &value)| {
             if column == 2 && missing {
@@ -308,11 +300,6 @@ mod tests {
         })
     }
 
-    /// A fixed synthetic set: `ROWS` rows of `WIDTH` features drawn from a
-    /// seeded generator, labeled by a noisy line on the first two
-    /// features, from about -3 to 2.5. The third feature is missing in about
-    /// a tenth of the rows, and a missing third feature raises the label by
-    /// 1.5.
     fn synthetic() -> TrainingSet {
         let mut uniform = uniform();
         let mut features = Vec::with_capacity(ROWS * WIDTH);
@@ -327,8 +314,6 @@ mod tests {
         TrainingSet::new(WIDTH, features, labels).unwrap()
     }
 
-    /// Rows to predict on, the training set's own and some outside it,
-    /// with missing features among them.
     fn probes(set: &TrainingSet) -> Vec<Vec<f64>> {
         let mut rows: Vec<Vec<f64>> = set.rows().take(50).map(<[f64]>::to_vec).collect();
         rows.push(vec![f64::NAN; set.width()]);
@@ -343,7 +328,6 @@ mod tests {
             .collect()
     }
 
-    /// A learner of each adapter but that of `learner`.
     fn others(learner: &LearnerConfig) -> Vec<LearnerConfig> {
         [
             LearnerConfig::LightGbm(LightGbmConfig::builder().build()),
@@ -356,9 +340,9 @@ mod tests {
         .collect()
     }
 
-    /// The contract every adapter meets, run by `contract!` against one
-    /// learner config, `$name` the name its refusal of another's saved
-    /// model gives the adapter's models.
+    /// The contract every adapter meets.
+    ///
+    /// `$name` names the adapter's models in the refusal of another adapter's saved model.
     macro_rules! contract {
         ($adapter:ident, $config:expr, $name:literal) => {
             mod $adapter {
@@ -423,8 +407,7 @@ mod tests {
         };
     }
 
-    // Drawing features makes the fit depend on the seed, so the contract
-    // pins LightGBM's draws too.
+    // Drawing features makes the fit depend on the seed, so the contract pins LightGBM's draws too
     contract!(
         lightgbm,
         LearnerConfig::LightGbm(LightGbmConfig::builder().feature_fraction(0.5).build()),
@@ -438,8 +421,6 @@ mod tests {
     contract!(baseline, LearnerConfig::Baseline {}, "baseline");
     contract!(fake, LearnerConfig::Fake {}, "fake");
 
-    /// A set is refused naming its fault: no row, no feature, features not
-    /// whole rows of its width, or a label not a finite number.
     #[rstest]
     #[case::without_rows(2, vec![], vec![], &["needs a row"])]
     #[case::without_features(0, vec![], vec![1.0], &["needs a feature"])]
@@ -471,10 +452,6 @@ mod tests {
         Ok(toml::from_str::<Section>(toml)?.learner)
     }
 
-    /// A learner loads with the settings its section sets, each setting
-    /// unset at its default: LightGBM's 100 rounds at a rate of 0.05, 7
-    /// leaves of 200 rows at least, every feature and a seed of 1;
-    /// PerpetualBooster's budget of 0.5, no limit of rounds and a seed of 1.
     #[rstest]
     #[case::lightgbm_with_defaults(
         r#"learner = { kind = "lightgbm", feature_fraction = 0.5 }"#,
@@ -514,9 +491,6 @@ mod tests {
         assert_eq!(learner(toml).unwrap(), expected);
     }
 
-    /// A learner is rejected at load naming the key at fault: a setting
-    /// required and missing, a kind no adapter has, a setting misspelt, or
-    /// a setting of a learner that has none.
     #[rstest]
     #[case::perpetual_without_a_memory_limit(
         r#"learner = { kind = "perpetual", budget = 1.0 }"#,

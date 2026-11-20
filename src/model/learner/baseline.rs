@@ -1,4 +1,4 @@
-//! The baseline: the mean of the training labels, whatever the row.
+//! The baseline predicts the mean of the training labels for every row.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,7 @@ impl Learner for Baseline {
     }
 }
 
-/// The model and its saved text, JSON named by the adapter, so that no
-/// other adapter loads it.
+/// Saved as JSON with the adapter's tag, so no other adapter loads it.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Saved {
@@ -52,7 +51,6 @@ mod tests {
 
     use crate::model::learner::{LearnerConfig, TrainingSet};
 
-    /// (2.5 - 1.0 + 3.5 + 2.0) / 4 = 1.75.
     #[rstest]
     #[case::a_row_fitted_on([0.0, 1.0])]
     #[case::a_row_far_from_those_fitted_on([100.0, -5.0])]
