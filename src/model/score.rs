@@ -67,10 +67,6 @@ mod tests {
         assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
     }
 
-    /// Squared errors 0.01 + 0.36 + 0.49 + 0.36 = 1.22, the baseline's 0.0625 + 0.5625 + 0.5625 +
-    /// 0.4225 = 1.61: skill 1 - 1.22 / 1.61. Errors -0.1, 0.6, -0.7, 0.6: mean 0.1. Means 0.25 and
-    /// 0.35: covariance 0.0525 + 0.0975 + 0.0425 + 0.0275 = 0.22 over variance 0.05, slope 4.4. The
-    /// top decile is one row, expected 0.4, realized 1: gap 0.6.
     #[rstest]
     fn expectations_score_their_skill_mean_error_slope_and_top_decile_gap() {
         let rows = [
@@ -89,8 +85,6 @@ mod tests {
         close(score.top_decile_gap, 0.6);
     }
 
-    /// The top decile of 11 rows is 2, expected 10 and 9, realized 12 and 10: gap (2 + 1) / 2 =
-    /// 1.5.
     #[rstest]
     fn the_top_decile_is_the_tenth_of_the_rows_expected_the_most_rounded_up() {
         let rows: Vec<(f64, f64, f64)> = (0..11)
@@ -107,7 +101,6 @@ mod tests {
         close(ExpectedScore::of(&rows).top_decile_gap, 1.5);
     }
 
-    /// Mean error and gap are 1 - 0.5 = 0.5, the top decile of 2 rows being 1.
     #[rstest]
     fn no_baseline_error_has_no_skill_and_no_spread_has_no_slope() {
         let score = ExpectedScore::of(&[(0.5, 1.0, 1.0), (0.5, 1.0, 1.0)]);

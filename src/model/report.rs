@@ -206,8 +206,6 @@ mod tests {
         "2026-10-23T00:00:00Z".parse().unwrap()
     }
 
-    /// 2.5 s of wall time, 1.25 s of user CPU time, 0.125 s of system CPU time and 150 MiB at the
-    /// peak.
     fn usage() -> Usage {
         Usage {
             wall: Duration::from_millis(2500),
@@ -269,8 +267,6 @@ mod tests {
         );
     }
 
-    /// A failure at the out-of-fold pair reports its reason and the figures reached, with no sides
-    /// or meta.
     #[rstest]
     fn a_failed_train_reports_its_reason_and_the_figures_it_reached() {
         let trained = Trained {
@@ -296,8 +292,7 @@ mod tests {
         );
     }
 
-    /// When already published, no day or row is read. Off Unix, there is no CPU time or peak
-    /// memory.
+    /// Off Unix, there is no CPU time or peak memory.
     #[rstest]
     fn a_train_of_a_model_set_already_published_reports_its_times_alone() {
         let trained = Trained::from(Outcome::AlreadyPublished);
