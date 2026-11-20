@@ -1,4 +1,6 @@
-//! The factory the node creates the data client by, named `LSE`.
+//! The factory the node uses to create the data client.
+//!
+//! The factory is named `LSE`.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -26,13 +28,16 @@ impl LseDataClientFactory {
 }
 
 impl DataClientFactory for LseDataClientFactory {
-    /// Creates the client named `name`, reading each key not in `config` from its variable.
+    /// Creates the client named `name`.
+    ///
+    /// Reads each key missing from `config` from its environment variable.
     ///
     /// # Errors
     ///
-    /// Returns an error if `config` is not an `LseDataClientConfig`, if no key is given or in
-    /// `LSE_API_KEY`, `LSE_CME_API_KEY` or `LSE_NASDAQ_API_KEY`, or if an HTTP client cannot be
-    /// built.
+    /// Returns an error if:
+    /// - `config` is not an `LseDataClientConfig`.
+    /// - No key is given in `config`, `LSE_API_KEY`, `LSE_CME_API_KEY` or `LSE_NASDAQ_API_KEY`.
+    /// - An HTTP client cannot be built.
     fn create(
         &self,
         name: &str,

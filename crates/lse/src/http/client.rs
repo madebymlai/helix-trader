@@ -1,7 +1,7 @@
-//! The HTTP client of LSE's REST API, on Nautilus' `HttpClient`.
+//! The HTTP client for LSE's REST API, built on Nautilus' `HttpClient`.
 //!
-//! Every call is a GET with the key in the `X-API-Key` header, kept within the plan's calls a
-//! minute. A transient refusal is waited out as long as its `Retry-After` says.
+//! Every call is a GET with the key in the `X-API-Key` header. Calls stay within the plan's calls
+//! per minute. After a transient refusal, the client waits as long as `Retry-After` says.
 
 use std::{
     collections::HashMap,
@@ -45,11 +45,11 @@ const RATE_KEY: &str = "lse";
 const TIMEOUT_SECS: u64 = 300;
 const BODY_EXCERPT: usize = 200;
 
-/// LSE's REST API on one key.
+/// A client for LSE's REST API, using one key.
 pub struct LseHttpClient {
     base_url: String,
     client: HttpClient,
-    /// A key has one download at a time (LSE's docs, "One download at a time").
+    /// Allows one download at a time per key (LSE's docs, "One download at a time").
     downloads: tokio::sync::Mutex<()>,
     retries: RetryManager<LseHttpError>,
 }
@@ -63,10 +63,10 @@ impl Debug for LseHttpClient {
 }
 
 impl LseHttpClient {
-    /// Creates the client of the API at `base_url` on `credential`'s key.
+    /// Creates a client for the API at `base_url`, using the key in `credential`.
     ///
-    /// Calls are spaced `60 / calls_per_minute` s apart, so that no minute holds more however the
-    /// plan counts it. Redirects are refused, so that the key goes nowhere else.
+    /// Calls are spaced `60 / calls_per_minute` s apart, so no minute holds more calls however the
+    /// plan counts them. Redirects are refused, so the key goes nowhere else.
     ///
     /// # Errors
     ///
@@ -109,21 +109,24 @@ impl LseHttpClient {
         })
     }
 
-    /// Returns the file of the export `query` selects, or `None` if LSE holds no row of it (see
+    /// Returns the file of the export `query`, or `None` if LSE holds no rows for it (see
     /// `LseRefusal::is_no_rows`).
     ///
-    /// A transient failure is retried after the `Retry-After`, or a backoff.
+    /// Retries a transient failure after the `Retry-After`, or after a backoff. Errors are returned
+    /// only after those retries.
     ///
     /// # Errors
     ///
-    /// Returns an error if LSE refuses the export, answers as its docs do not say, sends a whole
-    /// file whose SHA-256 is not LSE's, or cannot be reached, after the retries a transient failure
-    /// gets.
+    /// Returns an error if:
+    /// - LSE refuses the export.
+    /// - LSE answers in a way its docs do not describe.
+    /// - LSE sends a whole file whose SHA-256 differs from the one LSE gave.
+    /// - LSE cannot be reached.
     pub async fn export(&self, query: &ExportQuery) -> Result<Option<Bytes>, LseHttpError> {
         self.download(EXPORT_PATH, query).await
     }
 
-    /// Returns the file of the reference export `query` selects, as `export` does.
+    /// Returns the file of the reference export `query`, as `export` does.
     ///
     /// # Errors
     ///
@@ -135,7 +138,7 @@ impl LseHttpClient {
         self.download(REFERENCE_EXPORT_PATH, query).await
     }
 
-    /// Returns the file of the macro export `query` selects, as `export` does.
+    /// Returns the file of the macro export `query`, as `export` does.
     ///
     /// # Errors
     ///
@@ -155,7 +158,7 @@ impl LseHttpClient {
             .map(|catalogue| catalogue.datasets)
     }
 
-    /// Returns the listings LSE's catalogue holds of `query`'s symbol.
+    /// Returns the listings in LSE's catalogue for the symbol in `query`.
     ///
     /// # Errors
     ///
@@ -166,7 +169,7 @@ impl LseHttpClient {
             .map(|page| page.pairs)
     }
 
-    /// Returns the splits and dividends of `query`'s instrument.
+    /// Returns the splits and dividends of the instrument in `query`.
     ///
     /// # Errors
     ///
@@ -231,7 +234,7 @@ impl LseHttpClient {
             answer => answer?,
         };
 
-        // LSE's file comes in a 200 beside its SHA-256 (LSE's docs, "Files")
+        // LSE sends a file as a 200 with its SHA-256 (LSE's docs, "Files")
         let (200, Some(expected)) = (
             response.status.as_u16(),
             response.headers.get(CHECKSUM_HEADER),

@@ -1,5 +1,7 @@
-//! LSE's JSON answers: refusals, catalogue listings, the reference catalogue and an instrument's
-//! factors, and when the rows of each reference collection are known (`Stamp`).
+//! LSE's JSON answers.
+//!
+//! The module models refusals, catalogue listings, the reference catalogue and an instrument's
+//! factors. It also says when the rows of each reference collection are known (`Stamp`).
 
 use std::fmt::Display;
 
@@ -18,15 +20,21 @@ const DATE_NOT_TRADING: &str = "date-not-trading";
 const DATA_UNAVAILABLE: &str = "data-unavailable";
 const EMPTY_SELECTION: &str = "No stored data for this selection";
 
-/// Past the 2,500,000 rows one export may read, or uncountable in time: shorter dates may serve.
+/// The export selects more than the 2,500,000 rows one export may read, or too many to count in
+/// time.
+///
+/// Shorter dates may serve.
 const TOO_WIDE: &str = "export-too-wide";
 
-/// The 429s that waiting a minute does not lift: the free plan's weekly allowance and rows a day,
-/// resetting on Monday and at 00:00 UTC.
+/// The 429s that waiting a minute does not lift.
+///
+/// They are the free plan's weekly allowance, which resets on Monday, and its rows per day, which
+/// reset at 00:00 UTC.
 const QUOTAS: &[&str] = &["allowance-exhausted", "rows-exhausted"];
 
-/// LSE's answer to a call it does not serve (LSE's docs, "Answers and refusals"). Its codes are an
-/// open set.
+/// LSE's answer to a call it does not serve (LSE's docs, "Answers and refusals").
+///
+/// The set of codes is open.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LseRefusal {
     pub code: String,
@@ -42,11 +50,11 @@ pub struct LsePairs {
     pub pairs: Vec<LsePair>,
 }
 
-/// A listing in LSE's catalogue, its number naming one instrument.
+/// A listing in LSE's catalogue, whose number names one instrument.
 ///
-/// A CME contract's name carries its month (`GC futures 2026-12`), or is its symbol alone (`GCZ4`)
-/// for some delisted contracts (LSE's docs, "The market: cme", and `test_data/`). Some delisted
-/// listings have none (`BRKD` of `nasdaq`).
+/// The name of a CME contract carries its month (`GC futures 2026-12`). For some delisted
+/// contracts, the name is the symbol alone (`GCZ4`) (LSE's docs, "The market: cme", and
+/// `test_data/`). Some delisted listings have no name (`BRKD` of `nasdaq`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LsePair {
     pub pair_id: u64,
@@ -85,7 +93,9 @@ pub struct ReferenceCatalogue {
     pub datasets: Vec<ReferenceCollection>,
 }
 
-/// A reference collection (`last`: `2026-11-11` or `2026-11-12 23:29:00`).
+/// A reference collection.
+///
+/// `last` is a date (`2026-11-11`) or a time (`2026-11-12 23:29:00`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ReferenceCollection {
     pub dataset: String,
@@ -94,7 +104,9 @@ pub struct ReferenceCollection {
 }
 
 impl ReferenceCollection {
-    /// Returns the catalogue's `last` in UTC, a date at its start, or `None` if it gives none.
+    /// Returns the catalogue's `last` in UTC, or `None` if it gives none.
+    ///
+    /// A date becomes the start of that day.
     ///
     /// # Errors
     ///
@@ -116,8 +128,10 @@ impl ReferenceCollection {
     }
 }
 
-/// An instrument's splits and dividends (`/v3/factors`), the fields as LSE sends them: a split's
-/// day is its `date`, a dividend's its `ex_date`. A market of no dividends (`futures`) has none.
+/// An instrument's splits and dividends (`/v3/factors`).
+///
+/// The fields are as LSE sends them. A split's day is its `date`, and a dividend's day is its
+/// `ex_date`. A market with no dividends (`futures`) has none.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LseFactors {
     #[serde(default)]
@@ -126,8 +140,9 @@ pub struct LseFactors {
     pub dividends: Option<LseDividends>,
 }
 
-/// Dividends, newest first, in `unit` (`USD`, or `GBX` pence). LSE gives the 500 newest, and
-/// `truncated` says if there are more.
+/// Dividends, newest first, in `unit` (`USD`, or `GBX` pence).
+///
+/// LSE gives the 500 newest. `truncated` says whether there are more.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LseDividends {
     pub rows: Vec<Map<String, Value>>,
@@ -139,40 +154,43 @@ pub struct LseDividends {
 
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
-/// When a row is known, which is its `ts_event` and `ts_init`.
+/// The time a row is known, used as its `ts_event` and `ts_init`.
 ///
 /// The key is the column LSE's export selects rows by (`time_column`). A row is never stamped
-/// before its values are all known.
+/// before all its values are known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stamp {
-    /// At 00:00 UTC of the day after its key, a date.
+    /// The key is a date. The row is known at 00:00 UTC on the next day.
     DateEnd,
-    /// At a time of the day of its key, a date, in a time zone.
+    /// The key is a date. The row is known at a time on that day, in a time zone.
     ///
-    /// An insider trade is at 22:00 New York time of its filing's day, the latest a Form 3, 4 or 5
-    /// is filed that day (Regulation S-T, Rule 13(a)(4)).
+    /// An insider trade is known at 22:00 New York time on its filing day, the latest a Form 3, 4
+    /// or 5 is filed that day (Regulation S-T, Rule 13(a)(4)).
     DateAt(Time, &'static str),
-    /// At the close of its interval of the width, its key being the open.
+    /// The key is the open of an interval of the given width. The row is known at the close.
     Close(SignedDuration),
-    /// At its key, a time.
+    /// The key is a time. The row is known at the key.
     Key,
-    /// At the time in the column, its key a date.
+    /// The key is a date. The row is known at the time in the column.
     At(&'static str),
-    /// COT's: at the end of its `release_date`, or at its `created_at`, about an hour after the
-    /// release, where LSE gives no release date (rows since 28 April 2026). Its key is the
-    /// report's Tuesday.
+    /// For COT. The key is the report's Tuesday.
+    ///
+    /// The row is known at the end of its `release_date`. Where LSE gives no release date (rows
+    /// since 28 April 2026), it is known at its `created_at`, about an hour after the release.
     Release,
-    /// Financial reports': a statement (`income`, `balance`, `cashflow`) at its `accepted_date`, a
-    /// derived row (`metrics`, `ratios`, `growth`) at the latest of its period's (`FY`, `Q3`). Its
-    /// key is the end of its fiscal period.
+    /// For financial reports. The key is the end of the fiscal period.
+    ///
+    /// - A statement (`income`, `balance`, `cashflow`) is known at its `accepted_date`.
+    /// - A derived row (`metrics`, `ratios`, `growth`) is known at the latest of its period's
+    ///   (`FY`, `Q3`).
     Filing,
 }
 
-// Closed, so that a collection LSE adds is refused until classified, rather than stamped at its
-// key's end, which would reach a reader early for a row published after its key. The 21 of
-// `/v3/reference` (`test_data/README.md`).
+// Closed, so a collection LSE adds is refused until classified, rather than stamped at its key's
+// end, which would reach a reader early for a row published after its key, and holding the 21
+// collections of `/v3/reference` (`test_data/README.md`).
 const COLLECTIONS: &[(&str, Stamp)] = &[
-    // LSE stamps an interval at its open: a 4-hour row of 20:00 closes at the day's close
+    // LSE stamps an interval at its open, so a 4-hour row of 20:00 closes at the day's close
     ("bond_yields", Stamp::DateEnd),
     (
         "bond_yields_minute",
@@ -206,18 +224,18 @@ const COLLECTIONS: &[(&str, Stamp)] = &[
     ("corporate_bonds", Stamp::DateEnd),
     ("credit_indices", Stamp::DateEnd),
     ("fx_derivatives", Stamp::DateEnd),
-    // Keyed by the filing's day, a Form 3, 4 or 5 taking it up to 22:00 Eastern time
+    // Keyed by the filing's day, as a Form 3, 4 or 5 may be filed up to 22:00 Eastern time
     (
         "insider_trades",
         Stamp::DateAt(civil::time(22, 0, 0, 0), "America/New_York"),
     ),
-    // Keyed by the report date, LSE giving no time, its figures restated (split-adjusted)
+    // Keyed by the report date, as LSE gives no time, and its figures are restated (split-adjusted)
     ("earnings_calendar", Stamp::DateEnd),
     ("dividends", Stamp::DateEnd),
     ("stock_splits", Stamp::DateEnd),
     ("company_profiles", Stamp::Key),
     ("stock_fundamentals", Stamp::Key),
-    // Keyed by the day of a release, which `datetime` times, in UTC
+    // Keyed by the day of a release, and `datetime` gives its time, in UTC
     ("economic_calendar", Stamp::At("datetime")),
     ("cot", Stamp::Release),
     ("financial_reports", Stamp::Filing),
@@ -301,7 +319,9 @@ impl LseRefusal {
         self.code == TOO_WIDE
     }
 
-    /// Returns whether the refusal is a quota of the free plan, refusing every export until reset.
+    /// Returns whether the refusal is a free-plan quota.
+    ///
+    /// Such a quota refuses every export until it resets.
     pub fn is_quota(&self) -> bool {
         QUOTAS.contains(&self.code.as_str())
     }
