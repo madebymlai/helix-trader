@@ -1,5 +1,8 @@
-//! What the HTTP and data clients share: LSE's names and addresses (`consts`), the keys by product
-//! (`credential`) and the symbol boundary (`symbol`).
+//! Holds what the HTTP and data clients share.
+//!
+//! - `consts`: LSE's names and addresses.
+//! - `credential`: the keys, one per product.
+//! - `symbol`: the symbol boundary.
 
 pub mod consts;
 pub mod credential;

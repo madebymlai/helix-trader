@@ -1,22 +1,23 @@
-//! The symbol boundary: an instrument id and what it stands for at LSE (`LseInstrument`), converted
-//! both ways here only.
+//! Converts between an instrument id and what it stands for at LSE (`LseInstrument`). The
+//! conversion happens here only, in both directions.
 //!
 //! The instruments are:
-//! - An `LSEDGE` id and a derived series' LSE market and symbol (`LseSymbol`), with its socket and
-//!   name there.
-//! - A `GLBX` id and the CME contract LSE lists (`CmeContract`).
-//! - An `XNAS` id and the ticker LSE lists and streams a Nasdaq TotalView stock by (`NasdaqStock`).
-//! - An `OPRA` id and the OSI symbol LSE lists a US option under (`OpraContract`), with its name on
-//!   data-ws and its chain's root.
+//! - An `LSEDGE` id, and the LSE market and symbol of a derived series (`LseSymbol`), with the
+//!   series' socket and name there.
+//! - A `GLBX` id, and the CME contract LSE lists (`CmeContract`).
+//! - An `XNAS` id, and the ticker LSE lists a Nasdaq TotalView stock under and streams it by
+//!   (`NasdaqStock`).
+//! - An `OPRA` id, and the OSI symbol LSE lists a US option under (`OpraContract`), with the
+//!   option's name on data-ws and its chain's root.
 //!
-//! A derived series is one instrument under `LSEDGE`, its LSE market the suffix of its symbol, as
-//! Bybit's product suffix (Nautilus' adapter guide, "Symbols and instrument identity"): LSE lists
-//! one symbol in several markets (GOLD in five). LSE's market names have underscores and no
+//! A derived series is one instrument under `LSEDGE`. Its LSE market is the suffix of its symbol,
+//! as with Bybit's product suffix (Nautilus' adapter guide, "Symbols and instrument identity"). LSE
+//! lists one symbol in several markets (GOLD in five). LSE's market names have underscores and no
 //! hyphens, so the last hyphen splits symbol from market: `GOLD-FUTURES.LSEDGE` is GOLD in
-//! `futures`. The id writes the market in capitals, LSE's folder name in lower case.
+//! `futures`. The id writes the market in capitals. LSE's folder name is in lower case.
 //!
-//! An exchange market's listings take Databento's ids, so none is an `LSEDGE` instrument: `GLBX`
-//! for CME Globex, `XNAS` for Nasdaq stocks, `OPRA` for US options.
+//! Listings of an exchange market take Databento's ids, so none is an `LSEDGE` instrument. The
+//! venues are `GLBX` for CME Globex, `XNAS` for Nasdaq stocks and `OPRA` for US options.
 use std::fmt::Display;
 
 use anyhow::Context;
@@ -40,8 +41,9 @@ use super::{
 };
 use crate::http::models::LsePair;
 
-/// A series of an LSE derived market: its market, LSE's folder name, and its symbol as `/v3/pairs`
-/// lists it.
+/// A series of an LSE derived market.
+///
+/// It holds the market, which is LSE's folder name, and the symbol as `/v3/pairs` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LseSymbol {
     market: String,
@@ -53,8 +55,11 @@ impl LseSymbol {
     ///
     /// # Errors
     ///
-    /// Returns an error if the symbol is empty, or the market is empty, holds anything but
-    /// lower-case letters, digits and underscores, or is an exchange market's.
+    /// Returns an error if:
+    /// - The symbol is empty.
+    /// - The market is empty.
+    /// - The market holds anything but lower-case letters, digits and underscores.
+    /// - The market is an exchange market's.
     pub fn new(market: &str, symbol: &str) -> anyhow::Result<Self> {
         anyhow::ensure!(!symbol.is_empty(), "an LSE symbol is not empty");
         anyhow::ensure!(
@@ -78,8 +83,9 @@ impl LseSymbol {
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is not on `LSEDGE`, or its symbol is not an LSE symbol, a hyphen
-    /// and its market in capitals.
+    /// Returns an error if:
+    /// - `id` is not on `LSEDGE`.
+    /// - Its symbol is not an LSE symbol followed by a hyphen and the market in capitals.
     pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
         if id.venue != *LSEDGE_VENUE {
             anyhow::bail!("{id} is not an LSEDGE instrument");
@@ -97,7 +103,7 @@ impl LseSymbol {
             .map_err(|e| anyhow::anyhow!("{id} is not an LSEDGE series: {e}"))
     }
 
-    /// Returns LSE's name of the market, its folder.
+    /// Returns the market's name at LSE, which is its folder.
     #[must_use]
     pub fn market(&self) -> &str {
         &self.market
@@ -109,8 +115,8 @@ impl LseSymbol {
         &self.symbol
     }
 
-    /// Returns whether the series is an index, which has no trades: its ticks are values of no
-    /// size.
+    /// Returns whether the series is an index. An index has no trades, and its ticks are values of
+    /// no size.
     pub fn is_index(&self) -> bool {
         self.market == "indices"
     }
@@ -118,16 +124,24 @@ impl LseSymbol {
     /// Returns the socket the series streams on and its name there (LSE's socket documentation,
     /// "Symbols on each socket").
     ///
-    /// On data-ws, a US stock, commodity or forex pair keeps its symbol, a pair's underscore a
-    /// slash (`EUR/USD`), a future is suffixed `.F` (`GOLD.F`) and an index `.IDX` (`SPX.IDX`). On
-    /// london-ws, a UK stock is suffixed `.L` and a crypto pair is in dollars (`BTCUSDT` is
-    /// `BTC/USD`). On tsx-ws, a Canadian stock is suffixed `.TO`. A UK or Canadian stock's dots are
-    /// hyphens there, a trailing one dropped (`BT.A` is `BT-A.L`, `BP.` is `BP.L`).
+    /// On data-ws:
+    /// - A US stock, commodity or forex pair keeps its symbol. A pair's underscore becomes a slash
+    ///   (`EUR/USD`).
+    /// - A future is suffixed `.F` (`GOLD.F`).
+    /// - An index is suffixed `.IDX` (`SPX.IDX`).
+    ///
+    /// On london-ws:
+    /// - A UK stock is suffixed `.L`.
+    /// - A crypto pair is in dollars (`BTCUSDT` is `BTC/USD`).
+    ///
+    /// On tsx-ws, a Canadian stock is suffixed `.TO`. A UK or Canadian stock's dots become hyphens
+    /// there, and a trailing dot is dropped (`BT.A` is `BT-A.L`, `BP.` is `BP.L`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the market streams on no socket, or if a crypto symbol is not quoted in
-    /// Tether.
+    /// Returns an error if:
+    /// - The market streams on no socket.
+    /// - A crypto symbol is not quoted in Tether.
     pub fn stream(&self) -> anyhow::Result<(LseSocket, String)> {
         let symbol = &self.symbol;
         Ok(match self.market.as_str() {
@@ -157,12 +171,14 @@ impl Display for LseSymbol {
     }
 }
 
-// A UK or Canadian stock's symbol before its socket's suffix: dots as hyphens, trailing one dropped
+// A UK or Canadian stock's symbol before its socket suffix, with dots as hyphens and none trailing
 fn hyphenated(symbol: &str) -> String {
     symbol.strip_suffix('.').unwrap_or(symbol).replace('.', "-")
 }
 
-/// What an instrument stands for at LSE, by venue, with the key that asks for it:
+/// What an instrument stands for at LSE.
+///
+/// Each venue asks by its own identifier and key:
 /// - `LSEDGE`: a derived series, by symbol, with the LSE key.
 /// - `GLBX`: a CME Globex contract, by listing, with the CME key.
 /// - `XNAS`: a Nasdaq TotalView stock, by ticker, with the Nasdaq key.
@@ -176,8 +192,10 @@ pub enum LseInstrument {
 }
 
 impl LseInstrument {
-    /// Returns what `id` stands for, a CME contract's two-digit year resolved against
-    /// `reference_year` (see `CmeContract::from_instrument_id`).
+    /// Returns what `id` stands for.
+    ///
+    /// A CME contract's two-digit year is resolved against `reference_year` (see
+    /// `CmeContract::from_instrument_id`).
     ///
     /// # Errors
     ///
@@ -209,15 +227,16 @@ impl LseInstrument {
     }
 }
 
-/// A CME Globex contract under `GLBX`, in Nautilus' default two-digit year
-/// (`FuturesYearDigits::Two`), as Databento's client writes it: `ESZ26.GLBX` is the E-mini S&P 500
-/// of December 2026.
+/// A CME Globex contract under `GLBX`.
 ///
-/// CME names a contract by product, month letter and the last digit of its year, two for natural
-/// gas and, from 2030, crude oil, so a name recurs after ten years: LSE lists ESZ6 of 2016 and of
-/// 2026 under one name, and only a listing's `pair_id` names it (LSE's docs, "The market: cme").
-/// So a contract is asked by its listing's number, found among those of its exchange names
-/// (`listing`).
+/// Its id uses Nautilus' default two-digit year (`FuturesYearDigits::Two`), as Databento's client
+/// writes it. `ESZ26.GLBX` is the E-mini S&P 500 of December 2026.
+///
+/// CME names a contract by product, month letter and the last digit of its year. Natural gas and,
+/// from 2030, crude oil use two digits. A name therefore recurs after ten years: LSE lists ESZ6 of
+/// 2016 and of 2026 under one name, and only a listing's `pair_id` names it (LSE's docs, "The
+/// market: cme"). So a contract is asked by its listing's number, found among the listings of its
+/// exchange names (`listing`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CmeContract {
     root: String,
@@ -227,13 +246,17 @@ pub struct CmeContract {
 }
 
 impl CmeContract {
-    /// Returns the contract `id` stands for, its two-digit year resolved against `reference_year`
-    /// as `resolve_futures_year` does: within 30 years before it and 69 after.
+    /// Returns the contract `id` stands for.
+    ///
+    /// The two-digit year is resolved against `reference_year` as `resolve_futures_year` does:
+    /// within 30 years before it and 69 after.
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is not on `GLBX`, or not a futures symbol with a two-digit year, a
-    /// one-digit year standing for contracts ten years apart.
+    /// Returns an error if:
+    /// - `id` is not on `GLBX`.
+    /// - `id` is not a futures symbol with a two-digit year. A one-digit year would stand for
+    ///   contracts ten years apart.
     pub fn from_instrument_id(id: InstrumentId, reference_year: i16) -> anyhow::Result<Self> {
         anyhow::ensure!(
             id.venue == Venue::GLBX(),
@@ -271,9 +294,11 @@ impl CmeContract {
         InstrumentId::new(Symbol::from(self.name(2).as_str()), Venue::GLBX())
     }
 
-    /// Returns the exchange names the contract may go by at LSE, in lookup order: its year's last
-    /// digit, then its last two, as natural gas and, from 2030, crude oil (LSE's docs, "The market:
-    /// cme": "read a name from the catalogue instead of building it").
+    /// Returns the exchange names the contract may go by at LSE, in lookup order.
+    ///
+    /// The order is the year's last digit, then its last two digits, as natural gas and, from 2030,
+    /// crude oil use (LSE's docs, "The market: cme": "read a name from the catalogue instead of
+    /// building it").
     #[must_use]
     pub fn exchange_names(&self) -> [String; 2] {
         [self.name(1), self.name(2)]
@@ -289,15 +314,17 @@ impl CmeContract {
         .expect("a root, a month code and a year of 1 to 9999 make a name")
     }
 
-    /// Returns the contract's listing among `pairs`, LSE's listings of one of its exchange names.
+    /// Returns the contract's listing among `pairs`, which are LSE's listings of one of its
+    /// exchange names.
     ///
-    /// The listing is the one whose name says the contract's month (`GC futures 2026-12`) or, for a
-    /// listing named by its symbol alone, the one delisted from three months before the month to
-    /// its end (crude oil of January expires in December, gold of December in December).
+    /// The listing is the one whose name says the contract's month (`GC futures 2026-12`). For a
+    /// listing named by its symbol alone, it is the one delisted from three months before the month
+    /// to the month's end (crude oil of January expires in December, gold of December in
+    /// December).
     ///
     /// # Errors
     ///
-    /// Returns an error if more than one listing is the contract's, naming them.
+    /// Returns an error if more than one listing is the contract's. The error names them.
     pub fn listing<'a>(&self, pairs: &'a [LsePair]) -> anyhow::Result<Option<&'a LsePair>> {
         let listings: Vec<&LsePair> = pairs
             .iter()
@@ -334,21 +361,21 @@ fn named_month(name: &str) -> Option<Date> {
     Date::strptime("%Y-%m-%d", format!("{month}-01")).ok()
 }
 
-/// A Nasdaq TotalView stock under `XNAS`, Databento's venue for `XNAS.ITCH`: `NVDA.XNAS` is
-/// NVIDIA's common stock.
+/// A Nasdaq TotalView stock under `XNAS`, which is Databento's venue for `XNAS.ITCH`.
+/// `NVDA.XNAS` is NVIDIA's common stock.
 ///
-/// Its symbol is the ticker with the class after a space (`BRK B.XNAS`), as Nautilus' Databento
-/// client writes it, since a dot separates symbol and venue (`share_class_space`, on by default).
-/// Its ticker at LSE is Nasdaq's, the class after a dot, as in Databento's raw `XNAS.ITCH` symbols
-/// ("CMS vs. Nasdaq symbology") and LSE's `nasdaq` listing (`BRK.B`, captured), and the stock is
-/// asked and streamed by it.
+/// Its symbol is the ticker with the class after a space (`BRK B.XNAS`). Nautilus' Databento
+/// client writes it so, because a dot separates symbol and venue (`share_class_space`, on by
+/// default). Its ticker at LSE is Nasdaq's, with the class after a dot, as in Databento's raw
+/// `XNAS.ITCH` symbols ("CMS vs. Nasdaq symbology") and LSE's `nasdaq` listing (`BRK.B`,
+/// captured). The stock is asked and streamed by that ticker.
 ///
 /// LSE takes a renamed ticker for the days it was listed (LSE's docs, "Symbols"). Its catalogue
-/// lists some tickers more than once, a delisted listing beside a later one (`BRKH`, captured),
-/// as Databento's ids name a ticker, not a listing.
+/// lists some tickers more than once, with a delisted listing beside a later one (`BRKH`,
+/// captured). Databento's ids name a ticker, not a listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NasdaqStock {
-    /// Nasdaq's ticker, a class after a dot, as LSE lists it.
+    /// Nasdaq's ticker, with the class after a dot, as LSE lists it.
     ticker: String,
 }
 
@@ -357,9 +384,10 @@ impl NasdaqStock {
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is not on `XNAS`, or if its symbol is not a ticker in capitals with
-    /// its class after one space: lower case, which LSE would match, or a class after a dot would
-    /// make a second id of one stock.
+    /// Returns an error if:
+    /// - `id` is not on `XNAS`.
+    /// - Its symbol is not a ticker in capitals with its class after one space. Lower case, which
+    ///   LSE would match, or a class after a dot would make a second id of one stock.
     pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
         anyhow::ensure!(
             id.venue == *XNAS_VENUE,
@@ -402,14 +430,14 @@ impl Display for NasdaqStock {
     }
 }
 
-/// A US option contract under `OPRA`, Databento's venue for `OPRA.PILLAR`, its symbol the OSI
-/// symbol as Databento writes it.
+/// A US option contract under `OPRA`, which is Databento's venue for `OPRA.PILLAR`. Its symbol is
+/// the OSI symbol as Databento writes it.
 ///
-/// The OSI symbol is the root padded to six characters, the expiry's YYMMDD, C or P, and the strike
-/// in thousandths to eight digits (Databento's OPRA specification, "Symbology"). `AAPL
-/// 261120C00355000.OPRA` is AAPL's 355 call of 20 November 2026. LSE lists the contract under that
-/// symbol in `us_options` (LSE's docs, "Symbols": "The OCC symbol exactly as listed: capitals, the
-/// root padded to six characters"), so it is asked by it.
+/// The OSI symbol is the root padded to six characters, then the expiry as YYMMDD, then C or P,
+/// then the strike in thousandths to eight digits (Databento's OPRA specification, "Symbology").
+/// `AAPL 261120C00355000.OPRA` is AAPL's 355 call of 20 November 2026. LSE lists the contract under
+/// that symbol in `us_options` (LSE's docs, "Symbols": "The OCC symbol exactly as listed:
+/// capitals, the root padded to six characters"), so the contract is asked by it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpraContract {
     osi: String,
@@ -420,8 +448,10 @@ impl OpraContract {
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is not on `OPRA`, or if its symbol is not a padded OSI symbol with
-    /// its root in capitals, as `osi_option_symbol` writes one, not unpadded as LSE's sockets do.
+    /// Returns an error if:
+    /// - `id` is not on `OPRA`.
+    /// - Its symbol is not a padded OSI symbol with its root in capitals, as `osi_option_symbol`
+    ///   writes one, rather than unpadded as LSE's sockets write it.
     pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
         anyhow::ensure!(
             id.venue == *OPRA_VENUE,
@@ -450,15 +480,17 @@ impl OpraContract {
         &self.osi
     }
 
-    /// Returns data-ws and the contract's name there, its OSI symbol without spaces (LSE's socket
-    /// documentation, "Option chains": `AAPL261120C00100000`), in its root's chain (`root`).
+    /// Returns data-ws and the contract's name there, in its root's chain (`root`).
+    ///
+    /// The name is the OSI symbol without spaces (LSE's socket documentation, "Option chains":
+    /// `AAPL261120C00100000`).
     #[must_use]
     pub fn stream(&self) -> (LseSocket, String) {
         (LseSocket::Data, self.osi.replace(' ', ""))
     }
 
-    /// Returns the unpadded root of the OSI symbol, the underlying whose chain LSE streams the
-    /// contract in (`subscribe_options`).
+    /// Returns the unpadded root of the OSI symbol. It is the underlying whose chain LSE streams
+    /// the contract in (`subscribe_options`).
     #[must_use]
     pub fn root(&self) -> &str {
         self.osi[..6].trim_end_matches(' ')
@@ -471,8 +503,8 @@ impl Display for OpraContract {
     }
 }
 
-// Whether `symbol` is what `osi_option_symbol` writes from its parts: the root in capitals, the
-// expiry's two-digit year of this century, C or P, and the strike in thousandths.
+// Whether `symbol` is what `osi_option_symbol` writes from its parts, which are the root in
+// capitals, the expiry's two-digit year in this century, C or P, and the strike in thousandths.
 fn is_osi(symbol: &str) -> bool {
     let written = (|| {
         let (root, expiry) = (symbol.get(..6)?, symbol.get(6..12)?);
@@ -557,9 +589,9 @@ mod tests {
         assert!(err.contains(id), "{err}");
     }
 
-    /// LSE's socket documentation ("Symbols on each socket"), as each socket acknowledged and
-    /// ticked them on 13 November 2026, data-ws listing its futures so once authenticated
-    /// (`test_data/ws_authenticated_futures.json`).
+    /// These follow LSE's socket documentation ("Symbols on each socket"), as each socket
+    /// acknowledged and ticked them on 13 November 2026. data-ws listed its futures that way once
+    /// authenticated (`test_data/ws_authenticated_futures.json`).
     #[rstest]
     #[case("GOLD-FUTURES.LSEDGE", "data-ws", "GOLD.F")]
     #[case("US10Y-FUTURES.LSEDGE", "data-ws", "US10Y.F")]
@@ -585,7 +617,7 @@ mod tests {
         assert_eq!((streamed_on.name(), streamed.as_str()), (socket, name));
     }
 
-    /// london-ws spells a pair in dollars, so a quote but Tether has no name there.
+    /// london-ws spells a pair in dollars, so a pair with any quote but Tether has no name there.
     #[rstest]
     fn a_crypto_series_not_quoted_in_tether_is_refused_naming_it() {
         let err = of("BTCEUR-CRYPTO.LSEDGE")
@@ -673,7 +705,7 @@ mod tests {
         assert!(err.contains(id), "{err}");
     }
 
-    /// LSE's ESZ6 names 2016 (4000658762) and 2026 (4000000001), its NGZ26 natural gas of 2026
+    /// LSE's ESZ6 names 2016 (4000658762) and 2026 (4000000001). Its NGZ26 is natural gas of 2026
     /// (4000000128).
     #[rstest]
     #[case::esz6_of_2026("ESZ26.GLBX", PAIRS_ESZ6, 4_000_000_001)]
@@ -687,8 +719,8 @@ mod tests {
         assert_eq!(listed(id, answer), Some(pair_id));
     }
 
-    /// GCZ4 of 2014 is named `GC futures 2014-12`, GCZ4 of 2024 by its symbol alone, delisted on 27
-    /// December 2024.
+    /// GCZ4 of 2014 is named `GC futures 2014-12`. GCZ4 of 2024 is named by its symbol alone, and
+    /// was delisted on 27 December 2024.
     #[rstest]
     #[case::named_by_its_month("GCZ14.GLBX", 4_000_992_242)]
     #[case::named_by_its_symbol("GCZ24.GLBX", 4_000_402_563)]
@@ -710,7 +742,7 @@ mod tests {
         assert_eq!(listing.map(|pair| pair.pair_id), Some(4_000_402_563));
     }
 
-    /// LSE's NGZ6 is 2016 alone, 2026 being NGZ26, GCZ4 is 2014 and 2024, not 2034, and LSE lists
+    /// LSE's NGZ6 is 2016 alone, because 2026 is NGZ26. GCZ4 is 2014 and 2024, not 2034. LSE lists
     /// no ESZ26.
     #[rstest]
     #[case::ngz6_of_2016_alone("NGZ26.GLBX", PAIRS_NGZ6)]
@@ -786,8 +818,8 @@ mod tests {
         assert_eq!(contract.root(), root);
     }
 
-    /// Databento's raw `XNAS.ITCH` symbols are Nasdaq's tickers, a class after a dot ("CMS vs.
-    /// Nasdaq symbology": `BRK.B`), as in LSE's `nasdaq` catalogue, captured (`answer`).
+    /// Databento's raw `XNAS.ITCH` symbols are Nasdaq's tickers, with the class after a dot ("CMS
+    /// vs. Nasdaq symbology": `BRK.B`). So is LSE's `nasdaq` catalogue, captured (`answer`).
     #[rstest]
     #[case::common_stock("NVDA.XNAS", "NVDA", PAIRS_NASDAQ_NVDA)]
     #[case::class_b("BRK B.XNAS", "BRK.B", PAIRS_NASDAQ_BRK)]

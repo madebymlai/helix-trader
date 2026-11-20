@@ -1,4 +1,4 @@
-//! The config of the data client.
+//! Defines the config of the data client.
 
 use std::{any::Any, num::NonZeroU32};
 
@@ -14,51 +14,58 @@ use crate::common::{
     credential::LseProduct,
 };
 
-/// The config of the data client.
+/// Configures the data client.
 ///
 /// Its `Debug` shows no key.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct LseDataClientConfig {
-    /// The LSE key, else `LSE_API_KEY`, read when the client is created.
+    /// The LSE key. If `None`, the client reads `LSE_API_KEY` when it is created.
     pub api_key: Option<SecretString>,
-    /// The CME Globex key, else `LSE_CME_API_KEY`, read when the client is created.
+    /// The CME Globex key. If `None`, the client reads `LSE_CME_API_KEY` when it is created.
     pub cme_api_key: Option<SecretString>,
-    /// The Nasdaq TotalView key, else `LSE_NASDAQ_API_KEY`, read when the client is created.
+    /// The Nasdaq TotalView key. If `None`, the client reads `LSE_NASDAQ_API_KEY` when it is
+    /// created.
     pub nasdaq_api_key: Option<SecretString>,
-    /// The REST API, else LSE's own.
+    /// The REST API address. `None` uses LSE's own.
     pub base_url_http: Option<String>,
-    /// The data-ws address, else LSE's own.
+    /// The data-ws address. `None` uses LSE's own.
     pub base_url_ws_data: Option<String>,
-    /// The london-ws address, else LSE's own.
+    /// The london-ws address. `None` uses LSE's own.
     pub base_url_ws_london: Option<String>,
-    /// The tsx-ws address, else LSE's own.
+    /// The tsx-ws address. `None` uses LSE's own.
     pub base_url_ws_tsx: Option<String>,
-    /// The CME Globex stream address, else LSE's own.
+    /// The CME Globex stream address. `None` uses LSE's own.
     pub base_url_ws_cme: Option<String>,
-    /// The Nasdaq TotalView stream address, else LSE's own.
+    /// The Nasdaq TotalView stream address. `None` uses LSE's own.
     pub base_url_ws_nasdaq: Option<String>,
-    /// The calls a minute allowed on the LSE key: the free plan's, the fewest of any plan (LSE's
-    /// `/v3/usage`, `calls_per_minute`).
+    /// The calls per minute allowed on the LSE key.
+    ///
+    /// The default is the free plan's limit, the fewest of any plan (LSE's `/v3/usage`,
+    /// `calls_per_minute`).
     #[builder(default = FREE_CALLS_PER_MINUTE)]
     pub calls_per_minute: NonZeroU32,
-    /// The calls a minute allowed on the CME key: CME Group Lite's, the fewest of its plans.
+    /// The calls per minute allowed on the CME key.
     ///
-    /// Each key counts its own calls.
+    /// The default is CME Group Lite's limit, the fewest of its plans. Each key counts its own
+    /// calls.
     #[builder(default = EXCHANGE_LITE_CALLS_PER_MINUTE)]
     pub cme_calls_per_minute: NonZeroU32,
-    /// The calls a minute allowed on the Nasdaq key: Nasdaq Lite's, the fewest of its plans.
+    /// The calls per minute allowed on the Nasdaq key.
+    ///
+    /// The default is Nasdaq Lite's limit, the fewest of its plans.
     #[builder(default = EXCHANGE_LITE_CALLS_PER_MINUTE)]
     pub nasdaq_calls_per_minute: NonZeroU32,
-    /// The instruments streamed on a live node, empty on a fill's node, which opens no socket.
+    /// The instruments streamed on a live node. Empty on a fill's node, which opens no socket.
     ///
-    /// `connect` opens the socket of each one's market, authenticates the key, and fails unless
-    /// each socket lists its instruments and allows them all on its one connection. An `OPRA`
-    /// contract's underlying's chain takes one subscription, whose every contract is streamed,
-    /// named here or not.
+    /// `connect` opens the socket for each instrument's market and authenticates the key. It fails
+    /// unless each socket lists its instruments and allows them all on its one connection.
     ///
-    /// `GLBX` contracts are subscribed on LSE's CME stream with the CME key, and `XNAS` stocks on
-    /// its Nasdaq TotalView stream with the Nasdaq key. `connect` fails with LSE's refusal of a
-    /// subscription.
+    /// An `OPRA` contract subscribes to its underlying's whole chain with one subscription. Every
+    /// contract in the chain is streamed, whether named here or not.
+    ///
+    /// `GLBX` contracts are subscribed on LSE's CME stream with the CME key. `XNAS` stocks are
+    /// subscribed on LSE's Nasdaq TotalView stream with the Nasdaq key. If LSE refuses a
+    /// subscription, `connect` fails with that refusal.
     #[builder(default)]
     pub stream_ids: Vec<InstrumentId>,
 }
@@ -70,7 +77,7 @@ impl Default for LseDataClientConfig {
 }
 
 impl LseDataClientConfig {
-    /// Returns the REST API address: the override, or LSE's own.
+    /// Returns the REST API address: the override if set, else LSE's own.
     #[must_use]
     pub fn http_base_url(&self) -> &str {
         self.base_url_http.as_deref().unwrap_or(LSE_HTTP_BASE_URL)
