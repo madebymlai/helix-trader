@@ -1,5 +1,5 @@
-//! The kinds of strategy the command line runs, and the visitor each strategy is handed to by its
-//! kind (`StrategyName::visit`).
+//! The kinds of strategy the command line runs, and the visitor each is handed to by its kind
+//! (`StrategyName::visit`).
 
 use std::{fmt::Debug, rc::Rc};
 
@@ -11,8 +11,7 @@ use crate::model::ModelStrategy;
 
 /// What the command line does with a strategy, by its kind.
 ///
-/// Each method is generic over the strategy. The strategy's folder calls the method of its kind
-/// with its type, in its `visit`:
+/// A strategy's folder calls the method of its kind with its type, in its `visit`:
 ///
 /// ```ignore
 /// pub fn visit<V: Visitor>(visitor: V) -> V::Output {
@@ -29,27 +28,26 @@ pub trait Visitor {
     fn model<S: ModelStrategy>(self) -> Self::Output;
 }
 
-/// A strategy trading on no model, built of its config as a backtest or a live node runs it.
+/// A strategy trading on no model, built of its config.
 pub trait PlainStrategy:
     Strategy + StrategyNative + DataActorNative + Component + Debug + Sized + 'static
 {
-    /// Its own part of its config.
     type Params: Part;
 
-    /// The strategy as a backtest runs it, requesting no warmup.
+    /// Creates the strategy as a backtest runs it, requesting no warmup.
     ///
     /// # Errors
     ///
     /// Returns an error if the config is invalid.
     fn backtest(config: StandardConfig<Self::Params>) -> anyhow::Result<Self>;
 
-    /// The strategy as a live node runs it, requesting its warmup at start.
+    /// Creates the strategy as a live node runs it, requesting its warmup at start.
     ///
     /// # Errors
     ///
     /// Returns an error if the config is invalid.
     fn live(config: StandardConfig<Self::Params>) -> anyhow::Result<Self>;
 
-    /// Its warmup, which a live node sizes its cache from.
+    /// Returns the warmup, which a live node sizes its cache from.
     fn warmup(&self) -> Rc<Warmup>;
 }
