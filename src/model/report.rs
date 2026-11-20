@@ -1,18 +1,21 @@
-//! The report of the binary's `train`: run figures, not performance figures, one block per retrain
-//! time, so that training and evaluation stay apart and an operator can size a train against its
-//! interval. A train's out-of-sample evidence is a backtest's (`walk`).
+//! Reports the binary's `train`, with one block per retrain time. The figures describe the run,
+//! not performance, so training and evaluation stay apart and an operator can size a train against
+//! its interval. The out-of-sample evidence for a train is a backtest (`walk`).
 //!
-//! A block names the train's time and its outcome, the model set published (its directory) or the
-//! failure and its reason, then the figures reached, failing or not (`train::Reached`): the wall
-//! time, CPU time (user and system) and peak memory of the train process, the dataset days read,
-//! built or cached, and the rows of the fit and calibration slices of the sides, the out-of-fold
-//! pair and the meta, beside each level's `min_rows`.
+//! A block names the train's time and its outcome. The outcome is the model set published (its
+//! directory) or the failure and its reason. The block then lists the figures reached, whether
+//! the train failed or not (`train::Reached`):
+//! - The wall time, CPU time (user and system) and peak memory of the train process.
+//! - The dataset days read, built or cached.
+//! - The rows in the fit and calibration slices of the sides, the out-of-fold pair and the meta,
+//!   beside each level's `min_rows`.
 //!
-//! The process figures are read once at a train's end (`Meter::lap`): wall time from Nautilus'
-//! real-time clock, CPU time and peak memory from `getrusage` (`RUSAGE_SELF`), which Nautilus does
-//! not read, on Unix alone; off Unix they are reported as not measured. A block's CPU and wall
-//! times are those since the previous block's end, the first's since the process started. The peak
-//! memory is the process's high-water mark, which no block resets.
+//! The process figures are read once at the end of a train (`Meter::lap`). Wall time comes from
+//! Nautilus' real-time clock. CPU time and peak memory come from `getrusage` (`RUSAGE_SELF`),
+//! which Nautilus does not read. They exist on Unix alone, and off Unix they are reported as not
+//! measured. A block's CPU and wall times run from the end of the previous block, or for the first
+//! block from the process start. The peak memory is the process's high-water mark, which no block
+//! resets.
 
 use std::{fmt::Display, time::Duration};
 
@@ -24,14 +27,14 @@ use super::train::{Reached, Slices, Trained};
 /// Bytes in a mebibyte, the unit the peak memory is reported in.
 const MIB: f64 = 1024.0 * 1024.0;
 
-/// The process figures of a train process's trains, one lap per train.
+/// The process figures for the trains of one train process, with one lap per train.
 #[derive(Debug)]
 pub struct Meter {
     since: UnixNanos,
     cpu: Cpu,
 }
 
-/// What a train took: its wall time, and the process's CPU time over it and its peak memory, where
+/// What a train took: its wall time, plus the process's CPU time over it and its peak memory where
 /// `getrusage` reads them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
@@ -45,14 +48,14 @@ struct Cpu {
     system: Duration,
 }
 
-/// The CPU time of a train and the peak memory of its process, in bytes.
+/// The CPU time of a train and the peak memory of the process, in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Process {
     cpu: Cpu,
     peak_memory: u64,
 }
 
-/// The block of the train at `at`, which did `trained` and took `usage`.
+/// The block for the train at `at`, which did `trained` and took `usage`.
 #[derive(Debug)]
 pub struct Report<'a> {
     pub at: Timestamp,
@@ -61,7 +64,7 @@ pub struct Report<'a> {
 }
 
 impl Meter {
-    /// A meter from now, its first lap's CPU time from the process's start.
+    /// Starts a meter now. The first lap's CPU time counts from the process start.
     #[must_use]
     pub fn start() -> Self {
         Self {
@@ -70,7 +73,8 @@ impl Meter {
         }
     }
 
-    /// What the process took since the last lap, or the meter's start, and its peak memory by now.
+    /// Returns what the process took since the last lap, or the meter's start, and its peak memory
+    /// so far.
     pub fn lap(&mut self) -> Usage {
         let now = get_atomic_clock_realtime().get_time_ns();
         let wall = Duration::from_nanos(now.as_u64().saturating_sub(self.since.as_u64()));
@@ -90,8 +94,9 @@ impl Meter {
     }
 }
 
-/// The process's CPU time and peak memory in bytes, from `getrusage`, whose `ru_maxrss` is in KiB
-/// on Linux and the BSDs, in bytes on macOS.
+/// Returns the process's CPU time and peak memory in bytes, from `getrusage`.
+///
+/// `ru_maxrss` is in KiB on Linux and the BSDs, and in bytes on macOS.
 #[cfg(unix)]
 #[allow(unsafe_code)]
 fn resources() -> Option<(Cpu, u64)> {
@@ -201,7 +206,8 @@ mod tests {
         "2026-10-23T00:00:00Z".parse().unwrap()
     }
 
-    /// 2.5 s of wall time, 1.25 s of user and 0.125 s of system CPU time, 150 MiB at the peak.
+    /// 2.5 s of wall time, 1.25 s of user CPU time, 0.125 s of system CPU time and 150 MiB at the
+    /// peak.
     fn usage() -> Usage {
         Usage {
             wall: Duration::from_millis(2500),
@@ -263,7 +269,8 @@ mod tests {
         );
     }
 
-    /// Failing at the out-of-fold pair reports its reason and figures reached, no sides or meta.
+    /// A failure at the out-of-fold pair reports its reason and the figures reached, with no sides
+    /// or meta.
     #[rstest]
     fn a_failed_train_reports_its_reason_and_the_figures_it_reached() {
         let trained = Trained {
@@ -289,7 +296,8 @@ mod tests {
         );
     }
 
-    /// Already published: no day or row read; off Unix, no CPU time or peak memory.
+    /// When already published, no day or row is read. Off Unix, there is no CPU time or peak
+    /// memory.
     #[rstest]
     fn a_train_of_a_model_set_already_published_reports_its_times_alone() {
         let trained = Trained::from(Outcome::AlreadyPublished);

@@ -1,4 +1,4 @@
-//! The baseline: the mean of the training labels, whatever the row.
+//! The baseline predicts the mean of the training labels for every row.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ impl Learner for Baseline {
     }
 }
 
-/// Saved as JSON tagged by the adapter, so that no other adapter loads it.
+/// Saved as JSON with the adapter's tag, so no other adapter loads it.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Saved {

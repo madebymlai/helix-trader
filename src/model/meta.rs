@@ -1,23 +1,25 @@
-//! Meta-labeling: the side models pick the side of a trade, and a meta model decides whether to
+//! Meta-labeling. The side models pick the side of a trade, and a meta model decides whether to
 //! take it.
 //!
-//! The side is the one `deciding` picks among the side models on each side's calibrated expected R
-//! (`store::Pair::expect`, `payoff::pick`). The meta decides only when a side is picked, on the
-//! strategy's features without either side's payoff features, then the side picked and the
-//! decision's calibrated level and side call (`PICKED_FEATURES`).
+//! `deciding` picks the side among the side models by each side's calibrated expected R
+//! (`store::Pair::expect`, `payoff::pick`). The meta decides only when a side is picked. Its
+//! input is the strategy's features without the payoff features of either side, then the side
+//! picked and the decision's calibrated level and side call (`PICKED_FEATURES`).
 //!
-//! It learns, as a regression, the realized net R of the trade on the side picked: its net P&L
-//! over its unit, read from its row as the side models read theirs (`dataset::DatasetRow`). A row
-//! opens a long and a short at every decision, so the meta needs no replay of its own. It takes the
-//! trade when its calibrated expected R clears its margin (`earnings::MetaMargin`).
+//! The meta learns the realized net R of the trade on the side picked, as a regression. That R is
+//! the trade's net P&L over its unit. The meta reads both from its row, as the side models do
+//! (`dataset::DatasetRow`). A row opens a long and a short at every decision, so the meta needs no
+//! replay of its own. It takes the trade when its calibrated expected R clears its margin
+//! (`earnings::MetaMargin`).
 //!
-//! Its rows are those of its window back from its train, each decided through the code a strategy
-//! decides through (`deciding::DecidingModels::pick_among`) by the out-of-fold pair the train fits
-//! as of the window's start (`train`), so out of sample. The out-of-fold pair is in no store: the
-//! meta decides beside the sides its train fits as of its own time, in the one model set the train
-//! publishes. A row no side is picked on is no row of the meta.
+//! The meta's rows come from its window, which reaches back from its train. Each row is decided
+//! through the code a strategy decides through (`deciding::DecidingModels::pick_among`). The
+//! decider is the out-of-fold pair that the train fits as of the window's start (`train`), so the
+//! rows are out of sample. No store holds the out-of-fold pair. The meta decides beside the sides
+//! that its train fits as of its own time, in the one model set the train publishes. A row with no
+//! side picked is not a row of the meta.
 //!
-//! Two levels at most: a meta section has no meta of its own (`config`).
+//! There are two levels at most: a meta section has no meta of its own (`config`).
 
 use super::{
     dataset::DatasetRow,
@@ -27,9 +29,10 @@ use super::{
     targets::PerSide,
 };
 
-/// The meta's examples of the dataset `rows`, in time order: for each row `pick` picks a side on,
-/// its features with that side and the decision's level and side call, and the trade on that side
-/// with its unit.
+/// Returns the meta's examples from the dataset `rows`, in time order.
+///
+/// Each row on which `pick` picks a side gives one example. It holds the row's features with that
+/// side and the decision's level and side call, and the trade on that side with its unit.
 ///
 /// # Errors
 ///
@@ -68,8 +71,8 @@ mod tests {
         strategy::risk::R,
     };
 
-    /// The decision at `time` on a mid of 0.7, settled an hour later: the long's stop worth 2 USD,
-    /// the short's 4.
+    /// The decision at `time` on a mid of 0.7, settled an hour later. The long's stop is worth 2
+    /// USD and the short's 4.
     fn row(time: &str) -> DatasetRow {
         let ts = UnixNanos::from(at(time));
         DatasetRow {
@@ -90,7 +93,7 @@ mod tests {
         }
     }
 
-    /// The side picked, expecting 0.4R of a level of 0.4 and no side call.
+    /// The side picked, expecting 0.4R from a level of 0.4 and no side call.
     fn picked(side: Side) -> Picked {
         Picked {
             side,
@@ -102,7 +105,7 @@ mod tests {
         }
     }
 
-    /// No side picked at 05:00; the long at 08:00 carries its 2 USD, the short at 19:00 its 4.
+    /// No side is picked at 05:00. The long at 08:00 carries its 2 USD, the short at 19:00 its 4.
     #[rstest]
     fn the_metas_examples_carry_the_unit_of_their_sides_trade() {
         let rows = [
