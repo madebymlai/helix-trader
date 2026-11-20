@@ -372,7 +372,6 @@ mod tests {
 
         let ticks = decode(&res.tick_data).unwrap();
 
-        // As captured: the second tick is 350 ms older and 0.15 higher
         assert_eq!(ticks.len(), 14);
         assert_eq!(ticks[0], tick(1_792_591_204_967, 412_847_000));
         assert_eq!(ticks[1], tick(1_792_591_204_617, 412_862_000));
@@ -380,7 +379,6 @@ mod tests {
         assert!(!res.has_more);
     }
 
-    // Ticks at 1,000 ms, 999 ms (-1), then 1,001 ms (+2): newer than the one before
     #[rstest]
     fn a_tick_newer_than_the_one_before_is_refused() {
         let data = |timestamp, tick| ProtoOaTickData { timestamp, tick };
@@ -402,8 +400,6 @@ mod tests {
 
     #[tokio::test]
     async fn pages_walk_back_and_keep_every_tick_sharing_a_millisecond_across_a_boundary() {
-        // Pages of 3, newest first: 15, 9, 9 | 9, 9, 7 | 7, 7, 3 | 3, 1, and the two ticks of 7 ms
-        // straddle the second and third pages.
         let all = [
             tick(1, 10),
             tick(3, 11),
@@ -491,8 +487,6 @@ mod tests {
 
         let pages = side_ticks(0, 20, page).await;
 
-        // Pages of 2, with the oldest millisecond of each asked again: 16, 15 | 15, 12 | failed
-        // over [0, 13).
         assert_eq!(pages.ticks, [tick(15, 16), tick(16, 17)]);
         assert_eq!(pages.from_ms, 13);
         assert!(pages.failure.unwrap().to_string().contains("timed out"));
@@ -589,7 +583,6 @@ mod tests {
             &[tick(1, 116_010), tick(3, 116_020), tick(5, 116_030)],
         );
 
-        // Cut short at 4 ms: the last ask before is unknown
         let ask = SideTicks {
             before: None,
             ticks: vec![tick(4, 116_050), tick(6, 116_060)],

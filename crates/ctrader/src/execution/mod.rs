@@ -1607,7 +1607,6 @@ mod tests {
     const XAUUSD: &str = "XAUUSD.ACMEFX";
     const EURUSD: &str = "EURUSD.ACMEFX";
 
-    /// The symbol ids cTrader uses on the server the fixtures come from.
     const XAUUSD_SYMBOL_ID: i64 = 41;
     const EURUSD_SYMBOL_ID: i64 = 1;
     const US500_SYMBOL_ID: i64 = 10013;
@@ -1854,7 +1853,6 @@ mod tests {
         (client, cache, events, received, tokens)
     }
 
-    /// Plays the node by putting the first account state published into the cache.
     async fn register_account(events: &mut Events, cache: &Rc<RefCell<Cache>>) -> AccountState {
         let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
             .await
@@ -1880,8 +1878,6 @@ mod tests {
         state
     }
 
-    /// Builds a synthetic position, as OpenApiModelMessages.proto defines it.
-    ///
     /// `volume` is in cents of an ounce. The position opened at `T0` + `minutes`.
     fn position(id: i64, side: ProtoOaTradeSide, volume: i64, minutes: i64) -> ProtoOaPosition {
         ProtoOaPosition {
@@ -1902,11 +1898,6 @@ mod tests {
         }
     }
 
-    /// Builds a synthetic reconcile response with:
-    /// - A long of 100 oz with stop loss and take profit.
-    /// - A short of 50 oz with a stop loss triggered by the double trade method.
-    /// - A US500 position out of the run.
-    /// - A pending EURUSD limit order.
     fn two_gold_positions() -> ProtoOaReconcileRes {
         let mut long = position(101, ProtoOaTradeSide::Buy, 10_000, 0);
         long.price = Some(4012.35);
@@ -1943,7 +1934,6 @@ mod tests {
         }
     }
 
-    /// Synthetic: a filled XAUUSD deal at `T0` + `minutes`, charged 1.50 EUR.
     fn deal(
         id: i64,
         position: i64,
@@ -1970,10 +1960,6 @@ mod tests {
         }
     }
 
-    /// Builds the deals for:
-    /// - The long, opened by one deal.
-    /// - The short, opened by two deals of 40 oz (its VWAP 4020.125) and reduced by 30.
-    /// - A position opened and closed in between.
     fn gold_deals() -> Vec<ProtoOaDeal> {
         let mut reduce = deal(4, 102, ProtoOaTradeSide::Buy, 3_000, 4015.0, 30);
         reduce.close_position_detail = Some(ProtoOaClosePositionDetail {
@@ -2001,10 +1987,6 @@ mod tests {
             .collect()
     }
 
-    /// Each socket is its own endpoint on the venue.
-    ///
-    /// A reconnect replaces that transport alone, and its session authenticates again. A disconnect
-    /// deregisters the socket.
     #[tokio::test]
     async fn a_brokers_data_and_trading_sockets_are_two_endpoints_each_reconnectable() {
         let (system_tx, mut system) = tokio::sync::mpsc::unbounded_channel();
@@ -2096,7 +2078,6 @@ mod tests {
             let connecting = client.connect();
             tokio::pin!(connecting);
 
-            // The account state is published; the node has not registered it
             let state = tokio::select! {
                 biased;
                 connected = &mut connecting => {
@@ -2117,7 +2098,6 @@ mod tests {
             state
         };
 
-        // As captured: balance 100000000 at moneyDigits 2, in EUR (asset 5)
         let eur = Currency::from("EUR");
         assert_eq!(state.account_id, AccountId::from("ACMEFX-DEMO"));
         assert_eq!(state.account_type, AccountType::Margin);
@@ -2154,7 +2134,6 @@ mod tests {
 
         let state = connect(&mut client, &mut events, &cache).await;
 
-        // Three positions at 12,000.00 EUR each, including the one out of the run
         let eur = Currency::from("EUR");
         assert_eq!(
             state.balances,
@@ -2175,7 +2154,6 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// Synthetic: the captured trader made a netting account.
     #[tokio::test]
     async fn a_netting_account_is_refused_at_connect() {
         let mut trader = ProtoOaTraderRes::decode(TRADER_RES).unwrap();
@@ -2195,7 +2173,6 @@ mod tests {
         assert!(events.try_recv().is_err(), "an account state was published");
     }
 
-    /// The refusal is the fixture `account_auth_token_invalid`, the renewal's synthetic.
     #[tokio::test]
     async fn an_expired_token_ctrader_refuses_to_renew_is_refused_at_connect() {
         let venue = Script {
@@ -2220,7 +2197,6 @@ mod tests {
         assert!(!client.is_connected());
     }
 
-    /// Synthetic: the account auth response of another account.
     #[tokio::test]
     async fn another_account_is_refused_at_connect() {
         let venue = Script {
@@ -2407,10 +2383,8 @@ mod tests {
         assert!(mass_status.reports_complete());
     }
 
-    /// A deal cTrader states no commission for fails the fill reports and the mass status.
-    ///
-    /// They fail rather than book the deal at zero or leave it out (Nautilus'
-    /// `spec_exec_testing.md`, TC-E88).
+    /// A deal cTrader states no commission for fails the fill reports and the mass status, rather
+    /// than booking it at zero or leaving it out (Nautilus' `spec_exec_testing.md`, TC-E88).
     #[tokio::test]
     async fn a_deal_without_its_commission_fails_the_fill_reports_and_the_mass_status() {
         let mut deals = gold_deals();
@@ -2447,9 +2421,7 @@ mod tests {
     /// Nautilus' targeted order recovery asks for the fills of one order.
     ///
     /// The request names the order's instrument and has no start
-    /// (`live/src/execution/reconciliation.rs`). Deal 2, of order 1002, states no commission. Fills
-    /// asked of order 1001, or of another instrument, are reported. A request covering deal 2
-    /// fails.
+    /// (`live/src/execution/reconciliation.rs`).
     #[tokio::test]
     async fn a_fill_request_fails_only_on_a_deal_it_covers_without_its_commission() {
         let mut deals = gold_deals();
@@ -2500,7 +2472,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_deals_of_a_position_opened_before_the_window_are_left_out() {
-        // Position 105 closed at T0 + 5 min; its opening is before the window
         let mut deals = gold_deals();
         deals.push(deal(7, 105, ProtoOaTradeSide::Sell, 2_000, 4011.0, 5));
         let venue = Script {
@@ -2522,10 +2493,6 @@ mod tests {
     }
 
     /// As the demo had it (2026-11-12, position 59798583 of another run).
-    ///
-    /// Position 105 closed at `T0` + 5 min by a close of its own, and cTrader cancelled its
-    /// protection order. Its opening is before the window, so its history, protection included, is
-    /// left out.
     #[tokio::test]
     async fn the_protection_of_a_position_opened_before_the_window_is_left_out() {
         let mut deals = gold_deals();
@@ -2556,7 +2523,6 @@ mod tests {
 
         let (mass_status, _) = mass_status(venue, None).await;
 
-        // `gold_venue`'s: the protections of positions 101 and 102, and the pending order 201
         let mut orders: Vec<String> = mass_status
             .order_reports()
             .keys()
@@ -2578,8 +2544,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // 3650 days before 2026-10-25T11:00:00Z is 2016-10-27T11:00:00Z, which is before the first
-        // position opened (T0)
         let from = 1_477_566_000_000;
         let asked: Vec<ProtoOaDealListReq> = requests_of(&received);
         assert_eq!(asked[0].from_timestamp, Some(from));
@@ -2587,8 +2551,6 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// A persisted cache holding cTrader position `position`: a long of 10 oz of XAUUSD, opened at
-    /// `opened`.
     fn hold_open(
         client: &CTraderExecutionClient,
         cache: &Rc<RefCell<Cache>>,
@@ -2627,10 +2589,6 @@ mod tests {
             .unwrap();
     }
 
-    /// A position the cache holds open may have closed while the node was down.
-    ///
-    /// The cached position opened an hour before the venue's. Its deals are read from the creation
-    /// of its opening deal.
     #[tokio::test]
     async fn the_deals_are_read_from_the_opening_of_a_position_the_cache_holds_open() {
         let mut deals = gold_deals();
@@ -2653,8 +2611,6 @@ mod tests {
     }
 
     /// The deal that opened position 59791668 on the demo (2026-11-11).
-    ///
-    /// It was created at `created` and executed a millisecond later. It bought 1 oz of XAUUSD.
     fn opening_deal(id: i64, position: i64, created: i64) -> ProtoOaDeal {
         let mut opening = deal(id, position, ProtoOaTradeSide::Buy, 100, 4012.35, 0);
         opening.create_timestamp = created;
@@ -2674,9 +2630,6 @@ mod tests {
     }
 
     /// As on the demo (2026-11-11, position 59791668).
-    ///
-    /// The position's opening is its deal's execution. That is a millisecond after the deal's
-    /// creation, which the deal list filters on.
     #[tokio::test]
     async fn a_position_open_at_the_broker_comes_with_the_deal_that_opened_it() {
         let created = T0 + 7;
@@ -2701,9 +2654,6 @@ mod tests {
     }
 
     /// As on the demo (2026-11-11, position 59791558).
-    ///
-    /// The deal that opened the position was created a millisecond before the position's opening.
-    /// That deal and the deal that closed the position are its fills.
     #[tokio::test]
     async fn a_position_the_cache_holds_open_closed_meanwhile_comes_with_its_deals() {
         let created = T0 + 7;
@@ -2739,10 +2689,8 @@ mod tests {
 
     /// Position 59793251 of the demo (2026-11-12).
     ///
-    /// Order 76919227 (deal 65947597) bought 1 oz of XAUUSD with a stop loss at 3983.38 and a take
-    /// profit at 3987.52. cTrader holds them as its protection order 76919228 under the entry's
-    /// client order id. The stop loss hit while the node was down, and the order filled at 3983.05
-    /// by deal 65947662.
+    /// cTrader holds the stop loss and take profit as its protection order 76919228 under the
+    /// entry's client order id.
     fn stopped_out() -> Script {
         let opening = ProtoOaDeal {
             deal_id: 65_947_597,
@@ -2826,9 +2774,6 @@ mod tests {
         }
     }
 
-    /// The leg the protection order filled is filled by its deal, under its own venue order id.
-    ///
-    /// The other leg is cancelled.
     #[tokio::test]
     async fn a_leg_hit_while_the_node_was_down_is_filled_by_its_deal_and_the_other_cancelled() {
         let (mut client, cache, mut events, _, _tokens) = started(stopped_out());
@@ -2877,9 +2822,6 @@ mod tests {
     }
 
     /// As `stopped_out`, but a close of its own (order 76919300) came first.
-    ///
-    /// Neither protection was hit before it. cTrader cancelled the protection order, so both legs
-    /// are cancelled.
     #[tokio::test]
     async fn the_legs_of_a_position_closed_otherwise_while_the_node_was_down_are_cancelled() {
         let mut venue = stopped_out();
@@ -2915,9 +2857,6 @@ mod tests {
     }
 
     /// As `stopped_out`, but the protection was first set as order 76919226.
-    ///
-    /// That order was cancelled when the protection was set again as 76919228, which the stop loss
-    /// then hit. The leg that order filled is filled, whatever order the two are read in.
     #[rstest]
     #[case::read_before_the_hit_one(true)]
     #[case::read_after_the_hit_one(false)]
@@ -2953,10 +2892,6 @@ mod tests {
     }
 
     /// As `stopped_out`, but the stop loss hit while the reconcile request was on its way.
-    ///
-    /// The client's clock is 5 ms before the closing deal's creation as the mass status starts, and
-    /// 5 ms after it as the reconcile request is answered, without the position. The closing deal
-    /// fills the leg.
     #[tokio::test]
     async fn a_leg_hit_while_the_reconcile_request_was_answered_comes_with_its_deal() {
         let closed: i64 = 1_794_443_906_550;
@@ -2980,9 +2915,6 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// A GTC limit order does not pull the window back to its creation.
-    ///
-    /// The cache holds the order open since long before the restart, and the broker lists it open.
     #[tokio::test]
     async fn an_order_the_broker_lists_open_does_not_widen_the_window() {
         use nautilus_model::orders::{OrderTestBuilder, stubs::TestOrderEventStubs};
@@ -3000,7 +2932,6 @@ mod tests {
         let (mut client, cache, mut events, _, _tokens) = started_at(venue, clock);
         connect(&mut client, &mut events, &cache).await;
 
-        // Created at the epoch, accepted by the broker as its order 201
         let order = OrderTestBuilder::new(OrderType::Limit)
             .instrument_id(InstrumentId::from(EURUSD))
             .client_order_id(ClientOrderId::from("O-20261026-100000-001-000-1"))
@@ -3026,10 +2957,6 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// The window starts at the first position's opening deal, the only one asked for.
-    ///
-    /// Three positions are open at the broker, opened ten minutes apart. The cache holds one more
-    /// open, opened an hour after them.
     #[tokio::test]
     async fn only_the_opening_deals_of_the_first_opened_positions_are_asked_for() {
         let opened = [(201, 0), (202, 10), (203, 20)];
@@ -3072,8 +2999,7 @@ mod tests {
 
     /// The demo (2026-11-12): market buy O-20261112-003352-106-001-1 of 1 oz of XAUUSD.
     ///
-    /// A node sent it and died before the broker's answer. cTrader filled it as its order
-    /// 76919114, by deal 65947517 at 3982.28, opening position 59793188, which has been open since.
+    /// A node sent it and died before the broker's answer.
     fn crashed() -> Script {
         let order = ProtoOaOrder {
             order_id: 76_919_114,
@@ -3133,9 +3059,6 @@ mod tests {
     }
 
     /// The captured close of position 690004734 (`execution_close_filled`).
-    ///
-    /// The node sent close `C:PROBE-1` and died before the answer. cTrader filled the closing order
-    /// it made of it, under that tag.
     #[tokio::test]
     async fn a_close_in_flight_at_a_crash_is_reported_as_the_order_it_was_sent_for() {
         use crate::{common::messages::ProtoOaExecutionEvent, testing::EXECUTION_CLOSE_FILLED};
@@ -3161,9 +3084,6 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// Synthetic: a limit buy sent at `T` by a node that died before the answer.
-    ///
-    /// cTrader accepted it as its order 76919500 and cancelled it 5 s later. Nothing filled.
     #[tokio::test]
     async fn an_order_in_flight_at_a_crash_and_cancelled_meanwhile_is_reported_cancelled() {
         use nautilus_model::orders::{OrderTestBuilder, stubs::TestOrderEventStubs};
@@ -3219,8 +3139,7 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// Nautilus has no order for cTrader's stop limit, so the history is incomplete. The rest of it
-    /// is reported.
+    /// Nautilus has no order for cTrader's stop limit, so the history is incomplete.
     #[tokio::test]
     async fn an_order_closed_over_the_window_that_cannot_be_read_leaves_the_history_incomplete() {
         let mut venue = crashed();
@@ -3250,8 +3169,6 @@ mod tests {
         assert!(mass_status.fill_reports().is_empty());
     }
 
-    /// The reconcile request does not list the protections as orders of their own (see
-    /// `stop_loss_and_take_profit_are_open_reduce_only_orders_of_their_position`).
     #[tokio::test]
     async fn the_reconcile_request_reads_protections_from_positions_not_as_orders() {
         let (_, received) = mass_status(Script::default(), None).await;

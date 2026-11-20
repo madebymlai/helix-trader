@@ -346,7 +346,6 @@ mod tests {
             .leverage
     }
 
-    /// Synthetic: gold's tier is 1:20, below the demo account's 1:30.
     #[rstest]
     fn a_symbol_leverage_below_the_account_s_sets_the_margin() {
         let mut leverage = gold_leverage();
@@ -371,7 +370,6 @@ mod tests {
         assert_eq!(margin, d("0.005"));
     }
 
-    /// Synthetic: a symbol without a dynamic leverage.
     #[rstest]
     fn a_symbol_without_a_leverage_of_its_own_takes_the_account_s() {
         let margin = margin("XAUUSD", venue(), Some(2_000), None).unwrap();
@@ -379,9 +377,6 @@ mod tests {
         assert_eq!(margin, d("0.05"));
     }
 
-    /// Two synthetic cases. The first gives gold no tiers, since the fixture names no tier for
-    /// leverage 52543. The second gives the trader no leverage and leaves the demo's leverage for
-    /// gold.
     #[rstest]
     #[case::no_tier(account_leverage(), true, &["XAUUSD", "ACMEFX", "52543"])]
     #[case::no_account_leverage(None, false, &["XAUUSD", "ACMEFX"])]
@@ -432,8 +427,6 @@ mod tests {
         max_quantity: u64,
     }
 
-    /// XAUUSD is a commodity CFD on gold, in ounces and quoted in dollars. EURUSD is an FX CFD, in
-    /// euros by the thousand. The captured symbols' volumes are in cents of a unit.
     #[rstest]
     #[case::xauusd("XAUUSD", Expected {
         asset_class: AssetClass::Commodity,
@@ -492,7 +485,6 @@ mod tests {
         );
     }
 
-    /// Synthetic: the EURUSD fixture with its base asset renamed BTC.
     #[rstest]
     fn a_crypto_base_makes_a_cryptocurrency_cfd() {
         let mut fixtures = fixtures();
@@ -521,8 +513,6 @@ mod tests {
         fixtures.details.get_mut(&id).unwrap()
     }
 
-    /// Synthetic: the fixtures, mutated. Gold's step is 100 cents (one ounce), so a minimum of 50
-    /// cents is half an ounce.
     #[rstest]
     #[case::no_step_volume(
         "XAUUSD",
@@ -565,7 +555,6 @@ mod tests {
             .collect()
     }
 
-    /// EURUSD is symbol 1 of the captured list, XAUUSD symbol 41.
     #[rstest]
     fn details_of_another_symbol_are_refused() {
         let fixtures = fixtures();

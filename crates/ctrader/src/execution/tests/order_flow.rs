@@ -58,10 +58,8 @@ fn execution(bytes: &[u8]) -> ProtoOaExecutionEvent {
     decoded(bytes)
 }
 
-/// Synthetic: a deal the broker made after the captured ones.
 const LATER_DEAL: i64 = 953_555_999;
 
-/// The captured fill `bytes` under `LATER_DEAL`.
 fn later_deal(bytes: &[u8]) -> ProtoOaExecutionEvent {
     let mut execution = execution(bytes);
     if let Some(deal) = execution.deal.as_mut() {
@@ -373,7 +371,6 @@ async fn a_market_order_is_sent_with_its_id_and_its_fill_carries_price_commissio
     assert_eq!(fill.last_qty, Quantity::from(1));
     assert_eq!(fill.position_id, Some(PositionId::from("690004734")));
 
-    // 30 USD per million on 4,022.78 USD is 0.12 USD, or 0.11 EUR on the demo's EUR account
     assert_eq!(fill.commission, Some(eur(0.11)));
     let requests = node.requests::<ProtoOaNewOrderReq>();
     let [request] = requests.as_slice() else {
@@ -432,9 +429,6 @@ async fn a_limit_order_is_accepted_amended_and_cancelled() {
     node.client.disconnect().await.unwrap();
 }
 
-/// The captured MARKET_RANGE orders based 3.00 on the better side of the market.
-///
-/// They are sent as a limit IOC at that price. Each filled at the market, better than its limit.
 #[rstest]
 #[case::buy(
     "PROBE-IOC-1",
@@ -498,9 +492,6 @@ async fn a_limit_ioc_order_is_a_market_range_filled_at_its_price_or_better(
     node.client.disconnect().await.unwrap();
 }
 
-/// The captured MARKET_RANGE buy based 5.00 under the ask.
-///
-/// It is sent as a limit IOC buy at that price. cTrader cancels it with its deal rejected.
 #[tokio::test]
 async fn a_limit_ioc_order_ctrader_cannot_fill_at_its_price_is_rejected() {
     let mut node = Node::start(|request| {
@@ -587,10 +578,6 @@ async fn an_order_the_broker_refuses_is_rejected_with_its_reason() {
     node.client.disconnect().await.unwrap();
 }
 
-/// The reason is the code and the start of the description.
-///
-/// Each run of control characters and whitespace becomes one space. The reason has 256 characters
-/// at most.
 #[tokio::test]
 async fn a_refusal_is_rejected_with_its_reason_cleaned_and_bounded() {
     let mut node = Node::start(|request| {
@@ -647,7 +634,6 @@ async fn a_cancel_the_broker_refuses_is_rejected_and_the_order_stays_open() {
         "ORDER_NOT_FOUND: Order not found with id 1031776354"
     );
 
-    // Still open: the broker's answer to a modification updates it
     node.modify("PROBE-2", Some(Price::from("3821.73")), None);
     let updated = node.order_events(1).await;
     assert_eq!(kinds(&updated), [row("PROBE-2", "updated")]);
@@ -682,7 +668,6 @@ async fn a_fill_before_the_acceptance_and_events_twice_make_one_acceptance_and_o
     node.client.disconnect().await.unwrap();
 }
 
-/// The captured filled market order and its deal, found by the query in the order list.
 #[tokio::test]
 async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
     let mut node = Node::start(|request| {
@@ -743,10 +728,6 @@ async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
     node.client.disconnect().await.unwrap();
 }
 
-/// The captured filled market order PROBE-1 moved to US500, a symbol the run did not load.
-///
-/// The lookup cannot report it, and says so rather than answer that the broker holds no such
-/// order.
 #[tokio::test]
 async fn a_lookup_of_an_order_on_a_symbol_the_run_did_not_load_fails() {
     let mut held = execution(EXECUTION_MARKET_FILLED).order.unwrap();
@@ -971,9 +952,6 @@ async fn a_bracket_entry_carries_its_protections_which_the_position_then_holds()
     node.client.disconnect().await.unwrap();
 }
 
-/// The captured MARKET_RANGE entry PROBE-IOC-5 with its absolute stop loss and take profit.
-///
-/// cTrader set them on the position it opened, as it does for a market entry.
 #[tokio::test]
 async fn a_limit_ioc_bracket_entry_carries_its_protections_which_the_position_then_holds() {
     let mut node = Node::start(|request| {
@@ -1017,9 +995,6 @@ async fn a_limit_ioc_bracket_entry_carries_its_protections_which_the_position_th
     node.client.disconnect().await.unwrap();
 }
 
-/// The legs are the protections of their position.
-///
-/// cTrader holds them as long as the position (GOOD_TILL_CANCEL).
 #[rstest]
 #[case::ioc(TimeInForce::Ioc)]
 #[case::gtd(TimeInForce::Gtd)]
@@ -1093,7 +1068,6 @@ async fn cancelling_a_protection_keeps_the_other_on_the_position() {
             event(&execution(EXECUTION_PROTECTION_ACCEPTED), Some("PROBE-1")),
         ],
         _ => {
-            // The protection with its take profit gone
             let mut replaced = execution(EXECUTION_PROTECTION_ACCEPTED);
             replaced.set_execution_type(ProtoOaExecutionType::OrderReplaced);
             if let Some(order) = replaced.order.as_mut() {
@@ -1129,8 +1103,6 @@ fn protected(bytes: &[u8]) -> ProtoOaExecutionEvent {
     execution
 }
 
-/// Entry PROBE-5, with its stop loss at 4023.15 and take profit at 4053.51.
-///
 /// The entry is filled and accepted, then `last`. Its later deal comes after the order events.
 async fn bracket_closed_by(last: ProtoOaExecutionEvent) -> Vec<OrderEventAny> {
     let mut node = Node::start(move |request| {
@@ -1323,7 +1295,6 @@ async fn a_close_larger_than_its_position_is_denied_and_nothing_is_sent() {
         panic!("not a denial: {events:?}");
     };
 
-    // The position, then the close's 2 oz and the position's 1
     let numbers: Vec<&str> = denied
         .reason
         .as_str()
@@ -1336,7 +1307,6 @@ async fn a_close_larger_than_its_position_is_denied_and_nothing_is_sent() {
     node.client.disconnect().await.unwrap();
 }
 
-/// The bracket's legs are cancelled with the position.
 #[tokio::test]
 async fn closing_a_protected_position_cancels_its_protections() {
     let mut node = Node::start(|request| match request.payload_type {
@@ -1432,8 +1402,6 @@ async fn a_refused_change_of_a_protection_from_before_a_restart_is_rejected(
     node.client.disconnect().await.unwrap();
 }
 
-/// Position 690004734 has stop loss 3992.78 and take profit 4052.78.
-///
 /// The broker answers no amendment.
 async fn protected_position() -> Node {
     let mut node = Node::start(|request| match request.payload_type {
@@ -1462,9 +1430,6 @@ async fn protection_amendments(node: &Node, n: usize) -> Vec<ProtoOaAmendPositio
     node.requests()
 }
 
-/// The second amendment carries the first change, still unanswered.
-///
-/// The take profit cancelled stays gone, and the stop loss moved stays moved.
 #[rstest]
 #[case::after_an_unanswered_cancel(
     |node: &Node| {
@@ -1495,7 +1460,6 @@ async fn a_move_keeps_the_unanswered_change_before_it(
     node.client.disconnect().await.unwrap();
 }
 
-/// The captured limit entry PROBE-2, with its stop loss at 3802.73 and take profit at 3842.73.
 #[tokio::test]
 async fn a_move_after_an_unanswered_cancel_on_a_pending_entry_keeps_the_cancelled_leg_gone() {
     let mut node = Node::start(|request| match request.payload_type {
@@ -1627,9 +1591,6 @@ async fn an_unanswered_order_the_broker_holds_nowhere_is_reported_rejected_by_a_
 }
 
 /// A restart left the bracket in the cache while its limit entry PROBE-2 is pending at the broker.
-///
-/// The entry (venue order id 1031776354) is accepted, and its legs are submitted with no venue
-/// order id.
 fn reconciled_pending_bracket(node: &Node) {
     let mut limit = order(OrderType::Limit, "PROBE-2", OrderSide::Buy, 1);
     limit.price(Price::from("3822.73"));
@@ -1687,8 +1648,7 @@ impl Node {
 
     /// A query of `UNSENT-1` reports it rejected.
     ///
-    /// `UNSENT-1` is an order in the cache that this session never sent. The report is the next
-    /// event.
+    /// `UNSENT-1` is an order in the cache that this session never sent.
     async fn assert_nothing_concluded(&mut self) {
         self.add(&[&market("UNSENT-1", OrderSide::Buy, 1)]);
         self.query("UNSENT-1");
@@ -1756,7 +1716,6 @@ async fn an_absent_entry_is_concluded_once_with_its_legs() {
         ]
     );
 
-    // Concluded: not again
     node.query("PROBE-1");
     node.assert_nothing_concluded().await;
     node.client.disconnect().await.unwrap();
@@ -1771,7 +1730,6 @@ async fn a_query_of_a_bracket_leg_from_before_a_restart_concludes_nothing() {
 
     node.assert_nothing_concluded().await;
 
-    // Nor was the broker asked: the only order list it got is of UNSENT-1
     assert_eq!(node.requests::<ProtoOaOrderListReq>().len(), 1);
     node.client.disconnect().await.unwrap();
 }
@@ -1790,7 +1748,6 @@ async fn a_query_of_a_bracket_leg_whose_cancel_was_refused_after_a_restart_concl
 
     node.assert_nothing_concluded().await;
 
-    // Nor was the broker asked: the only order list it got is of UNSENT-1
     assert_eq!(node.requests::<ProtoOaOrderListReq>().len(), 1);
     node.client.disconnect().await.unwrap();
 }

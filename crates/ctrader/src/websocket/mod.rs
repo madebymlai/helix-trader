@@ -509,8 +509,6 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// Two heartbeats come `HEARTBEAT_INTERVAL` apart, and the first comes one interval after the
-    /// connect.
     #[tokio::test]
     async fn the_heartbeat_is_a_binary_heartbeat_event() {
         let (url, received) = testing::start(symbols_peer);
@@ -820,7 +818,6 @@ mod tests {
                 (0..7).map(|_| client.request::<_, ProtoOaGetTickDataRes>(&request)),
             ));
 
-            // The tick requests are asked first
             assert!(futures::poll!(ticks.as_mut()).is_pending());
             client.renew_token();
             ticks.await
@@ -865,7 +862,6 @@ mod tests {
                 (0..2).map(|_| client.request::<_, ProtoOaGetTickDataRes>(&request)),
             ));
 
-            // The tick requests are asked first
             assert!(futures::poll!(ticks.as_mut()).is_pending());
             let sent = client.trade(&order, "N:O-1".to_owned()).await;
             (sent, ticks.await)
@@ -1053,7 +1049,6 @@ mod tests {
         let first = symbol_request(1);
 
         let (lost, sent) = {
-            // The first request closes the connection
             let mut lost = std::pin::pin!(client.request::<_, ProtoOaSymbolByIdRes>(&first));
             assert!(futures::poll!(lost.as_mut()).is_pending());
             tokio::time::timeout(Duration::from_secs(10), reconnecting.recv())
@@ -1183,8 +1178,6 @@ mod tests {
     }
 
     /// Gives a synthetic refusal of a symbol cTrader does not list, on the first connection only.
-    ///
-    /// That connection closes once it has answered symbol 1's subscription.
     #[tokio::test]
     async fn a_refused_spot_subscription_is_sent_again_on_the_next_connection() {
         let (url, received) = testing::start(|connection, request| {
@@ -1223,8 +1216,6 @@ mod tests {
 
     /// Gives a synthetic answer to symbol 41's subscription that does not list it in
     /// `subscribedSymbolId`, as the demo lists each symbol.
-    ///
-    /// Symbol 41 stays pending, and symbol 1 is confirmed.
     #[tokio::test]
     async fn a_symbol_the_answer_does_not_list_as_subscribed_is_not_confirmed() {
         let (url, _received) = testing::start(|connection, request| {
@@ -1248,7 +1239,6 @@ mod tests {
         client.subscribe_spots(41).unwrap();
         client.subscribe_spots(1).unwrap();
 
-        // The handler reads the answers in order, symbol 1's before its spot event
         assert_eq!(next_spot(&mut spots).await, spot_event(1));
 
         assert_eq!(
@@ -1490,8 +1480,6 @@ mod tests {
         client.disconnect().await;
     }
 
-    /// A token that expires within a day is renewed (2173) between the application auth (2100) and
-    /// the account auth (2102).
     #[rstest]
     #[case::within_a_day(23, &[2100, 2173, 2102], "renewedAccess1")]
     #[case::later_than_a_day(25, &[2100, 2102], "accessTokenValue")]
@@ -1671,7 +1659,6 @@ mod tests {
         );
     }
 
-    /// Acts as `peer` and answers renewals `delay` late.
     fn slow_renewal(
         delay: Duration,
         mut peer: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
@@ -1918,7 +1905,6 @@ mod tests {
 
         assert_eq!(next_spot(&mut spots).await, spot_event(1));
 
-        // The unsubscription follows the subscription whose spot just came
         testing::wait_until(&received, |_| {
             !spot_unsubscriptions(&received, 0).is_empty()
         })

@@ -837,7 +837,6 @@ mod tests {
         }
     }
 
-    /// The captured demo account: hedged, in EUR.
     fn captured_trader() -> ProtoOaTraderRes {
         ProtoOaTraderRes::decode(TRADER_RES).unwrap()
     }
@@ -903,8 +902,6 @@ mod tests {
         session.disconnect().await;
     }
 
-    /// Acts as `fixtures_peer`, answers a spot subscription, then sends each symbol's first spot
-    /// event.
     fn spots_peer(connection: usize, request: &ProtoMessage) -> Vec<Action> {
         if request.payload_type != ProtoOaSubscribeSpotsReq::TYPE {
             return fixtures_peer(connection, request);
@@ -952,7 +949,6 @@ mod tests {
         }
         stamped.sort_unstable();
 
-        // These are the symbol ids and times in `test_data/spot_event_*_first.txtpb`
         assert_eq!(
             stamped,
             [(1, Some(1_793_017_476_361)), (41, Some(1_793_017_475_790))]
@@ -960,11 +956,8 @@ mod tests {
         session.disconnect().await;
     }
 
-    /// Places a market buy of 1 oz of `xau` on a 1,000 EUR margin account.
-    ///
-    /// The prices are the first captured spots (`test_data/spot_event_*_first`): XAUUSD
-    /// 4017.96 / 4018.01 and EURUSD 1.11964 / 1.11965. The order's value, about 3,590 EUR, is above
-    /// the balance. The margin at 1:30, about 120 EUR, is below it.
+    /// The order's value, about 3,590 EUR, is above the balance. The margin at 1:30, about 120 EUR,
+    /// is below it.
     fn risk_check_of_one_ounce(xau: Cfd, eur: InstrumentAny) -> (Vec<OrderEventAny>, usize) {
         let (events, saved_events) = get_typed_into_message_saving_handler::<OrderEventAny>(None);
         msgbus::register_order_event_endpoint(MessagingSwitchboard::exec_engine_process(), events);
@@ -1070,7 +1063,6 @@ mod tests {
         assert_eq!(sent, 1);
     }
 
-    /// The same order on gold is denied with margins of 1, as before the broker's margin.
     #[tokio::test]
     async fn an_ounce_of_gold_at_margins_of_one_is_denied() {
         let (mut xau, eur) = gold_and_euro_dollar().await;

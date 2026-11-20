@@ -391,7 +391,6 @@ mod tests {
 
     const ORDER: &str = "O-20261026-150000-001-001-1";
 
-    /// A `clientMsgId` with no op and client order id, such as a probe's, is not a tag.
     #[rstest]
     #[case::new(
         "N:O-20261026-150000-001-001-1",
@@ -429,7 +428,6 @@ mod tests {
         }
     }
 
-    /// A cTrader order's id is no protection's.
     #[rstest]
     #[case::stop_loss("690004734-SL", Some((690_004_734, Leg::StopLoss)))]
     #[case::take_profit("690004734-TP", Some((690_004_734, Leg::TakeProfit)))]
@@ -491,8 +489,7 @@ mod tests {
 
     /// cTrader holds a LIMIT sent IOC as GTC (demo, 2026-11-16).
     ///
-    /// Its IOC execution at a price or better is MARKET_RANGE. The demo filled MARKET_RANGE better
-    /// than its base on either side.
+    /// Its IOC execution at a price or better is MARKET_RANGE.
     #[rstest]
     #[case::buy(OrderSide::Buy, ProtoOaTradeSide::Buy)]
     #[case::sell(OrderSide::Sell, ProtoOaTradeSide::Sell)]
@@ -565,8 +562,6 @@ mod tests {
     /// 2026-11-16 18:00 UTC.
     const EXPIRY: UnixNanos = UnixNanos::new(1_794_852_000_000_000_000);
 
-    /// A market order goes without a time in force (cTrader's own IOC). A pending order goes GTC or
-    /// GTD with its expiry in ms.
     #[rstest]
     #[case::market_gtc(OrderType::Market, TimeInForce::Gtc, None, None)]
     #[case::market_ioc(OrderType::Market, TimeInForce::Ioc, None, None)]
@@ -612,7 +607,6 @@ mod tests {
     /// On 2026-11-16 the demo:
     /// - Refused FOK on MARKET and MARKET_RANGE ("Such TIF is not supported by this Order type").
     /// - Refused MARKET_ON_OPEN on MARKET ("Incorrect time of execution").
-    /// - Held a LIMIT or STOP sent IOC or FOK as GTC.
     #[rstest]
     #[case::market_fok(OrderType::Market, TimeInForce::Fok)]
     #[case::market_at_the_open(OrderType::Market, TimeInForce::AtTheOpen)]
@@ -670,8 +664,6 @@ mod tests {
         Flag(&'static str),
     }
 
-    /// cTrader has no stop limit and no post-only orders. A reduce-only order on a hedging account
-    /// needs the position it reduces.
     #[rstest]
     #[case::stop_limit(stop_limit(), Denial::OrderType(OrderType::StopLimit))]
     #[case::post_only(post_only(), Denial::Flag("post-only"))]
