@@ -52,7 +52,6 @@ mod tests {
 
     const HOUR: SignedDuration = SignedDuration::from_hours(1);
 
-    /// Whether an hourly bar ending at `local` Frankfurt time counts.
     fn counts(local: &str) -> bool {
         let session = xetra();
         let local: DateTime = local.parse().unwrap();
@@ -60,14 +59,11 @@ mod tests {
         session.contains(end.timestamp(), HOUR)
     }
 
-    /// Whether an hourly bar ending at the `utc` timestamp counts.
     fn counts_utc(utc: &str) -> bool {
         xetra().contains(utc.parse().unwrap(), HOUR)
     }
 
-    /// An hourly bar counts when its whole hour lies inside 09:00 to 17:30 on one day: one starting
-    /// at the open or ending at the close does, one straddling either does not, by a second as by
-    /// half an hour.
+    /// An hourly bar counts when its whole hour lies inside 09:00 to 17:30 on one day.
     #[rstest]
     #[case::inside("2026-01-07T12:00", true)]
     #[case::before_the_open("2026-01-07T07:00", false)]
@@ -100,8 +96,7 @@ mod tests {
         assert_eq!(counts_utc(utc), expected);
     }
 
-    /// A session opening at 09:00 is valid closing after it; closing at or before it, it is refused
-    /// naming the open and the close.
+    /// A session closing at or before its open is refused, naming both.
     #[rstest]
     #[case::closing_after_the_open(time(17, 30, 0, 0), None)]
     #[case::closing_at_the_open(time(9, 0, 0, 0), Some("09:00"))]
