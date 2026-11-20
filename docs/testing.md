@@ -111,6 +111,7 @@ CI runs the suite with `cargo nextest run --workspace --profile ci` and the doc 
 
 - Name a test after the behavior it exercises, as a sentence (`a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refused`).
 - Add doc comments when they clarify setup, scenarios, or expectations.
+- Explain an integration test file's scenario and fixture once, in its `//!` module doc. A test's own doc comment says only what it adds.
 - Use distinct, non-default inputs and exact expected values, and assert every stable field.
 - Group the assertions after setup and actions, unless the test checks stepwise state changes.
 - Use `unwrap`, `expect`, `panic!` and `assert!` freely: clarity outranks defensive handling in a test.

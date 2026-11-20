@@ -84,7 +84,7 @@ Released on TBD (UTC).
 
 ### Documentation Updates
 
-- Changed `docs/testing.md` to ask for a test's doc comment only where it clarifies, as Nautilus' guide does
+- Changed `docs/testing.md` to ask for test doc comments only where they clarify, as Nautilus does, and a test file's scenario in its module doc
 - Added the Apache-2.0 license, `LICENSE`, as the `license` of every crate
 - Changed `docs/architecture.md` to state the architecture as rules, each naming the module that owns it
 - Changed the live guide to distinguish a catalog interval's end from the time of its last row
