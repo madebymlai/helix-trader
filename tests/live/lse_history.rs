@@ -1,24 +1,33 @@
-//! End to end on LSE: fill-catalog fills one UTC day, Thursday 12 November 2026, through the node
-//! from LSE's exports into a temporary catalog:
+//! Tests fill-catalog end to end on LSE. It fills one UTC day, Thursday 12 November 2026, through
+//! the node from LSE's exports into a temporary catalog.
 //!
-//! - Trades of gold and 10-year Treasury futures (`GOLD-FUTURES.LSEDGE`, `US10Y-FUTURES.LSEDGE`),
-//!   gold spot candles as 1-minute bars (`XAU/USD-COMMODITIES.LSEDGE`, a series LSE serves only as
-//!   candles), five minutes of the S&P 500's values as quotes (`SPX-INDICES.LSEDGE`), the trades
-//!   and quotes of GCZ6 (`GCZ26.GLBX`) from LSE's CME Globex, and the trades and 1-minute bars of
-//!   AAPL's 355 call of 20 November 2026 (`AAPL  261120C00355000.OPRA`) from LSE's US options.
-//! - Custom series (`lse::LseRow`), each row stamped when it is known: the daily 10-year US bond
-//!   yield, US core inflation's October 2026 release, three days of the 10-year macro yield, ZN's
-//!   Commitments of Traders of September 2025 and September 2026, AAPL's financial reports of the
-//!   first half of 2026, and its dividends and splits.
+//! The day holds these market series:
 //!
-//! LSE publishes no definitions, so those of its series are written by hand into the catalog; the
-//! CME contract's and the option's come from Databento. It needs `LSE_API_KEY`, a CME Group key
-//! `LSE_CME_API_KEY` and `DATABENTO_API_KEY`, from the environment or `.env`. The free LSE key
-//! serves the derived series, the bond yield and the option, and counts exports against its rows a
-//! day; CME Group Lite+ serves the CME contract's Level 1. Databento charges about $0.000001 for
-//! the CME definition and $0.000002 for the option's.
+//! - Trades of gold and 10-year Treasury futures (`GOLD-FUTURES.LSEDGE`, `US10Y-FUTURES.LSEDGE`).
+//! - Gold spot candles as 1-minute bars (`XAU/USD-COMMODITIES.LSEDGE`), a series LSE serves only as
+//!   candles.
+//! - Five minutes of the S&P 500's values as quotes (`SPX-INDICES.LSEDGE`).
+//! - The trades and quotes of GCZ6 (`GCZ26.GLBX`) from LSE's CME Globex.
+//! - The trades and 1-minute bars of AAPL's 355 call of 20 November 2026 from LSE's US options
+//!   (`AAPL  261120C00355000.OPRA`).
 //!
-//! Gated as `okx_demo.rs` is, by `NAUTILUS_LSE_RUN=1` in the shell. Run it with:
+//! It also fills custom series (`lse::LseRow`), each row stamped when it is known:
+//!
+//! - The daily 10-year US bond yield.
+//! - US core inflation's October 2026 release.
+//! - Three days of the 10-year macro yield.
+//! - ZN's Commitments of Traders of September 2025 and September 2026.
+//! - AAPL's financial reports of the first half of 2026, and its dividends and splits.
+//!
+//! LSE publishes no definitions, so the test writes the definitions of LSE's series into the
+//! catalog by hand. The CME contract's and the option's definitions come from Databento. The test
+//! needs `LSE_API_KEY`, `LSE_CME_API_KEY` (a CME Group key) and `DATABENTO_API_KEY`, from the
+//! environment or `.env`. The free LSE key serves the derived series, the bond yield and the
+//! option. It counts exports against its rows a day. CME Group Lite+ serves Level 1 of the CME
+//! contract. Databento charges about $0.000001 for the CME definition and $0.000002 for the
+//! option's.
+//!
+//! The test is gated like `okx_demo.rs`, by `NAUTILUS_LSE_RUN=1` in the shell. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_LSE_RUN=1 cargo test --test live lse_history:: -- --nocapture
@@ -48,8 +57,9 @@ const SPX: &str = "SPX-INDICES.LSEDGE";
 const GCZ26: &str = "GCZ26.GLBX";
 const AAPL_CALL: &str = "AAPL  261120C00355000.OPRA";
 
-/// The custom series of the rows of `symbol` in LSE's `source`, identified in its metadata by the
-/// symbol.
+/// Returns the custom series for the rows of `symbol` in LSE's `source`.
+///
+/// Its metadata identifies it by the symbol.
 fn lse_rows(source: &str, symbol: &str) -> CustomSeries {
     let metadata = nautilus_core::Params::new(
         [
@@ -61,8 +71,10 @@ fn lse_rows(source: &str, symbol: &str) -> CustomSeries {
     CustomSeries::new("LseRow", symbol.to_string(), Some(metadata)).unwrap()
 }
 
-/// Whether the run is opted in, from the shell before `.env` is read, so the file cannot opt in.
-/// An opted-in run claims the process (`claim_process`).
+/// Returns whether the run is opted in.
+///
+/// Reads the opt-in from the shell before `.env` is read, so the file cannot opt in. An opted-in
+/// run claims the process (`claim_process`).
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_LSE_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -73,8 +85,9 @@ fn opted_in(test: &str) -> bool {
     run
 }
 
-/// A hand-written definition of the LSE series `id`, `raw` in LSE: an index in USD priced to
-/// `tick`, its sizes whole lots.
+/// Returns a hand-written definition of the LSE series `id`, `raw` in LSE.
+///
+/// It is an index in USD priced to `tick`, with sizes in whole lots.
 fn index(id: &str, raw: &str, tick: &str) -> InstrumentAny {
     let tick = Price::from(tick);
     InstrumentAny::IndexInstrument(
@@ -167,7 +180,9 @@ async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
     }
 }
 
-/// LSE stamps its candles at their open: each bar closes on a minute of the day.
+/// LSE stamps its candles at their open.
+///
+/// Each bar closes on a minute of the day.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_close() {
     if !opted_in("a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_close") {
@@ -216,8 +231,9 @@ async fn a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_clos
     assert_eq!(lacking, []);
 }
 
-/// An index's ticks are its values: quotes whose bid and ask are the value, with no sizes, as
-/// data-ws streams them.
+/// An index's ticks are its values.
+///
+/// Each tick is a quote whose bid and ask are the value, with no sizes, as data-ws streams it.
 #[tokio::test(flavor = "multi_thread")]
 async fn five_minutes_of_the_s_and_p_500_fill_from_lse_as_quotes() {
     if !opted_in("five_minutes_of_the_s_and_p_500_fill_from_lse_as_quotes") {
@@ -271,8 +287,9 @@ async fn five_minutes_of_the_s_and_p_500_fill_from_lse_as_quotes() {
     assert_eq!(lacking, []);
 }
 
-/// The day's row is known at its end, stamped at the next day's 00:00: the window to the next
-/// day's start holds it.
+/// A day's row is known at the day's end, so it is stamped at 00:00 of the next day.
+///
+/// The window to the next day's start holds it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
     if !opted_in("a_day_of_bond_yields_fills_from_lse_as_custom_data") {
@@ -339,8 +356,9 @@ async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
     assert_eq!(lacking, []);
 }
 
-/// A day of GCZ6's quotes, about 2.6 million, is past the 2,500,000 rows one export may read, so
-/// LSE is asked in halves.
+/// A day of GCZ6's quotes is about 2.6 million rows.
+///
+/// That is past the 2,500,000 rows one export may read, so LSE is asked in halves.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definition_from_databento() {
     if !opted_in(
@@ -409,9 +427,10 @@ async fn a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definitio
     }
 }
 
-/// A listed option near the money, AAPL at about 355: its trades, which OPRA reports with no side,
-/// and its 1-minute bars closing on a minute of the day, at the precision of Databento's
-/// definition.
+/// A listed option near the money, AAPL at about 355.
+///
+/// OPRA reports its trades with no side. Its 1-minute bars close on a minute of the day. Both have
+/// the precision of Databento's definition.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_day_of_an_option_s_trades_and_bars_fills_from_lse_its_definition_from_databento() {
     if !opted_in(
@@ -481,8 +500,10 @@ async fn a_day_of_an_option_s_trades_and_bars_fills_from_lse_its_definition_from
     }
 }
 
-/// fill-catalog's fill of `data_type`, a custom series, over `[start, end]` from LSE into `dir`,
-/// and the rows the catalog then holds, as Nautilus decodes them. The window must be stored whole.
+/// Fills `data_type`, a custom series, over `[start, end]` from LSE into `dir` with fill-catalog.
+///
+/// Returns the rows the catalog then holds, as Nautilus decodes them. The window must be stored
+/// whole.
 async fn filled_rows(
     dir: &std::path::Path,
     data_type: &CustomSeries,
@@ -545,9 +566,11 @@ fn utc(time: &str) -> UnixNanos {
     UnixNanos::from(time.parse::<Timestamp>().unwrap())
 }
 
-/// US core inflation's release of 14 October 2026, in the economic calendar and the macro releases,
-/// stamped when it came out, with its actual; and US10Y's yields of 9 to 12 November in the macro
-/// yields, each known at its day's end.
+/// US core inflation's release of 14 October 2026 is in the economic calendar and the macro
+/// releases.
+///
+/// It is stamped when it came out, with its actual. US10Y's yields of 9 to 12 November are in the
+/// macro yields, each known at its day's end.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_release_and_a_yield_fill_from_lse_at_the_times_they_are_known() {
     if !opted_in("a_release_and_a_yield_fill_from_lse_at_the_times_they_are_known") {
@@ -595,9 +618,10 @@ async fn a_release_and_a_yield_fill_from_lse_at_the_times_they_are_known() {
     );
 }
 
-/// ZN's reports known in September 2025, stamped at their release date's end, a Saturday's 00:00,
-/// and in September 2026, with no release date, when LSE ingested them, a Friday evening: four or
-/// five each.
+/// ZN's reports known in September 2025 and September 2026, four or five each.
+///
+/// The 2025 reports are stamped at the end of their release date, a Saturday's 00:00. The 2026
+/// reports have no release date, so they are stamped when LSE ingested them, a Friday evening.
 #[tokio::test(flavor = "multi_thread")]
 async fn commitments_of_traders_fill_from_lse_at_their_release() {
     if !opted_in("commitments_of_traders_fill_from_lse_at_their_release") {
@@ -628,8 +652,9 @@ async fn commitments_of_traders_fill_from_lse_at_their_release() {
     }
 }
 
-/// AAPL's financial reports of the quarters to December 2025 and March 2026, each row at the SEC's
-/// acceptance of the quarter's 10-Q.
+/// AAPL's financial reports of the quarters to December 2025 and March 2026.
+///
+/// Each row is stamped when the SEC accepted the quarter's 10-Q.
 #[tokio::test(flavor = "multi_thread")]
 async fn financial_reports_fill_from_lse_when_their_statements_were_accepted() {
     if !opted_in("financial_reports_fill_from_lse_when_their_statements_were_accepted") {
@@ -662,8 +687,9 @@ async fn financial_reports_fill_from_lse_when_their_statements_were_accepted() {
     }
 }
 
-/// AAPL's dividends with an ex-date in 2026 to October, in dollars, and its splits since 2000,
-/// each known at its ex-date's end.
+/// AAPL's dividends with an ex-date in 2026 to October, in dollars, and its splits since 2000.
+///
+/// Each is known at the end of its ex-date.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_instrument_s_factors_fill_from_lse_at_their_days_ends() {
     if !opted_in("an_instrument_s_factors_fill_from_lse_at_their_days_ends") {

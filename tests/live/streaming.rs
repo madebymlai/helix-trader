@@ -1,17 +1,21 @@
-//! The live node streaming what it receives into the catalog, with no venue: a node in a child
-//! process (this binary, run on `streamed_node`) holds a stub data client on `SIM` that loads
-//! AUD/USD at connect, as the venues' clients do, then sends a quote, a trade and a depth snapshot
-//! every `TICK`, each numbered in sequence (the quote's bid size less one, the trade's id, the
-//! depth's sequence). An actor subscribes to them and to 1-second bars Nautilus builds from the
-//! trades. The node is built as `Live` builds it (`live::node::build`), on the stub alone, its
-//! cache in memory, and streams as `Recording` configures it into a temp-dir catalog, but
-//! promoting every `PROMOTION_MS` rather than daily, so a test sees several promotions in seconds.
-//! The test, another process, reads the catalog while the node runs and after it stops, backtests
-//! over it with the binary, and builds a dataset over it in a child of this binary
+//! Tests that the live node streams what it receives into the catalog, with no venue.
+//!
+//! A node runs in a child process (this binary, run on `streamed_node`). It holds a stub data
+//! client on `SIM`, which loads AUD/USD at connect, as the venues' clients do. Every `TICK`, the
+//! client sends a quote, a trade and a depth snapshot. Each is numbered in sequence: the quote's
+//! bid size less one, the trade's id, the depth's sequence. An actor subscribes to them, and to
+//! 1-second bars Nautilus builds from the trades.
+//!
+//! The node is built as `Live` builds it (`live::node::build`), on the stub alone, with its cache
+//! in memory. It streams as `Recording` configures it into a temp-dir catalog, but promotes every
+//! `PROMOTION_MS` rather than daily, so a test sees several promotions in seconds.
+//!
+//! The test runs in another process. It reads the catalog while the node runs and after it stops,
+//! backtests over it with the binary, and builds a dataset over it in a child of this binary
 //! (`streamed_dataset`).
 //!
-//! Hermetic and ungated: no node runs in the test's own process, so it claims none (`main.rs`). Run
-//! it with:
+//! The module is hermetic and ungated: no node runs in the test's own process, so it claims none
+//! (`main.rs`). Run it with:
 //!
 //! ```sh
 //! cargo test --test live streaming::
@@ -80,13 +84,13 @@ const TICK: Duration = Duration::from_millis(20);
 /// The child's catalog and staging directory, set only in the child.
 const ROOT: &str = "HELIX_STREAMING_ROOT";
 
-/// The child's promotion interval in milliseconds, in place of `Recording`'s daily one.
+/// The child's promotion interval in milliseconds. It replaces `Recording`'s daily interval.
 const PROMOTION_MS: &str = "HELIX_STREAMING_PROMOTION_MS";
 
 const FIRST_SEQ: &str = "HELIX_STREAMING_FIRST_SEQ";
 
-/// Set, the child writes a venue's answer back over what the catalog lacks before its node runs,
-/// as a warmup does.
+/// When set, the child writes a venue's answer back over what the catalog lacks before its node
+/// runs, as a warmup does.
 const WRITE_BACK: &str = "HELIX_STREAMING_WRITE_BACK";
 
 const DATASET_SPAN: &str = "HELIX_STREAMING_DATASET_SPAN";
@@ -196,8 +200,9 @@ fn a_restart_after_a_crash_promotes_what_the_crashed_run_staged() {
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
 }
 
-/// The restart's warmup writes the venue's answer over what the catalog lacks up to now: the
-/// crashed run's staged rows are in the catalog by then, so it lands after them.
+/// The restart's warmup writes the venue's answer over what the catalog lacks up to now.
+///
+/// The crashed run's staged rows are in the catalog by then, so the answer lands after them.
 #[rstest]
 fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -227,8 +232,10 @@ fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back(
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
 }
 
-/// No check of ours precedes a backtest: one across a crash runs on what the catalog stores, the
-/// gap replayed as a quiet period.
+/// No check of ours precedes a backtest.
+///
+/// A backtest across a crash runs on what the catalog stores, and replays the gap as a quiet
+/// period.
 #[rstest]
 fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
     let dir = tempfile::tempdir().unwrap();
@@ -251,8 +258,9 @@ fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
     assert!(backtest.status.success(), "{}", backtest_output(&backtest));
 }
 
-/// A backtest over the streamed data runs through the gaps between the promoted files, which stay
-/// in the catalog: it reads the rows, not the catalog's intervals.
+/// A backtest over the streamed data runs through the gaps between the promoted files.
+///
+/// The gaps stay in the catalog. The backtest reads the rows, not the catalog's intervals.
 #[rstest]
 fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
@@ -274,8 +282,10 @@ fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() 
     assert!(!missing.is_empty(), "no gap between promotions");
 }
 
-/// A dataset build over the streamed data, a model backtest's before its run or a retrain's
-/// replay, runs through the gaps between the promoted files, as a backtest does.
+/// A dataset build over the streamed data runs through the gaps between the promoted files, as a
+/// backtest does.
+///
+/// This is the build of a model backtest before its run, and of a retrain's replay.
 #[rstest]
 fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
@@ -290,8 +300,10 @@ fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotio
     assert!(stdout.contains("built "), "{stdout}");
 }
 
-/// Not a test: the dataset build of the test above, in a child process, over the days of
-/// `DATASET_SPAN` of the catalog of `ROOT`. Passes at once outside one.
+/// Not a test: runs the dataset build of the test above in a child process.
+///
+/// The build is over the days of `DATASET_SPAN` in the catalog of `ROOT`. Passes at once outside a
+/// child process.
 #[rstest]
 fn streamed_dataset() {
     let (Ok(root), Ok(span)) = (std::env::var(ROOT), std::env::var(DATASET_SPAN)) else {
@@ -332,7 +344,7 @@ fn streamed_dataset() {
     println!("built {} days of the dataset", built.len());
 }
 
-/// Not a test: the node the tests above run in a child process. Passes at once outside one.
+/// Not a test: runs the node the tests above use, in a child process. Passes at once outside one.
 #[rstest]
 fn streamed_node() {
     let Ok(root) = std::env::var(ROOT) else {
@@ -350,8 +362,9 @@ fn streamed_node() {
         .unwrap();
 }
 
-/// Runs the node of `root`, with no cache database, promoting every `promotion_interval`, until
-/// interrupted or killed.
+/// Runs the node of `root` until it is interrupted or killed.
+///
+/// The node has no cache database and promotes every `promotion_interval`.
 async fn run_node(root: &Path, promotion_interval: Duration, first_seq: u64) -> anyhow::Result<()> {
     let trader_id = TraderId::from(TRADER_ID);
 
@@ -395,11 +408,13 @@ async fn run_node(root: &Path, promotion_interval: Duration, first_seq: u64) -> 
     result
 }
 
-/// The number the quote a venue answers a warmup with carries: none the stub sends.
+/// The number carried by the quote a venue answers a warmup with. The stub sends no quote with it.
 const WRITTEN_BACK: u64 = 2_000_000;
 
-/// Writes back a venue's answer to a warmup for the quotes the catalog of `root` lacks up to now
-/// (`update_catalog`): one quote, at now, filed over the last missing window.
+/// Writes back a venue's answer to a warmup (`update_catalog`) for the quotes the catalog of `root`
+/// lacks up to now.
+///
+/// The answer is one quote, at now, filed over the last missing window.
 fn write_back(root: &Path) -> anyhow::Result<()> {
     let catalog = catalog(root);
     let now = get_atomic_clock_realtime().get_time_ns();
@@ -428,7 +443,9 @@ fn write_back(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// What a reader finds in the catalog, each series a clean prefix of what the node streamed.
+/// What a reader finds in the catalog.
+///
+/// Each series is a clean prefix of what the node streamed.
 #[derive(Debug)]
 struct Read {
     quotes: u64,
@@ -534,8 +551,9 @@ fn streamed_span(root: &Path) -> (Timestamp, Timestamp) {
     (first.into(), last.into())
 }
 
-/// The EMA crossover on the stub's AUD/USD: 1-second bars of its quotes, too slow to trade in a
-/// few seconds.
+/// The EMA crossover on the stub's AUD/USD.
+///
+/// It uses 1-second bars of the quotes, and is too slow to trade in a few seconds.
 const EMA_CONFIG: &str = r#"
     [data]
     series = [
@@ -566,9 +584,13 @@ fn backtest(root: &Path, start: Timestamp, end: Timestamp) -> Output {
         .unwrap()
 }
 
-/// The `model_ema` strategy on the stub's AUD/USD: a decision every two seconds on averages of 10
-/// and 30 of its 1-second bars, each target held a second and closed before the next, its unit
-/// measured in the ATR of one two-second bar, the warmup's.
+/// The `model_ema` strategy on the stub's AUD/USD.
+///
+/// The strategy:
+///
+/// - Decides every two seconds, on averages of 10 and 30 of its 1-second bars.
+/// - Holds each target a second, and closes it before the next.
+/// - Measures its unit in the ATR of one two-second bar, the warmup's.
 const MODEL_EMA_CONFIG: &str = r#"
     [data]
     series = [
@@ -631,8 +653,9 @@ fn staged_files(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Waits until the staged quotes of `root` grow after their first write, a batch flushed past the
-/// file's header.
+/// Waits until the staged quotes of `root` grow after their first write.
+///
+/// The growth is a batch flushed past the file's header.
 fn wait_for_staged_quotes(root: &Path, node: &mut Child) {
     let size = || -> u64 {
         if !root.join("staging").exists() {
@@ -659,7 +682,7 @@ fn wait_for_staged_quotes(root: &Path, node: &mut Child) {
     }
 }
 
-/// Stops `node` as Ctrl-C would, cleanly: how it exited.
+/// Stops `node` cleanly, as Ctrl-C would, and returns how it exited.
 fn interrupt(node: &mut Child) -> ExitStatus {
     let status = Command::new("kill")
         .args(["-INT", &node.id().to_string()])
@@ -676,7 +699,8 @@ fn interrupt(node: &mut Child) -> ExitStatus {
     }
 }
 
-/// Interrupts `node` once it has promoted `files` files of quotes into `root`'s catalog: how it
+/// Interrupts `node` once it has promoted `files` files of quotes into `root`'s catalog, and
+/// returns how it exited.
 /// exited.
 fn interrupt_once_promoted(root: &Path, node: &mut Child, files: usize) -> ExitStatus {
     let deadline = Instant::now() + PATIENCE;
@@ -693,8 +717,10 @@ fn interrupt_once_promoted(root: &Path, node: &mut Child, files: usize) -> ExitS
     }
 }
 
-/// Interrupts `node` once the catalog of `root` holds a quote of its run, numbered `first_seq` or
-/// more, not the one written back (`WRITTEN_BACK`): how it exited.
+/// Interrupts `node` once the catalog of `root` holds a quote of its run, and returns how it
+/// exited.
+///
+/// The quote is numbered `first_seq` or more. It is not the one written back (`WRITTEN_BACK`).
 fn interrupt_once_promoted_from(root: &Path, node: &mut Child, first_seq: u64) -> ExitStatus {
     let deadline = Instant::now() + PATIENCE;
 
@@ -712,8 +738,9 @@ fn interrupt_once_promoted_from(root: &Path, node: &mut Child, first_seq: u64) -
 }
 
 /// Interrupts `node` once it has staged a file of `series` (`bars_…`, `quotes_…`) in the staging
-/// directory of `root`: it has received some of the series, which its writer promotes as it
-/// closes. How it exited.
+/// directory of `root`, and returns how it exited.
+///
+/// The node has then received some of the series, which its writer promotes as it closes.
 fn interrupt_once_staged(root: &Path, node: &mut Child, series: &str) -> ExitStatus {
     let deadline = Instant::now() + PATIENCE;
 
@@ -733,8 +760,9 @@ fn interrupt_once_staged(root: &Path, node: &mut Child, series: &str) -> ExitSta
     }
 }
 
-/// Spawns the node of `root` in a child process, its catalog created first so the test reads it
-/// from the start.
+/// Spawns the node of `root` in a child process.
+///
+/// The catalog is created first, so the test reads it from the start.
 fn spawn_node(root: &Path, promotion_interval: Duration, first_seq: u64) -> NodeProcess {
     NodeProcess(
         node_command(root, promotion_interval, first_seq)
@@ -894,8 +922,8 @@ impl DataClient for Stub {
     }
 
     async fn connect(&mut self) -> anyhow::Result<()> {
-        // Stamped when loaded, as the venues' clients stamp theirs: a restart streams a definition
-        // of its own.
+        // Stamped when loaded, as the venues' clients stamp theirs, so a restart streams a
+        // definition of its own.
         let mut definition = audusd_sim();
         let loaded = get_atomic_clock_realtime().get_time_ns();
         definition.ts_event = loaded;
@@ -933,8 +961,8 @@ impl DataClient for Stub {
                 let mut depth = stub_depth10();
                 depth.instrument_id = instrument_id;
 
-                // AUD/USD's prices, a backtest replaying them as stored: the quote's bid and ask,
-                // then a pip further a level.
+                // AUD/USD's prices, so a backtest replays them as stored: the quote's bid and ask,
+                // then a pip further each level.
                 for (level, order) in (0_u32..).zip(depth.bids.iter_mut()) {
                     order.price = Price::new(0.8 - f64::from(level) * 0.000_01, 5);
                 }

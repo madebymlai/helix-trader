@@ -1,14 +1,16 @@
-//! End to end on LSE: a node streams the quotes of a series of each LSE derived market through the
-//! LSE adapter's data client, each on the socket that carries its market, routed LSEDGE as the
-//! live node routes it. The definitions are written by hand into a temporary catalog, as LSE
-//! publishes none, and asked of the client as a live warmup asks: the catalog answers. LSE opens a
-//! subscription with the symbol's last tick, so each series quotes at once even with its market
-//! closed; the node stops once each has, or after a minute. Bitcoin's quote is of the last hour:
-//! data-ws, which lists it too, sends only a tick of 8 November, when crypto moved to london-ws.
-//! It needs `LSE_API_KEY` from the environment or `.env`; the free key allows one connection a
-//! socket, so no other live run may hold data-ws, london-ws or tsx-ws meanwhile.
+//! Tests end to end on LSE that a node streams the quotes of a series of each LSE derived market.
+//! It uses the LSE adapter's data client, each series on the socket that carries its market, routed
+//! LSEDGE as the live node routes it. LSE publishes no definitions, so the test writes them by hand
+//! into a temporary catalog. It asks the client for them as a live warmup does, and the catalog
+//! answers. LSE opens a subscription with the symbol's last tick, so each series quotes at once
+//! even with its market closed. The node stops once each series has quoted, or after a minute.
+//! Bitcoin's quote is from the last hour: data-ws also lists it, but sends only a tick of 8
+//! November, when crypto moved to london-ws.
 //!
-//! Gated as `lse_history.rs` is, by `NAUTILUS_LSE_RUN=1` in the shell. Run it with:
+//! The test needs `LSE_API_KEY` from the environment or `.env`. The free key allows one connection
+//! a socket, so no other live run may hold data-ws, london-ws or tsx-ws meanwhile.
+//!
+//! The test is gated like `lse_history.rs`, by `NAUTILUS_LSE_RUN=1` in the shell. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_LSE_RUN=1 cargo test --test live lse_markets:: -- --nocapture
@@ -36,9 +38,11 @@ use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
 };
 
-/// A series of each derived market and its LSE symbol: on data-ws, futures, a US stock, forex, a
-/// commodity and an index; on london-ws, crypto and a UK stock; on tsx-ws, the one Canadian stock
-/// it lists.
+/// A series of each derived market and its LSE symbol.
+///
+/// - On data-ws: futures, a US stock, forex, a commodity and an index.
+/// - On london-ws: crypto and a UK stock.
+/// - On tsx-ws: the one Canadian stock it lists.
 const SERIES: [(&str, &str); 8] = [
     ("GOLD-FUTURES.LSEDGE", "GOLD"),
     ("AAPL-US_STOCKS.LSEDGE", "AAPL"),
@@ -54,11 +58,13 @@ const BITCOIN: &str = "BTCUSDT-CRYPTO.LSEDGE";
 
 const WAITED: Duration = Duration::from_secs(60);
 
-/// The precision of every series' prices, finer than LSE's of any of them.
+/// The precision of every series' prices, which is finer than LSE's for any of them.
 const PRECISION: u8 = 5;
 
-/// Whether the run is opted in, from the shell before `.env` is read, so the file cannot opt in.
-/// An opted-in run claims the process (`claim_process`).
+/// Returns whether the run is opted in.
+///
+/// Reads the opt-in from the shell before `.env` is read, so the file cannot opt in. An opted-in
+/// run claims the process (`claim_process`).
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_LSE_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -69,8 +75,9 @@ fn opted_in(test: &str) -> bool {
     run
 }
 
-/// `id`'s definition, as one is written by hand: an index of LSE's symbol `raw`, priced at
-/// `PRECISION`, its sizes whole.
+/// Returns a hand-written definition of `id`.
+///
+/// It is an index of LSE's symbol `raw`, priced at `PRECISION`, with whole sizes.
 fn index(id: &str, raw: &str) -> InstrumentAny {
     InstrumentAny::IndexInstrument(
         IndexInstrument::builder()
@@ -88,8 +95,10 @@ fn index(id: &str, raw: &str) -> InstrumentAny {
     )
 }
 
-/// Asks each series' definition of LSE's client, as a live warmup does, subscribes to its quotes,
-/// keeping the first of each, and stops the node once every series has quoted.
+/// Asks LSE's client for each series' definition, as a live warmup does, and subscribes to its
+/// quotes.
+///
+/// It keeps the first quote of each series, and stops the node once every series has quoted.
 #[derive(Debug)]
 struct Quotes {
     core: DataActorCore,

@@ -1,15 +1,19 @@
-//! End to end on LSE: a node streams, for a minute each, through the LSE adapter's data client
-//! routed as the live node routes it, LSE's gold futures quotes, `GOLD-FUTURES.LSEDGE`, on
-//! data-ws, its definition written by hand into a temporary catalog as LSE publishes none; and the
-//! Level 1 of GCZ6 of 2026, `GCZ26.GLBX`, its quotes and trades, on LSE's CME stream, its
-//! definition Databento's (the crate's `testing::gcz26`), in the catalog too. Each definition is
-//! asked of the client as a live warmup asks one: the catalog answers. They need `LSE_API_KEY` and
-//! a CME Group key, `LSE_CME_API_KEY`, from the environment or `.env`; the free key streams the
-//! gold series, on one connection a key, so no other live run may hold data-ws meanwhile. LSE
-//! opens a subscription with the symbol's last tick, and a CME contract with its last best bid
-//! and offer, so a quote comes while the market is closed too; trades come only while CME trades.
+//! Tests end to end on LSE that a node streams two feeds for a minute each. It uses the LSE
+//! adapter's data client, routed as the live node routes it.
 //!
-//! Gated as `lse_history.rs` is, by `NAUTILUS_LSE_RUN=1` in the shell. Run it with:
+//! - LSE's gold futures quotes, `GOLD-FUTURES.LSEDGE`, on data-ws. LSE publishes no definition, so
+//!   the   test writes it by hand into a temporary catalog.
+//! - Level 1 of GCZ6 of 2026, `GCZ26.GLBX`, its quotes and trades, on LSE's CME stream. Its
+//!   definition is Databento's (the crate's `testing::gcz26`), and is in the catalog too.
+//!
+//! The test asks the client for each definition as a live warmup does, and the catalog answers. It
+//! needs `LSE_API_KEY` and a CME Group key, `LSE_CME_API_KEY`, from the environment or `.env`. The
+//! free key streams the gold series, on one connection a key, so no other live run may hold data-ws
+//! meanwhile. LSE opens a subscription with the symbol's last tick, and a CME contract with its
+//! last best bid and offer, so a quote comes while the market is closed too. Trades come only while
+//! CME trades.
+//!
+//! The test is gated like `lse_history.rs`, by `NAUTILUS_LSE_RUN=1` in the shell. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_LSE_RUN=1 cargo test --test live lse_quotes:: -- --nocapture
@@ -42,8 +46,10 @@ const GOLD: &str = "GOLD-FUTURES.LSEDGE";
 
 const STREAMED: Duration = Duration::from_secs(60);
 
-/// Whether the run is opted in, from the shell before `.env` is read, so the file cannot opt in.
-/// An opted-in run claims the process (`claim_process`).
+/// Returns whether the run is opted in.
+///
+/// Reads the opt-in from the shell before `.env` is read, so the file cannot opt in. An opted-in
+/// run claims the process (`claim_process`).
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_LSE_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -54,8 +60,9 @@ fn opted_in(test: &str) -> bool {
     run
 }
 
-/// The gold series' definition, as one is written by hand: an index in USD priced to a tenth, its
-/// sizes whole lots.
+/// Returns a hand-written definition of the gold series.
+///
+/// It is an index in USD priced to a tenth, with sizes in whole lots.
 fn gold() -> InstrumentAny {
     InstrumentAny::IndexInstrument(
         IndexInstrument::builder()
