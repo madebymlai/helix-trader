@@ -124,8 +124,9 @@ struct BacktestArgs {
     #[arg(long, default_value = "models")]
     models: PathBuf,
     /// The Parquet file to write each position of the run to, one row each, open ones included:
-    /// Nautilus' columns of a position, then the R its trade was sent at and the expected R of the
-    /// model decision that sent it. Left out, none is written.
+    /// Nautilus' columns of a position, then the R its trade was sent at, the expected R of the
+    /// model decision that sent it and the bid and ask quoted at its send. Left out, none is
+    /// written.
     #[arg(long, value_parser = parse_trades_file)]
     trades: Option<PathBuf>,
 }

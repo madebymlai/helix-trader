@@ -6,8 +6,9 @@
 //!
 //! `Trade::send` sizes the trade at a `Stake` with Nautilus' fixed-risk sizer over its one R
 //! (`Trade::size`). `Trade::send_at` sizes at a fixed equity instead, a dataset run's balance.
-//! The send tags the entry with its R in money and the multiple (`entry_risk`), and with the
-//! expected net R of the model decision whose trade it is (`entry_expected_r`).
+//! The send tags the entry with its R in money and the multiple (`entry_risk`), with the expected
+//! net R of the model decision whose trade it is (`entry_expected_r`), and with the bid and ask of
+//! the instrument's latest quote in the cache, if it holds one (`entry_quote`).
 //!
 //! The send places:
 //! - With a `Bracket`, it sends a Nautilus bracket, in a backtest as live. The legs are
@@ -95,6 +96,12 @@ const MULTIPLE_TAG: &str = "MULTIPLE:";
 /// (`entry_expected_r`).
 const EXPECTED_R_TAG: &str = "EXPECTED_R:";
 
+/// Tag prefix of the bid of an entry's quote, `BID:0.70140` (`entry_quote`).
+const BID_TAG: &str = "BID:";
+
+/// Tag prefix of the ask of an entry's quote, `ASK:0.70160` (`entry_quote`).
+const ASK_TAG: &str = "ASK:";
+
 /// A trade to send, of `instrument_id` on `side`.
 ///
 /// One R spans `one_r` in price from `reference`. The exits are set from `reference`.
@@ -115,6 +122,14 @@ pub struct EntryRisk {
     pub r: Money,
     /// The multiple of the config's risk that the entry was staked at.
     pub multiple: Decimal,
+}
+
+/// The instrument's latest quote in the cache when an entry was sent, as its tags say
+/// (`entry_quote`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryQuote {
+    pub bid: Price,
+    pub ask: Price,
 }
 
 /// How a trade ends: at a bracket exit or at its time limit after the send.
@@ -369,12 +384,19 @@ impl Trade {
             return Ok(());
         }
         let r = self.risk(instrument, quantity)?;
+        let quote = strategy.cache().quote(&self.instrument_id);
         let tags: Vec<Ustr> = [
             format!("{R_TAG}{r}"),
             format!("{MULTIPLE_TAG}{}", stake.multiple().normalize()),
         ]
         .into_iter()
         .chain(self.expected_r.map(|r| format!("{EXPECTED_R_TAG}{r}")))
+        .chain(quote.into_iter().flat_map(|quote| {
+            [
+                format!("{BID_TAG}{}", quote.bid_price),
+                format!("{ASK_TAG}{}", quote.ask_price),
+            ]
+        }))
         .map(|tag| Ustr::from(&tag))
         .collect();
         self.submit(strategy, instrument, quantity, &tags, ids)
@@ -780,6 +802,22 @@ pub fn entry_expected_r(entry: &OrderAny) -> Option<R> {
         .tags()?
         .iter()
         .find_map(|tag| R::from_str(tag.as_str().strip_prefix(EXPECTED_R_TAG)?).ok())
+}
+
+/// Returns the instrument's latest quote in the cache when `entry` was sent (`Trade::send`).
+///
+/// Returns `None` for an order sent otherwise, or sent before the cache held a quote of it.
+#[must_use]
+pub fn entry_quote(entry: &OrderAny) -> Option<EntryQuote> {
+    let tags = entry.tags()?;
+    let tagged = |prefix: &str| {
+        tags.iter()
+            .find_map(|tag| Price::from_str(tag.as_str().strip_prefix(prefix)?).ok())
+    };
+    Some(EntryQuote {
+        bid: tagged(BID_TAG)?,
+        ask: tagged(ASK_TAG)?,
+    })
 }
 
 fn time_limit(entry: &OrderAny) -> Option<SignedDuration> {
