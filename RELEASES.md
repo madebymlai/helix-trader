@@ -13,6 +13,7 @@ Released on TBD (UTC).
 
 ### Internal Improvements
 
+- Improved a backtest's refusal of a P&L or commission its account cannot book, naming what is refused and its fix alone
 - Changed `replayed_quotes` to document its batch read as Nautilus' own API rather than a `Temporary` workaround
 
 ---

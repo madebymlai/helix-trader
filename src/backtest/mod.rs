@@ -388,15 +388,10 @@ fn refuse_unbooked(
                     continue;
                 }
                 anyhow::bail!(
-                    "the {what} of {id}, which the strategy trades, is in {currency}, which no \
-                     pair of [trade] conversions on {venue} converts into {}, the currency of the \
-                     balance {balance}: the simulated account on {venue} has it as its base, and \
-                     Nautilus books a fill's P&L and commission in that currency at a rate on the \
-                     instrument's venue, booking nothing of a fill it has no rate for, its P&L \
-                     included (AccountsManager::update_balance_single_currency in Nautilus' \
-                     portfolio crate); add a pair of {venue} converting {currency} into {} to \
-                     [trade] conversions",
-                    balance.currency,
+                    "the {what} of {id} is in {currency}, which no pair of [trade] conversions on \
+                     {venue} converts into {0}, the balance's currency, so Nautilus would book none \
+                     of its fills; add a pair of {venue} converting {currency} into {0} to [trade] \
+                     conversions",
                     balance.currency
                 );
             }
@@ -405,27 +400,17 @@ fn refuse_unbooked(
 
         if balance.currency != pnl {
             anyhow::bail!(
-                "the balance {balance} is in {}, not in {pnl}, the P&L currency of {id}, which the \
-                 strategy trades on {venue}, whose broker's account has no base currency: Nautilus \
-                 books a simulated account without one in each currency apart and books no loss or \
-                 commission in a currency it does not hold, while it books gains \
-                 (AccountsManager::update_balance_multi_currency in Nautilus' portfolio crate, \
-                 intentionally asymmetric until cross-currency equity tracking is implemented), so \
-                 the backtest would drop the {pnl} losses; backtest it on a balance in {pnl}",
-                balance.currency
+                "the balance {balance} is not in {pnl}, the P&L currency of {id}, and the account on \
+                 {venue} has no base currency, so Nautilus would drop the {pnl} losses; backtest it \
+                 on a balance in {pnl}"
             );
         }
 
         if charged != balance.currency && !commission.is_zero() {
             anyhow::bail!(
-                "the commission {commission} of {id}, which the strategy trades on {venue}, is in \
-                 {charged}, not in {}, the currency of the balance {balance}, and the broker's \
-                 account on {venue} has no base currency: Nautilus books a simulated account \
-                 without one in each currency apart and books nothing of a fill whose commission \
-                 is in a currency it does not hold, its P&L included \
-                 (AccountsManager::update_balance_multi_currency in Nautilus' portfolio crate); \
-                 backtest it with a commission in {}",
-                balance.currency,
+                "the commission {commission} of {id} is in {charged}, not in {0}, the balance's \
+                 currency, and the account on {venue} has no base currency, so Nautilus would book \
+                 none of its fills; backtest it with a commission in {0}",
                 balance.currency
             );
         }
