@@ -375,8 +375,8 @@ fn refuse_unheld_pnl_currency(balance: Money, traded: &[InstrumentAny]) -> anyho
 /// book, its P&L included (`AccountsManager::update_balances` in Nautilus' portfolio crate):
 /// - An account with a base currency (`venues::has_base_currency`), the balance's, converts a
 ///   commission in another currency, even a zero one, at a rate on the instrument's venue
-///   (`update_balance_single_currency`). The rates are those of the pairs in `pairs` on that
-///   venue, which the run replays.
+///   (`update_balance_single_currency`). The rates are those of `pairs`, which the run replays,
+///   all on that venue: the config refuses a pair off it (`Conversions::validate`).
 /// - An account without one holds the balance's currency alone, and deducts no commission other
 ///   than zero in another (`update_balance_multi_currency`).
 ///
@@ -399,13 +399,7 @@ fn refuse_unbooked_commission(
         let venue = id.venue;
 
         if venues::has_base_currency(venue) {
-            let on_venue: Vec<InstrumentAny> = pairs
-                .iter()
-                .filter(|pair| pair.id().venue == venue)
-                .cloned()
-                .collect();
-
-            if !conversions::reaches(&on_venue, charged, balance.currency)? {
+            if !conversions::reaches(pairs, charged, balance.currency)? {
                 anyhow::bail!(
                     "the commission {commission} of {id} is in {charged}, which no pair of [trade] \
                      conversions on {venue} converts into {0}, the balance's currency, so Nautilus \
@@ -740,11 +734,6 @@ mod tests {
     #[rstest]
     #[case::on_ic_with_no_pair(cfd("XAUUSD.ICMARKETS"), "3 EUR", &[])]
     #[case::free_on_ic_with_no_pair(cfd("XAUUSD.ICMARKETS"), "0 EUR", &[])]
-    #[case::on_ic_through_a_pair_of_another_venue(
-        cfd("XAUUSD.ICMARKETS"),
-        "3 EUR",
-        &["EUR/USD.PEPPERSTONE"]
-    )]
     #[case::on_glbx(future("GCZ6.GLBX"), "3 EUR", &[])]
     fn a_commission_its_account_cannot_book_is_refused(
         #[case] instrument: InstrumentAny,
