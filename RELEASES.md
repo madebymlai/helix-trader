@@ -1,3 +1,9 @@
+# Helix Trader 0.3.0
+
+Released on TBD (UTC).
+
+---
+
 # Helix Trader 0.2.0
 
 Released on 2026-11-20 (UTC).
