@@ -6,7 +6,8 @@
 //!
 //! `Trade::send` sizes the trade at a `Stake` with Nautilus' fixed-risk sizer over its one R
 //! (`Trade::size`). `Trade::send_at` sizes at a fixed equity instead, a dataset run's balance.
-//! The send tags the entry with its R in money and the multiple (`entry_risk`).
+//! The send tags the entry with its R in money and the multiple (`entry_risk`), and with the
+//! expected net R of the model decision whose trade it is (`entry_expected_r`).
 //!
 //! The send places:
 //! - With a `Bracket`, it sends a Nautilus bracket, in a backtest as live. The legs are
@@ -68,7 +69,10 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use ustr::Ustr;
 
-use super::{conversions::Rates, risk::Stake};
+use super::{
+    conversions::Rates,
+    risk::{R, Stake},
+};
 use crate::venues::{self, EquitySource};
 
 const TIME_ALERT: &str = "TRADE-TIME:";
@@ -87,6 +91,10 @@ const R_TAG: &str = "R:";
 /// Tag prefix of an entry's stake multiple, `MULTIPLE:2` (`entry_risk`).
 const MULTIPLE_TAG: &str = "MULTIPLE:";
 
+/// Tag prefix of the expected net R of the decision an entry was sent on, `EXPECTED_R:0.42R`
+/// (`entry_expected_r`).
+const EXPECTED_R_TAG: &str = "EXPECTED_R:";
+
 /// A trade to send, of `instrument_id` on `side`.
 ///
 /// One R spans `one_r` in price from `reference`. The exits are set from `reference`.
@@ -97,6 +105,7 @@ pub struct Trade {
     reference: Price,
     one_r: Decimal,
     exits: Exits,
+    expected_r: Option<R>,
 }
 
 /// What an entry sent at a stake risks, as its tags say (`entry_risk`).
@@ -182,6 +191,17 @@ impl Trade {
             reference,
             one_r,
             exits,
+            expected_r: None,
+        }
+    }
+
+    /// Returns the trade of a decision that expects `expected_r` of it, which its send tags on the
+    /// entry (`entry_expected_r`).
+    #[must_use]
+    pub const fn expecting(self, expected_r: R) -> Self {
+        Self {
+            expected_r: Some(expected_r),
+            ..self
         }
     }
 
@@ -349,11 +369,14 @@ impl Trade {
             return Ok(());
         }
         let r = self.risk(instrument, quantity)?;
-        let tags = [
+        let tags: Vec<Ustr> = [
             format!("{R_TAG}{r}"),
             format!("{MULTIPLE_TAG}{}", stake.multiple().normalize()),
         ]
-        .map(|tag| Ustr::from(&tag));
+        .into_iter()
+        .chain(self.expected_r.map(|r| format!("{EXPECTED_R_TAG}{r}")))
+        .map(|tag| Ustr::from(&tag))
+        .collect();
         self.submit(strategy, instrument, quantity, &tags, ids)
     }
 
@@ -746,6 +769,17 @@ pub fn entry_risk(entry: &OrderAny) -> Option<EntryRisk> {
         r: Money::from_str_exact(tagged(R_TAG)?).ok()?,
         multiple: Decimal::from_str(tagged(MULTIPLE_TAG)?).ok()?,
     })
+}
+
+/// Returns the expected net R of the decision `entry` was sent on (`Trade::expecting`).
+///
+/// Returns `None` for an order no decision sent.
+#[must_use]
+pub fn entry_expected_r(entry: &OrderAny) -> Option<R> {
+    entry
+        .tags()?
+        .iter()
+        .find_map(|tag| R::from_str(tag.as_str().strip_prefix(EXPECTED_R_TAG)?).ok())
 }
 
 fn time_limit(entry: &OrderAny) -> Option<SignedDuration> {

@@ -613,7 +613,7 @@ fn backtest_catalog() -> TempDir {
 }
 
 /// Commission, balance and latency belong to the backtest's account alone. Its models are the
-/// config's (`[model] dataset`).
+/// config's (`[model] dataset`). The trades file is written after the report, before the scores.
 #[rstest]
 fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_scores() {
     let catalog = backtest_catalog();
@@ -625,6 +625,8 @@ fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_s
     for at in [t(), next] {
         publish(&models, at);
     }
+    let trades = dir.path().join("trades.parquet");
+    let trades = trades.to_str().unwrap();
     let other_costs = [
         "--commission-rate",
         "0.0001",
@@ -632,6 +634,8 @@ fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_s
         "100000 USD",
         "--latency",
         "150ms",
+        "--trades",
+        trades,
     ];
 
     let (stdout, _) = backtest_at(
@@ -655,6 +659,12 @@ fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_s
     );
     let scores = stdout.find("Long model scores").expect(&stdout);
     assert!(stdout.find("Final balances").unwrap() < scores, "{stdout}");
+    let written = stdout.find("Trades: ").expect(&stdout);
+    assert!(
+        stdout.find("Models trained at").unwrap() < written && written < scores,
+        "{stdout}"
+    );
+
     for (from, to) in [(t(), next), (next, end)] {
         assert!(
             stdout.contains(&format!(

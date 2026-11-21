@@ -150,6 +150,10 @@ fn argv<'a>(parts: &[&[&'a str]]) -> Vec<&'a str> {
 #[case::a_latency_of_nothing(argv(&[&BACKTEST, &COSTS, &["--latency=0s"]]), &["--latency", "0s"])]
 #[case::a_latency_of_no_unit(argv(&[&BACKTEST, &COSTS, &["--latency=150"]]), &["--latency", "150"])]
 #[case::a_latency_in_words(argv(&[&BACKTEST, &COSTS, &["--latency=fast"]]), &["--latency", "fast"])]
+#[case::a_trades_file_that_names_no_file(
+    argv(&[&BACKTEST, &COSTS, &["--trades=out/.."]]),
+    &["--trades", "out/.."]
+)]
 #[case::a_backtest_given_a_leverage(
     argv(&[&BACKTEST, &COSTS, &["--leverage", "10"]]),
     &["--leverage"]
