@@ -123,6 +123,11 @@ struct BacktestArgs {
     /// The backtest refuses to run if the store holds no model to trade on at its start.
     #[arg(long, default_value = "models")]
     models: PathBuf,
+    /// The Parquet file to write each position of the run to, one row each, open ones included:
+    /// Nautilus' columns of a position, then the R its trade was sent at and the expected R of the
+    /// model decision that sent it. Left out, none is written.
+    #[arg(long)]
+    trades: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -378,7 +383,7 @@ impl<B: FnOnce(DataRequirements, &[InstrumentId]) -> Backtest> Visitor for Backt
         backtest.refuse_balance(&config.trade)?;
         let outcome = backtest.run(S::backtest(config)?)?;
         print!("{}", backtest::report(&outcome));
-        Ok(())
+        write_trades(self.args, &outcome)
     }
 
     fn model<S: ModelStrategy>(self) -> Self::Output {
@@ -437,6 +442,7 @@ fn backtest_on_models<S: ModelStrategy>(
     let trained_at = config.model().dataset;
     let outcome = backtest.run(S::new(config, mode)?)?;
     print!("{}", backtest::report(&outcome));
+    write_trades(args, &outcome)?;
     let (commission, balance) = (args.commission.commission(), args.balance);
     match args.latency {
         None => {
@@ -451,6 +457,20 @@ fn backtest_on_models<S: ModelStrategy>(
     }
     println!("Models trained at: {trained_at} ([model] dataset)");
     print!("{}", walk.scores(start, end)?);
+    Ok(())
+}
+
+/// Writes the positions of `outcome` to the trades file `args` names, if any, and says so.
+fn write_trades(args: &BacktestArgs, outcome: &backtest::Outcome) -> anyhow::Result<()> {
+    let Some(path) = &args.trades else {
+        return Ok(());
+    };
+    outcome.trades.write(path)?;
+    println!(
+        "Trades: {} positions written to {}",
+        outcome.trades.batch().num_rows(),
+        path.display()
+    );
     Ok(())
 }
 

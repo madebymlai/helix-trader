@@ -593,6 +593,19 @@ fn a_trades_entry_is_tagged_with_its_r_in_money_and_its_stakes_multiple() {
 }
 
 #[rstest]
+fn a_decisions_trade_tags_its_entry_with_its_expected_r_and_another_trade_does_not() {
+    let (mut probe, _) = registered();
+
+    sent(&mut probe, "T-1", buy(bracket(4)).expecting(R::new(0.42)));
+    sent(&mut probe, "T-2", buy(bracket(4)));
+
+    let decided = probe.cache().order(&id("T-1")).unwrap();
+    let undecided = probe.cache().order(&id("T-2")).unwrap();
+    assert_eq!(entry_expected_r(&decided), Some(R::new(0.42)));
+    assert_eq!(entry_expected_r(&undecided), None);
+}
+
+#[rstest]
 fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
     let name = "a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why";
     if !log_capture::alone(module_path!(), name) {

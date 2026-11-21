@@ -374,6 +374,29 @@ pub(crate) mod trades {
     pub(crate) fn ema_cross() -> EmaCross {
         shortest_ema_cross()
     }
+
+    /// Returns the config of `ema_cross` on SXR8's hour bars, for the binary, with `more` as lines
+    /// of TOML at the end of `[trade]`.
+    pub(crate) fn ema_toml(more: &str) -> String {
+        format!(
+            r#"
+            [data]
+            series = [
+                {{ data = "bars", instrument_id = "{INSTRUMENT_ID}", bar_spec = {{ step = 1, aggregation = "HOUR", price_type = "MID" }} }},
+            ]
+            warmup = "1h"
+
+            [indicators]
+            fast = {{ period = 1 }}
+            slow = {{ period = 2 }}
+
+            [trade]
+            instruments = [{{ instrument_id = "{INSTRUMENT_ID}" }}]
+            risk = "{RISK}"
+            {more}
+            "#
+        )
+    }
 }
 
 /// A quote a minute on 7 January 2026 from 06:00 to 15:00 UTC, at mid 600 plus 0.01 times

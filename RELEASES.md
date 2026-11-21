@@ -2,6 +2,10 @@
 
 Released on TBD (UTC).
 
+### Enhancements
+
+- Added `backtest --trades <path>`, writing each position of the run to Parquet with the R its trade was sent at and a model decision's expected R
+
 ---
 
 # Helix Trader 0.2.0

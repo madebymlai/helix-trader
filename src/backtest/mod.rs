@@ -7,6 +7,7 @@ mod costs;
 mod latency;
 mod node;
 mod report;
+mod trades;
 
 use std::{collections::BTreeSet, fmt::Debug, path::PathBuf};
 
@@ -31,6 +32,7 @@ pub use self::{
     costs::Commission,
     latency::Latency,
     report::{Outcome, report},
+    trades::Trades,
 };
 use crate::{
     rolls::ContinuousBars,
