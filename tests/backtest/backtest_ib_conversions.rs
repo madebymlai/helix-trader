@@ -108,7 +108,7 @@ fn a_backtest_through_ib_on_a_balance_off_the_pnl_currency_is_refused_naming_why
         "GLBX",
         "EUR",
         "USD",
-        "update_balance_multi_currency",
+        "no base currency",
     ] {
         assert!(stderr.contains(named), "{named}: {stderr}");
     }
