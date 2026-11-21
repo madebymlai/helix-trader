@@ -7,15 +7,17 @@
 //! still open at the end of the run has no close (`ts_closed`, `avg_px_close`,
 //! `closing_order_id` are null) and its realized P&L so far.
 //!
-//! Three columns follow Nautilus' own, read from the tags of the position's opening entry:
+//! Five columns follow Nautilus' own, read from the tags of the position's opening entry:
 //! - `r_amount` and `r_currency`: the R in money its trade was sent at (`orders::entry_risk`).
 //! - `expected_r`: the expected net R of the model decision that sent it
 //!   (`orders::entry_expected_r`), null for a trade no decision sent.
+//! - `entry_bid` and `entry_ask`: the bid and ask of the instrument's latest quote in the cache when
+//!   it was sent (`orders::entry_quote`), null if the cache held none.
 //!
 //! They are set only when the position holds its opening entry's trade whole: every fill that adds
 //! to it is of that entry, and every fill of that entry adds to it. A netting position that another
 //! entry added to, or one opened by the rest of an entry that flipped the position before it, has
-//! no single trade, so its three are null. Its net R is `realized_pnl_amount` over `r_amount`,
+//! no single trade, so its five are null. Its net R is `realized_pnl_amount` over `r_amount`,
 //! Nautilus netting a commission into the P&L in its own currency alone (`commissions` lists them).
 
 use std::{
@@ -39,7 +41,10 @@ use nautilus_serialization::arrow::display::position::encode_positions;
 use object_store::path::Path as ObjectPath;
 use rust_decimal::Decimal;
 
-use crate::strategy::orders::{self, EntryRisk};
+use crate::strategy::{
+    orders::{self, EntryQuote, EntryRisk},
+    risk::R,
+};
 
 /// The positions of a run, as the trades file holds them.
 #[derive(Debug, Clone)]
@@ -62,12 +67,17 @@ impl Trades {
         let mut r_amount = Float64Builder::with_capacity(positions.len());
         let mut r_currency = StringBuilder::new();
         let mut expected_r = Float64Builder::with_capacity(positions.len());
+        let mut entry_bid = Float64Builder::with_capacity(positions.len());
+        let mut entry_ask = Float64Builder::with_capacity(positions.len());
         for position in &positions {
             let trade = whole_trade(cache, position);
-            let risk = trade.and_then(|(risk, _)| risk);
+            let risk = trade.and_then(|tags| tags.risk);
             r_amount.append_option(risk.map(|risk| risk.r.as_f64()));
             r_currency.append_option(risk.map(|risk| risk.r.currency.code.to_string()));
-            expected_r.append_option(trade.and_then(|(_, expected)| expected).map(|r| r.as_f64()));
+            expected_r.append_option(trade.and_then(|tags| tags.expected_r).map(|r| r.as_f64()));
+            let quote = trade.and_then(|tags| tags.quote);
+            entry_bid.append_option(quote.map(|quote| quote.bid.as_f64()));
+            entry_ask.append_option(quote.map(|quote| quote.ask.as_f64()));
         }
         let encoded = encode_positions(&positions).context("encoding the positions of the run")?;
         let mut fields: Vec<Field> = encoded
@@ -80,12 +90,16 @@ impl Trades {
             Field::new("r_amount", DataType::Float64, true),
             Field::new("r_currency", DataType::Utf8, true),
             Field::new("expected_r", DataType::Float64, true),
+            Field::new("entry_bid", DataType::Float64, true),
+            Field::new("entry_ask", DataType::Float64, true),
         ]);
         let mut columns: Vec<ArrayRef> = encoded.columns().to_vec();
         columns.extend([
             Arc::new(r_amount.finish()) as ArrayRef,
             Arc::new(r_currency.finish()),
             Arc::new(expected_r.finish()),
+            Arc::new(entry_bid.finish()),
+            Arc::new(entry_ask.finish()),
         ]);
         let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
             .context("adding the trade columns to the positions of the run")?;
@@ -129,13 +143,20 @@ impl Trades {
     }
 }
 
+/// The tags of a position's opening entry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EntryTags {
+    /// What it risks, if it was sent at a stake.
+    risk: Option<EntryRisk>,
+    /// The expected R of the decision that sent it, if any.
+    expected_r: Option<R>,
+    /// The instrument's latest quote at its send, if the cache held one.
+    quote: Option<EntryQuote>,
+}
+
 /// Returns the tags of `position`'s opening entry, if the position holds its trade whole (see the
-/// module doc): what it risks, if it was sent at a stake, and the expected R of the decision that
-/// sent it, if any.
-fn whole_trade(
-    cache: &Cache,
-    position: &Position,
-) -> Option<(Option<EntryRisk>, Option<crate::strategy::risk::R>)> {
+/// module doc).
+fn whole_trade(cache: &Cache, position: &Position) -> Option<EntryTags> {
     let entry = cache.order(&position.opening_order_id)?;
     let adding = position
         .events
@@ -149,8 +170,11 @@ fn whole_trade(
         }
         added += fill.last_qty.as_decimal();
     }
-    (added == entry.filled_qty().as_decimal())
-        .then(|| (orders::entry_risk(&entry), orders::entry_expected_r(&entry)))
+    (added == entry.filled_qty().as_decimal()).then(|| EntryTags {
+        risk: orders::entry_risk(&entry),
+        expected_r: orders::entry_expected_r(&entry),
+        quote: orders::entry_quote(&entry),
+    })
 }
 
 #[cfg(test)]
@@ -164,15 +188,20 @@ mod tests {
             OrderAny, OrderTestBuilder,
             stubs::{OrderFilledTestBuilder, TestOrderStubs},
         },
-        types::{Money, Quantity},
+        types::{Money, Price, Quantity},
     };
     use rstest::rstest;
     use ustr::Ustr;
 
     use super::*;
-    use crate::strategy::risk::R;
 
-    const TAGGED: [&str; 3] = ["R:31.00 USD", "MULTIPLE:1", "EXPECTED_R:0.42R"];
+    const TAGGED: [&str; 5] = [
+        "R:31.00 USD",
+        "MULTIPLE:1",
+        "EXPECTED_R:0.42R",
+        "BID:620.55",
+        "ASK:620.65",
+    ];
 
     fn aapl() -> InstrumentAny {
         InstrumentAny::Equity(equity_aapl())
@@ -235,11 +264,18 @@ mod tests {
 
         let trade = whole_trade(&cached(&[&entry, &leg]), &position_of(&fills));
 
-        let risk = EntryRisk {
-            r: Money::from("31.00 USD"),
-            multiple: Decimal::ONE,
+        let tags = EntryTags {
+            risk: Some(EntryRisk {
+                r: Money::from("31.00 USD"),
+                multiple: Decimal::ONE,
+            }),
+            expected_r: Some(R::new(0.42)),
+            quote: Some(EntryQuote {
+                bid: Price::from("620.55"),
+                ask: Price::from("620.65"),
+            }),
         };
-        assert_eq!(trade, Some((Some(risk), Some(R::new(0.42)))));
+        assert_eq!(trade, Some(tags));
     }
 
     #[rstest]

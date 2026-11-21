@@ -5,6 +5,7 @@ Released on TBD (UTC).
 ### Enhancements
 
 - Added `backtest --trades <path>`, writing each position of the run to Parquet with the R its trade was sent at and a model decision's expected R
+- Added `entry_bid` and `entry_ask` to a backtest's trades file, the bid and ask of the instrument's latest quote when the trade's entry was sent
 
 ### Fixes
 

@@ -10,6 +10,8 @@
 //! - 15:00 buys 10 at 610.65, one R 3.05 from 610.60 to 607.55, 30.50 EUR. It is open at 16:00,
 //!   the end, its realized P&L the commission of nought.
 //!
+//! Each trade is sent on the latest quote, the one its bar closed on, which bids and asks the half
+//! spread 0.05 either side of the close: 620.55 and 620.65, 600.55 and 600.65, 610.55 and 610.65.
 //! Each trade is sized at 0.32% of the equity then over its one R, 10 shares each time. Nautilus
 //! archives each closed cycle as a snapshot before the next fill reuses the ID, under the ID and a
 //! UUID, so the file holds the two snapshots and the open position. No decision sent them, so they
@@ -113,6 +115,14 @@ fn each_cycle_of_the_position_is_a_row_with_the_r_its_trade_was_sent_at() {
     );
     assert_eq!(strings(batch, "r_currency"), some(&["EUR"; 3]));
     assert_eq!(numbers(batch, "expected_r"), [None; 3]);
+    assert_eq!(
+        numbers(batch, "entry_bid"),
+        [Some(620.55), Some(600.55), Some(610.55)]
+    );
+    assert_eq!(
+        numbers(batch, "entry_ask"),
+        [Some(620.65), Some(600.65), Some(610.65)]
+    );
     let ids = strings(batch, "position_id");
     let open = ids[2].clone().unwrap();
     assert!(
