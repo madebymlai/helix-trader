@@ -1,3 +1,13 @@
+# Helix Trader 0.3.0
+
+Released on TBD (UTC).
+
+### Internal Improvements
+
+- Changed `replayed_quotes` to document its batch read as Nautilus' own API rather than a `Temporary` workaround
+
+---
+
 # Helix Trader 0.2.0
 
 Released on 2026-11-20 (UTC).

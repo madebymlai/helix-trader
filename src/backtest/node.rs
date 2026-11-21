@@ -336,13 +336,10 @@ where
 
 /// Returns the quotes `data` replays in a run from `start` to `end`, in time order.
 ///
-/// The query the node streams them by reads them a batch at a time
-/// (`BacktestNode::load_data_config` collects them into memory at once). An error opening the
-/// catalog or reading a batch is an item.
-///
-/// Temporary: no public Nautilus call streams a data config, so this function builds the query as
-/// Nautilus' private `dispatch_batch_query` does (`backtest/src/node.rs`). Once Nautilus has such a
-/// call, this function is that call and a match on quotes: helix-trader#15.
+/// The quotes are read a batch at a time (`query_batch_session`), on the query the node streams
+/// `data` by (`dispatch_batch_query`, `backtest/src/node.rs`). `BacktestNode::load_data_config`
+/// would collect them into memory at once. An error opening the catalog or reading a batch is an
+/// item.
 fn replayed_quotes(
     data: &BacktestDataConfig,
     start: Option<UnixNanos>,
