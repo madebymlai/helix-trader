@@ -13,6 +13,7 @@ Released on TBD (UTC).
 
 ### Internal Improvements
 
+- Changed the check of a backtest's commission to a function of its own, its refusals naming what is refused and the fix alone
 - Changed `replayed_quotes` to document its batch read as Nautilus' own API rather than a `Temporary` workaround
 
 ---
