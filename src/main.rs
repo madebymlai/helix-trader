@@ -126,7 +126,7 @@ struct BacktestArgs {
     /// The Parquet file to write each position of the run to, one row each, open ones included:
     /// Nautilus' columns of a position, then the R its trade was sent at and the expected R of the
     /// model decision that sent it. Left out, none is written.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_trades_file)]
     trades: Option<PathBuf>,
 }
 
@@ -269,6 +269,15 @@ fn parse_time(s: &str) -> Result<Timestamp, String> {
     s.parse::<UnixNanos>()
         .map(Timestamp::from)
         .map_err(|e| e.to_string())
+}
+
+/// Refuses a trades file that names no file, such as `/` or `out/..`, before the run.
+fn parse_trades_file(s: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(s);
+    match path.file_name() {
+        Some(_) => Ok(path),
+        None => Err(format!("{s} names no file")),
+    }
 }
 
 /// Explicit, since clap would otherwise pick `Money: From<&str>`, which panics.
@@ -442,7 +451,6 @@ fn backtest_on_models<S: ModelStrategy>(
     let trained_at = config.model().dataset;
     let outcome = backtest.run(S::new(config, mode)?)?;
     print!("{}", backtest::report(&outcome));
-    write_trades(args, &outcome)?;
     let (commission, balance) = (args.commission.commission(), args.balance);
     match args.latency {
         None => {
@@ -456,6 +464,7 @@ fn backtest_on_models<S: ModelStrategy>(
         ),
     }
     println!("Models trained at: {trained_at} ([model] dataset)");
+    write_trades(args, &outcome)?;
     print!("{}", walk.scores(start, end)?);
     Ok(())
 }
