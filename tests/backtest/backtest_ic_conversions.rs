@@ -7,7 +7,7 @@
 use std::{cell::RefCell, path::Path, process::Command, rc::Rc};
 
 use helix_trader::{
-    backtest::{Commission, Outcome},
+    backtest::{self, Commission, Outcome},
     strategy::{
         conversions::Conversions,
         orders::{EntryRisk, entry_risk},
@@ -141,7 +141,40 @@ fn the_account_books_its_margin_commissions_and_pnl_in_the_balances_currency() {
     assert_eq!(margin.maintenance, Money::from("13373.83 EUR"));
 }
 
-fn backtest_command(catalog: &Path, traded: &str, balance: &str) -> std::process::Output {
+/// Each order costs 4 EUR, booked in USD at 1.25: 5 USD. 1% of 100,000 USD over one R of 10.00 USD an
+/// ounce buys 100 oz, whose gain is 580 USD. The balance is 100,000 + 580 - 15 USD, and the report
+/// lists the commission in USD, where the PnL nets it.
+#[rstest]
+fn the_account_books_a_commission_in_another_currency_converted_into_the_balances() {
+    let eurusd = (ic::EURUSD, Currency::EUR(), Currency::USD(), 5);
+
+    let (outcome, _) = converted_run(
+        "100000 USD",
+        eurusd,
+        ["1.25000", "1.25000"],
+        Commission::PerOrder(Money::from("4 EUR")),
+        "10",
+        vec![1],
+    );
+
+    assert_eq!(
+        outcome.result.summary["account.ICMARKETS.balance.USD.total"],
+        "100565.00 USD"
+    );
+    let report = backtest::report(&outcome);
+    assert!(!report.contains("EUR"), "{report}");
+    assert!(
+        report.contains("Costs (USD)\n  Commission: 15.000000\n"),
+        "{report}"
+    );
+}
+
+fn backtest_command(
+    catalog: &Path,
+    traded: &str,
+    balance: &str,
+    commission: &str,
+) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ema.toml");
     std::fs::write(
@@ -174,7 +207,7 @@ fn backtest_command(catalog: &Path, traded: &str, balance: &str) -> std::process
         .arg(catalog)
         .args(["--start", &ic::at("09:00:00").to_string()])
         .args(["--end", &ic::at("12:00:00").to_string()])
-        .args(["--balance", balance, "--commission", "0 USD"])
+        .args(["--balance", balance, "--commission", commission])
         .output()
         .unwrap()
 }
@@ -194,7 +227,7 @@ fn catalog_with_eurusd() -> tempfile::TempDir {
 fn a_backtest_runs_on_a_balance_its_conversions_reach_the_pnl_currency_from() {
     let catalog = catalog_with_eurusd();
 
-    let output = backtest_command(catalog.path(), ic::INSTRUMENT_ID, "100000 EUR");
+    let output = backtest_command(catalog.path(), ic::INSTRUMENT_ID, "100000 EUR", "0 USD");
 
     let (stdout, stderr) = (
         String::from_utf8_lossy(&output.stdout),
@@ -212,7 +245,7 @@ fn a_backtest_runs_on_a_balance_its_conversions_reach_the_pnl_currency_from() {
 fn a_backtest_on_a_balance_its_conversions_do_not_reach_the_pnl_currency_from_is_refused() {
     let catalog = catalog_with_eurusd();
 
-    let output = backtest_command(catalog.path(), ic::INSTRUMENT_ID, "15000000 JPY");
+    let output = backtest_command(catalog.path(), ic::INSTRUMENT_ID, "15000000 JPY", "0 USD");
 
     let (stdout, stderr) = (
         String::from_utf8_lossy(&output.stdout),
@@ -228,12 +261,32 @@ fn a_backtest_on_a_balance_its_conversions_do_not_reach_the_pnl_currency_from_is
     assert!(!stdout.contains("Orders:"), "{stdout}");
 }
 
+#[rstest]
+fn a_backtest_with_a_commission_its_account_cannot_book_is_refused() {
+    let catalog = catalog_with_eurusd();
+
+    let output = backtest_command(catalog.path(), ic::INSTRUMENT_ID, "100000 USD", "300 JPY");
+
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(!output.status.success(), "{stdout}{stderr}");
+    assert!(
+        [ic::INSTRUMENT_ID, "commission", "JPY", "USD"]
+            .iter()
+            .all(|named| stderr.contains(named)),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("Orders:"), "{stdout}");
+}
+
 /// EURUSD is one of the strategy's instruments, so IC starts with the balance.
 #[rstest]
 fn a_venue_trading_one_of_its_pairs_starts_with_the_balance() {
     let catalog = catalog_with_eurusd();
 
-    let output = backtest_command(catalog.path(), ic::EURUSD, "100000 EUR");
+    let output = backtest_command(catalog.path(), ic::EURUSD, "100000 EUR", "0 USD");
 
     let (stdout, stderr) = (
         String::from_utf8_lossy(&output.stdout),
