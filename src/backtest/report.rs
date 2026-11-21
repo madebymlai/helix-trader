@@ -3,24 +3,27 @@
 //! This module prints the order and position counts, statistics and final balances of the Nautilus
 //! `BacktestResult`. The statistics include the max drawdown, which `node::run` registers. It also
 //! prints the costs, which the result does not hold. The costs come from the fills (`OrderFilled`)
-//! in the engine's cache and the quotes they filled on. A run on bars or trades alone has no
-//! spread to measure.
+//! in the engine's cache, the quotes they filled on and the commissions its accounts booked. A run
+//! on bars or trades alone has no spread to measure.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write,
 };
 
+use ahash::AHashMap;
 use anyhow::Context;
 use nautilus_backtest::result::BacktestResult;
 use nautilus_common::cache::Cache;
 use nautilus_model::{
+    accounts::AccountAny,
     data::QuoteTick,
     enums::{OrderSide, PriceType},
     events::{OrderEventAny, OrderFilled},
     identifiers::InstrumentId,
     instruments::Instrument,
     orders::Order,
+    types::{Currency, Money},
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
@@ -38,11 +41,9 @@ pub struct Outcome {
 
 #[derive(Debug, Default)]
 struct Costs {
-    /// The commission on fills of positions settled in this currency. Nautilus nets it into their
-    /// PnL.
+    /// The commission the run's accounts booked in this currency, which Nautilus nets into its
+    /// `PnL (total)`.
     commission: Decimal,
-    /// The commission on fills of positions settled in another currency. No PnL nets it.
-    outside_pnl: Decimal,
     /// For a buy, a fill's value at its price less its value at the mid of its quote. For a sell,
     /// the reverse.
     spread: Decimal,
@@ -96,15 +97,7 @@ impl Outcome {
             anyhow::ensure!(!instrument.is_inverse(), "{id} is inverse");
             let cost = costs.entry(fill.currency.code.to_string()).or_default();
             cost.trades += 1;
-            if let Some(commission) = fill.commission {
-                let code = commission.currency.code.to_string();
-                let charged = costs.entry(code).or_default();
-                if commission.currency == instrument.cost_currency() {
-                    charged.commission += commission.as_decimal();
-                } else {
-                    charged.outside_pnl += commission.as_decimal();
-                }
-            }
+
             if !quoted.contains(&id) {
                 costs
                     .entry(fill.currency.code.to_string())
@@ -128,11 +121,34 @@ impl Outcome {
                 .or_default()
                 .spread += paid * size;
         }
+
+        for account in cache.accounts_all_owned() {
+            for commission in booked(&account).into_values() {
+                costs
+                    .entry(commission.currency.code.to_string())
+                    .or_default()
+                    .commission += commission.as_decimal();
+            }
+        }
         Ok(Self {
             result,
             trades: Trades::of(cache)?,
             costs,
         })
+    }
+}
+
+/// Returns the commission `account` booked, by currency.
+///
+/// An account with a base currency books each commission converted into it, at the rate on the
+/// fill's venue; one without books it in the currency charged (`AccountsManager::update_balances`
+/// in Nautilus' portfolio crate).
+fn booked(account: &AccountAny) -> AHashMap<Currency, Money> {
+    match account {
+        AccountAny::Margin(account) => account.commissions(),
+        AccountAny::Cash(account) => account.commissions(),
+        AccountAny::Betting(account) => account.commissions(),
+        AccountAny::Wallet(account) => account.commissions(),
     }
 }
 
@@ -219,10 +235,9 @@ where
 /// holds the spread paid to open. A currency with a fill on no quote prints its spread as not
 /// applicable, and its cost per trade and gross PnL hold the commission alone.
 ///
-/// A commission in a currency other than its position's settlement currency is in no PnL, because
-/// Nautilus nets it only in that currency (`model/src/position.rs`, `handle_order_fill`). It is
-/// listed apart as `Commission outside PnL`. It counts toward neither the cost per trade nor the
-/// gross PnL.
+/// The commission of a currency is what the run's accounts booked in it (`booked`), so it is the
+/// commission that currency's `PnL (total)`, the change of its balances, nets. The spread and the
+/// trades of a currency are those of fills in it.
 #[must_use]
 pub fn report(outcome: &Outcome) -> String {
     let result = &outcome.result;
@@ -239,9 +254,6 @@ pub fn report(outcome: &Outcome) -> String {
         let spread = (costs.unquoted == 0).then_some(costs.spread);
         let total = costs.commission + spread.unwrap_or_default();
         let mut figures = BTreeMap::from([("Commission".to_string(), f64(costs.commission))]);
-        if !costs.outside_pnl.is_zero() {
-            figures.insert("Commission outside PnL".to_string(), f64(costs.outside_pnl));
-        }
         if let Some(spread) = spread {
             figures.insert("Spread".to_string(), f64(spread));
         }
@@ -291,14 +303,16 @@ fn section<'a>(
 mod tests {
     use nautilus_core::{UUID4, UnixNanos};
     use nautilus_model::{
-        enums::OrderType,
-        identifiers::ClientOrderId,
+        accounts::MarginAccount,
+        enums::{AccountType, OrderType},
+        events::AccountState,
+        identifiers::{AccountId, ClientOrderId},
         instruments::{InstrumentAny, stubs::equity_aapl},
         orders::{
             OrderAny, OrderTestBuilder,
             stubs::{OrderFilledTestBuilder, TestOrderStubs},
         },
-        types::{Currency, Money, Price, Quantity},
+        types::{AccountBalance, Price, Quantity},
     };
     use rstest::rstest;
 
@@ -410,8 +424,51 @@ mod tests {
         ] {
             cache.add_order(order, None, None, false).unwrap();
         }
+        cache
+            .add_account(account(
+                "IBIS-001",
+                "9942.00 EUR",
+                None,
+                &["6 EUR", "1.25 GBP"],
+            ))
+            .unwrap();
+        cache
+            .add_account(account("NASDAQ-001", "100.00 USD", None, &["0.50 USD"]))
+            .unwrap();
         let quote = quote(&sxr8, "99.90", "100.10", 1);
         Outcome::new(result, &cache, [[Ok(quote)]]).unwrap()
+    }
+
+    /// A margin account holding `balance` that has booked each of `commissions`.
+    fn account(
+        id: &str,
+        balance: &str,
+        base: Option<Currency>,
+        commissions: &[&str],
+    ) -> AccountAny {
+        let balance = Money::from(balance);
+        let state = AccountState::new(
+            AccountId::from(id),
+            AccountType::Margin,
+            vec![AccountBalance::new(
+                balance,
+                Money::zero(balance.currency),
+                balance,
+            )],
+            vec![],
+            true,
+            UUID4::new(),
+            UnixNanos::default(),
+            UnixNanos::default(),
+            base,
+        );
+        let mut account = MarginAccount::new(state, true);
+        for commission in commissions {
+            account
+                .try_update_commissions(Money::from(*commission))
+                .unwrap();
+        }
+        AccountAny::Margin(account)
     }
 
     fn quote(instrument: &InstrumentAny, bid: &str, ask: &str, ts: u64) -> QuoteTick {
@@ -540,9 +597,8 @@ Costs (EUR)
   Spread: 3.000000
 
 Costs (GBP)
-  Commission: 0.000000
-  Commission outside PnL: 1.250000
-  Gross PnL: 3.500000
+  Commission: 1.250000
+  Gross PnL: 4.750000
   Spread: 0.000000
 
 Costs (USD)
@@ -563,5 +619,45 @@ Final balances
   account.IBIS.balance.EUR.total: 9942.00 EUR
 ";
         assert_eq!(report(&outcome()), expected);
+    }
+
+    /// An account with a base currency books a commission charged in another converted into it, so
+    /// the commission is in the base currency's costs and its gross PnL adds it back.
+    #[rstest]
+    fn a_commission_is_in_the_costs_of_the_currency_its_account_booked_it_in() {
+        let aapl = InstrumentAny::Equity(equity_aapl());
+        let mut cache = Cache::default();
+        cache.add_instrument(aapl.clone()).unwrap();
+        for (id, side) in [("O-1", OrderSide::Buy), ("O-2", OrderSide::Sell)] {
+            let order = filled(id, &aapl, side, 1, "150.00", "3 EUR");
+            cache.add_order(order, None, None, false).unwrap();
+        }
+        cache
+            .add_account(account(
+                "NASDAQ-001",
+                "9990.00 USD",
+                Some(Currency::USD()),
+                &["7.50 USD"],
+            ))
+            .unwrap();
+        let mut result = empty_result();
+        result.stats_pnls = [(
+            "USD".to_string(),
+            [("PnL (total)".to_string(), -10.0)].into_iter().collect(),
+        )]
+        .into_iter()
+        .collect();
+
+        let outcome =
+            Outcome::new(result, &cache, Vec::<[anyhow::Result<QuoteTick>; 0]>::new()).unwrap();
+
+        let report = report(&outcome);
+        assert!(!report.contains("EUR"), "{report}");
+        assert!(
+            report.contains(
+                "Costs (USD)\n  Commission: 7.500000\n  Cost per trade: 3.750000\n  Gross PnL: -2.500000\n  Spread: n/a (no quotes)\n"
+            ),
+            "{report}"
+        );
     }
 }
