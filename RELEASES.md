@@ -8,6 +8,8 @@ Released on TBD (UTC).
 
 ### Fixes
 
+- Fixed the backtest report listing a converted commission as `Commission outside PnL`; its costs show the commission the accounts booked, in their currency
+
 ### Internal Improvements
 
 - Changed `replayed_quotes` to document its batch read as Nautilus' own API rather than a `Temporary` workaround
