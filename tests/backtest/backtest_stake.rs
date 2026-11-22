@@ -139,7 +139,30 @@ fn crossover_command(
 ) -> (bool, String, String) {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ema.toml");
-    std::fs::write(&config, trades::ema_toml(more)).unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+            [data]
+            series = [
+                {{ data = "bars", instrument_id = "{id}", bar_spec = {{ step = 1, aggregation = "HOUR", price_type = "MID" }} }},
+            ]
+            warmup = "1h"
+
+            [indicators]
+            fast = {{ period = 1 }}
+            slow = {{ period = 2 }}
+
+            [trade]
+            instruments = [{{ instrument_id = "{id}" }}]
+            risk = "{risk}"
+            {more}
+            "#,
+            id = common::INSTRUMENT_ID,
+            risk = common::RISK,
+        ),
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .args(["backtest", "ema", "--config"])

@@ -2,19 +2,8 @@
 
 Released on TBD (UTC).
 
-### Enhancements
-
-- Added `backtest --trades <path>`, writing each position of the run to Parquet with the R its trade was sent at and a model decision's expected R
-- Added `entry_bid` and `entry_ask` to a backtest's trades file, the bid and ask of the instrument's latest quote when the trade's entry was sent
-
-### Fixes
-
-- Fixed backtests dropping a fill's P&L when the account cannot book its commission's currency, now refused before the run, naming the pair that converts it
-- Fixed the backtest report listing a converted commission as `Commission outside PnL`; its costs show the commission the accounts booked, in their currency
-
 ### Internal Improvements
 
-- Changed the check of a backtest's commission to a function of its own, its refusals naming what is refused and the fix alone
 - Changed `replayed_quotes` to document its batch read as Nautilus' own API rather than a `Temporary` workaround
 
 ---

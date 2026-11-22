@@ -352,16 +352,9 @@ nautilus-persistence.workspace = true
 # Nautilus' fixed-risk position sizer, which sizes a trade from its stake.
 nautilus-risk.workspace = true
 # Nautilus' custom data registry and arrow encoding, to store the dataset rows
-# in the catalog, and its display encoding of positions, for a backtest's
-# trades file.
-nautilus-serialization = { workspace = true, features = [
-  "arrow",
-  "arrow-display",
-] }
+# in the catalog.
+nautilus-serialization = { workspace = true, features = ["arrow"] }
 nautilus-trading.workspace = true
-# The path of an object in a store, which Nautilus' Parquet writer takes, for
-# a backtest's trades file. Already in the tree, Nautilus' persistence's.
-object_store = { version = "0.13", default-features = false }
 # PerpetualBooster: the 3.0 release candidate, the only version that builds
 # on stable Rust.
 perpetual = "=3.0.0-rc.2"

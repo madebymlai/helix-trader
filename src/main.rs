@@ -123,12 +123,6 @@ struct BacktestArgs {
     /// The backtest refuses to run if the store holds no model to trade on at its start.
     #[arg(long, default_value = "models")]
     models: PathBuf,
-    /// The Parquet file to write each position of the run to, one row each, open ones included:
-    /// Nautilus' columns of a position, then the R its trade was sent at, the expected R of the
-    /// model decision that sent it and the bid and ask quoted at its send. Left out, none is
-    /// written.
-    #[arg(long, value_parser = parse_trades_file)]
-    trades: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -272,15 +266,6 @@ fn parse_time(s: &str) -> Result<Timestamp, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Refuses a trades file that names no file, such as `/` or `out/..`, before the run.
-fn parse_trades_file(s: &str) -> Result<PathBuf, String> {
-    let path = PathBuf::from(s);
-    match path.file_name() {
-        Some(_) => Ok(path),
-        None => Err(format!("{s} names no file")),
-    }
-}
-
 /// Explicit, since clap would otherwise pick `Money: From<&str>`, which panics.
 fn parse_money(s: &str) -> Result<Money, String> {
     s.parse()
@@ -390,10 +375,10 @@ impl<B: FnOnce(DataRequirements, &[InstrumentId]) -> Backtest> Visitor for Backt
     fn plain<S: PlainStrategy>(self) -> Self::Output {
         let config = load_config::<S::Params>(&self.args.run.config)?;
         let backtest = (self.backtest)(config.data_requirements(), &config.trade.untraded_pairs());
-        backtest.refuse_accounts(&config.trade)?;
+        backtest.refuse_balance(&config.trade)?;
         let outcome = backtest.run(S::backtest(config)?)?;
         print!("{}", backtest::report(&outcome));
-        write_trades(self.args, &outcome)
+        Ok(())
     }
 
     fn model<S: ModelStrategy>(self) -> Self::Output {
@@ -414,7 +399,7 @@ fn backtest_on_models<S: ModelStrategy>(
     let (start, end) = args.run.window()?;
     let config = load_config::<S::Params>(&args.run.config)?;
     let backtest = backtest(config.data_requirements(), &config.trade.untraded_pairs());
-    backtest.refuse_accounts(&config.trade)?;
+    backtest.refuse_balance(&config.trade)?;
     let (catalog, models) = (&args.run.catalog, &args.models);
     let run = DatasetRun {
         catalog: catalog.clone(),
@@ -465,22 +450,7 @@ fn backtest_on_models<S: ModelStrategy>(
         ),
     }
     println!("Models trained at: {trained_at} ([model] dataset)");
-    write_trades(args, &outcome)?;
     print!("{}", walk.scores(start, end)?);
-    Ok(())
-}
-
-/// Writes the positions of `outcome` to the trades file `args` names, if any, and says so.
-fn write_trades(args: &BacktestArgs, outcome: &backtest::Outcome) -> anyhow::Result<()> {
-    let Some(path) = &args.trades else {
-        return Ok(());
-    };
-    outcome.trades.write(path)?;
-    println!(
-        "Trades: {} positions written to {}",
-        outcome.trades.batch().num_rows(),
-        path.display()
-    );
     Ok(())
 }
 
