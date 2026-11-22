@@ -15,6 +15,10 @@ Released on TBD (UTC).
 
 - Changed `replayed_quotes` to document its batch read as Nautilus' own API rather than a `Temporary` workaround
 
+### Documentation Updates
+
+- Changed the README's quick-start commands to wrap over several lines, so they read without scrolling
+
 ---
 
 # Helix Trader 0.2.0
