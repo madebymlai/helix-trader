@@ -390,7 +390,7 @@ impl<B: FnOnce(DataRequirements, &[InstrumentId]) -> Backtest> Visitor for Backt
     fn plain<S: PlainStrategy>(self) -> Self::Output {
         let config = load_config::<S::Params>(&self.args.run.config)?;
         let backtest = (self.backtest)(config.data_requirements(), &config.trade.untraded_pairs());
-        backtest.refuse_balance(&config.trade)?;
+        backtest.refuse_accounts(&config.trade)?;
         let outcome = backtest.run(S::backtest(config)?)?;
         print!("{}", backtest::report(&outcome));
         write_trades(self.args, &outcome)
@@ -414,7 +414,7 @@ fn backtest_on_models<S: ModelStrategy>(
     let (start, end) = args.run.window()?;
     let config = load_config::<S::Params>(&args.run.config)?;
     let backtest = backtest(config.data_requirements(), &config.trade.untraded_pairs());
-    backtest.refuse_balance(&config.trade)?;
+    backtest.refuse_accounts(&config.trade)?;
     let (catalog, models) = (&args.run.catalog, &args.models);
     let run = DatasetRun {
         catalog: catalog.clone(),

@@ -127,11 +127,12 @@ impl Backtest {
         node::run_dataset(config, node::custom_data(self)?, strategy)
     }
 
-    /// Refuses the run unless its balance suits the instruments `trade` trades.
+    /// Refuses the run unless its balance and commission suit the instruments `trade` trades.
     ///
-    /// Two checks apply:
+    /// Three checks apply:
     /// - For each instrument whose broker's account has no base currency, the balance's currency
     ///   must be the instrument's P&L currency (`refuse_unheld_pnl_currency`).
+    /// - The account of each instrument must book the commission (`refuse_commission`).
     /// - The pairs of `[trade] conversions` must convert the balance's currency into the P&L
     ///   currency of each instrument (`refuse_balance`).
     ///
@@ -141,14 +142,15 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error if `catalog::instruments`, `refuse_unheld_pnl_currency` or `refuse_balance`
-    /// fails.
-    pub fn refuse_balance(&self, trade: &TradeConfig) -> anyhow::Result<()> {
+    /// Returns an error if `catalog::instruments`, `refuse_unheld_pnl_currency`,
+    /// `refuse_commission` or `refuse_balance` fails.
+    pub fn refuse_accounts(&self, trade: &TradeConfig) -> anyhow::Result<()> {
         let traded = crate::catalog::instruments(&self.catalog, &trade.instrument_ids())
             .context("reading the instruments traded")?;
         let pairs = crate::catalog::instruments(&self.catalog, trade.conversions.pairs())
             .context("reading the pairs of [trade] conversions")?;
         refuse_unheld_pnl_currency(self.balance, &traded)?;
+        refuse_commission(self.balance, self.commission, &traded, &pairs)?;
         refuse_balance(self.balance, &traded, &pairs)
     }
 
@@ -357,16 +359,61 @@ fn refuse_unheld_pnl_currency(balance: Money, traded: &[InstrumentAny]) -> anyho
             continue;
         }
         anyhow::bail!(
-            "the balance {balance} is in {}, not in {pnl}, the P&L currency of {}, which the \
-             strategy trades on {venue}, whose broker's account has no base currency: Nautilus \
-             books a simulated account without one in each currency apart and books no loss or \
-             commission in a currency it does not hold, while it books gains \
-             (AccountsManager::update_balance_multi_currency in Nautilus' portfolio crate, \
-             intentionally asymmetric until cross-currency equity tracking is implemented), so \
-             the backtest would drop the {pnl} losses; backtest it on a balance in {pnl}",
-            balance.currency,
+            "the balance {balance} is not in {pnl}, the P&L currency of {}, and the account on \
+             {venue} has no base currency, so Nautilus would drop the {pnl} losses; backtest it on \
+             a balance in {pnl}",
             instrument.id()
         );
+    }
+    Ok(())
+}
+
+/// Refuses `commission` unless the simulated account of each instrument in `traded` books it.
+///
+/// Nautilus books nothing of a fill, its P&L included, whose commission its account cannot book
+/// (`AccountsManager::update_balances`). An account with a base currency needs a rate from the
+/// commission's currency into it on the instrument's venue, even for a zero commission, which
+/// `pairs` give, `Conversions::validate` keeping them on that venue. One without books only a
+/// commission in the balance's currency or a zero one.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The account of an instrument in `traded` cannot book the commission.
+/// - `conversions::reaches` fails.
+fn refuse_commission(
+    balance: Money,
+    commission: Commission,
+    traded: &[InstrumentAny],
+    pairs: &[InstrumentAny],
+) -> anyhow::Result<()> {
+    for instrument in traded {
+        let (id, charged) = (instrument.id(), commission.currency(instrument));
+        let venue = id.venue;
+
+        if venues::has_base_currency(venue) {
+            if !conversions::reaches(pairs, charged, balance.currency)? {
+                anyhow::bail!(
+                    "the commission {commission} of {id} is in {charged}, which no pair of [trade] \
+                     conversions on {venue} converts into {0}, the balance's currency, so Nautilus \
+                     would book none of its fills; add a pair of {venue} converting {charged} into \
+                     {0} to [trade] conversions",
+                    balance.currency
+                );
+            }
+        } else if charged != balance.currency
+            && !matches!(
+                commission,
+                Commission::PerOrder(amount) | Commission::PerQuantity(amount) if amount.is_zero()
+            )
+        {
+            anyhow::bail!(
+                "the commission {commission} of {id} is in {charged}, not in {0}, the balance's \
+                 currency, and the account on {venue} has no base currency, so Nautilus would book \
+                 none of its fills; backtest it with a commission in {0}",
+                balance.currency
+            );
+        }
     }
     Ok(())
 }
@@ -598,6 +645,18 @@ mod tests {
         InstrumentAny::Cfd(gold)
     }
 
+    fn pair(id: &str) -> InstrumentAny {
+        let id = InstrumentId::from(id);
+        InstrumentAny::CurrencyPair(nautilus_model::instruments::stubs::default_fx_ccy(
+            id.symbol,
+            Some(id.venue),
+        ))
+    }
+
+    fn per_order(amount: &str) -> Commission {
+        Commission::PerOrder(Money::from(amount))
+    }
+
     #[rstest]
     #[case::in_the_pnl_currency_of_glbx("100000 USD", future("GCZ6.GLBX"))]
     #[case::in_the_pnl_currency_of_a_venue_of_no_row("100000 USD", future("GCZ6.IDEALPRO"))]
@@ -617,5 +676,44 @@ mod tests {
         let err = refuse_unheld_pnl_currency(Money::from("100000 EUR"), &traded).unwrap_err();
 
         assert!(err.to_string().contains("GCZ6.GLBX"), "{err}");
+    }
+
+    /// The balance is in USD. An account without a base currency (GLBX's, through IB) books a
+    /// commission in USD or a zero one, and an account with one (IC's) books one that a pair on its
+    /// venue converts into USD, a zero one included.
+    #[rstest]
+    #[case::in_the_balances_currency_without_a_base(per_order("3 USD"), future("GCZ6.GLBX"), &[], false)]
+    #[case::free_in_another_currency_without_a_base(per_order("0 EUR"), future("GCZ6.GLBX"), &[], false)]
+    #[case::in_another_currency_without_a_base(per_order("3 EUR"), future("GCZ6.GLBX"), &[], true)]
+    #[case::converted_by_a_pair_of_its_venue(
+        per_order("3 EUR"),
+        cfd("XAUUSD.ICMARKETS"),
+        &["EUR/USD.ICMARKETS"],
+        false
+    )]
+    #[case::with_no_pair_converting_it(per_order("3 EUR"), cfd("XAUUSD.ICMARKETS"), &[], true)]
+    #[case::free_with_no_pair_converting_it(per_order("0 EUR"), cfd("XAUUSD.ICMARKETS"), &[], true)]
+    fn a_commission_is_refused_unless_its_account_books_it(
+        #[case] commission: Commission,
+        #[case] instrument: InstrumentAny,
+        #[case] pairs: &[&str],
+        #[case] refused: bool,
+    ) {
+        let pairs: Vec<InstrumentAny> = pairs.iter().map(|id| pair(id)).collect();
+        let id = instrument.id().to_string();
+
+        let err = refuse_commission(Money::from("100000 USD"), commission, &[instrument], &pairs)
+            .err()
+            .map(|e| e.to_string());
+
+        assert_eq!(err.is_some(), refused, "{err:?}");
+        if let Some(err) = err {
+            assert!(
+                [id.as_str(), "commission", "EUR", "USD"]
+                    .iter()
+                    .all(|named| err.contains(named)),
+                "{err}"
+            );
+        }
     }
 }
