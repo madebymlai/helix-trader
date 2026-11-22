@@ -2280,6 +2280,7 @@ dependencies = [
  "nautilus-risk",
  "nautilus-serialization",
  "nautilus-trading",
+ "object_store",
  "perpetual",
  "redis",
  "rstest",

@@ -24,10 +24,14 @@ use nautilus_model::{
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
-/// A finished run: the Nautilus result and what its fills cost.
+use super::trades::Trades;
+
+/// A finished run: the Nautilus result, what its fills cost, and its positions.
 #[derive(Debug)]
 pub struct Outcome {
     pub result: BacktestResult,
+    /// Every position of the run, for its trades file (`trades`).
+    pub trades: Trades,
     /// Keyed by currency code, as the result's `stats_pnls` is.
     costs: BTreeMap<String, Costs>,
 }
@@ -49,7 +53,8 @@ struct Costs {
 }
 
 impl Outcome {
-    /// Returns `result` with the costs of every fill of the orders in `cache`.
+    /// Returns `result` with the costs of every fill of the orders in `cache`, and the positions in
+    /// it (`Trades::of`).
     ///
     /// Each fill's cost is measured on the quote it filled on. That quote is the last quote of the
     /// fill's instrument at or before the fill in `streams`, the quote series the run replayed. A
@@ -63,6 +68,7 @@ impl Outcome {
     /// - A fill's instrument is not in `cache` or is inverse (its value is not linear in the
     ///   price).
     /// - A fill's instrument has quotes and none precedes the fill.
+    /// - Nautilus fails to encode the positions.
     pub(super) fn new<S>(
         result: BacktestResult,
         cache: &Cache,
@@ -124,7 +130,11 @@ impl Outcome {
                 .or_default()
                 .spread += paid * size;
         }
-        Ok(Self { result, costs })
+        Ok(Self {
+            result,
+            trades: Trades::of(cache)?,
+            costs,
+        })
     }
 }
 

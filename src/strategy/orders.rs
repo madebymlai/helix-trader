@@ -6,7 +6,9 @@
 //!
 //! `Trade::send` sizes the trade at a `Stake` with Nautilus' fixed-risk sizer over its one R
 //! (`Trade::size`). `Trade::send_at` sizes at a fixed equity instead, a dataset run's balance.
-//! The send tags the entry with its R in money and the multiple (`entry_risk`).
+//! The send tags the entry with its R in money and the multiple (`entry_risk`), with the expected
+//! net R of the model decision whose trade it is (`entry_expected_r`), and with the bid and ask of
+//! the instrument's latest quote in the cache, if it holds one (`entry_quote`).
 //!
 //! The send places:
 //! - With a `Bracket`, it sends a Nautilus bracket, in a backtest as live. The legs are
@@ -68,7 +70,10 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use ustr::Ustr;
 
-use super::{conversions::Rates, risk::Stake};
+use super::{
+    conversions::Rates,
+    risk::{R, Stake},
+};
 use crate::venues::{self, EquitySource};
 
 const TIME_ALERT: &str = "TRADE-TIME:";
@@ -87,6 +92,16 @@ const R_TAG: &str = "R:";
 /// Tag prefix of an entry's stake multiple, `MULTIPLE:2` (`entry_risk`).
 const MULTIPLE_TAG: &str = "MULTIPLE:";
 
+/// Tag prefix of the expected net R of the decision an entry was sent on, `EXPECTED_R:0.42R`
+/// (`entry_expected_r`).
+const EXPECTED_R_TAG: &str = "EXPECTED_R:";
+
+/// Tag prefix of the bid of an entry's quote, `BID:0.70140` (`entry_quote`).
+const BID_TAG: &str = "BID:";
+
+/// Tag prefix of the ask of an entry's quote, `ASK:0.70160` (`entry_quote`).
+const ASK_TAG: &str = "ASK:";
+
 /// A trade to send, of `instrument_id` on `side`.
 ///
 /// One R spans `one_r` in price from `reference`. The exits are set from `reference`.
@@ -97,6 +112,7 @@ pub struct Trade {
     reference: Price,
     one_r: Decimal,
     exits: Exits,
+    expected_r: Option<R>,
 }
 
 /// What an entry sent at a stake risks, as its tags say (`entry_risk`).
@@ -106,6 +122,16 @@ pub struct EntryRisk {
     pub r: Money,
     /// The multiple of the config's risk that the entry was staked at.
     pub multiple: Decimal,
+}
+
+/// The instrument's latest quote in the cache when an entry was sent, as its tags say
+/// (`entry_quote`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryQuote {
+    /// The quote's bid.
+    pub bid: Price,
+    /// The quote's ask.
+    pub ask: Price,
 }
 
 /// How a trade ends: at a bracket exit or at its time limit after the send.
@@ -182,6 +208,17 @@ impl Trade {
             reference,
             one_r,
             exits,
+            expected_r: None,
+        }
+    }
+
+    /// Returns the trade of a decision that expects `expected_r` of it, which its send tags on the
+    /// entry (`entry_expected_r`).
+    #[must_use]
+    pub const fn expecting(self, expected_r: R) -> Self {
+        Self {
+            expected_r: Some(expected_r),
+            ..self
         }
     }
 
@@ -349,11 +386,21 @@ impl Trade {
             return Ok(());
         }
         let r = self.risk(instrument, quantity)?;
-        let tags = [
+        let quote = strategy.cache().quote(&self.instrument_id);
+        let tags: Vec<Ustr> = [
             format!("{R_TAG}{r}"),
             format!("{MULTIPLE_TAG}{}", stake.multiple().normalize()),
         ]
-        .map(|tag| Ustr::from(&tag));
+        .into_iter()
+        .chain(self.expected_r.map(|r| format!("{EXPECTED_R_TAG}{r}")))
+        .chain(quote.into_iter().flat_map(|quote| {
+            [
+                format!("{BID_TAG}{}", quote.bid_price),
+                format!("{ASK_TAG}{}", quote.ask_price),
+            ]
+        }))
+        .map(|tag| Ustr::from(&tag))
+        .collect();
         self.submit(strategy, instrument, quantity, &tags, ids)
     }
 
@@ -745,6 +792,33 @@ pub fn entry_risk(entry: &OrderAny) -> Option<EntryRisk> {
     Some(EntryRisk {
         r: Money::from_str_exact(tagged(R_TAG)?).ok()?,
         multiple: Decimal::from_str(tagged(MULTIPLE_TAG)?).ok()?,
+    })
+}
+
+/// Returns the expected net R of the decision `entry` was sent on (`Trade::expecting`).
+///
+/// Returns `None` for an order no decision sent.
+#[must_use]
+pub fn entry_expected_r(entry: &OrderAny) -> Option<R> {
+    entry
+        .tags()?
+        .iter()
+        .find_map(|tag| R::from_str(tag.as_str().strip_prefix(EXPECTED_R_TAG)?).ok())
+}
+
+/// Returns the instrument's latest quote in the cache when `entry` was sent (`Trade::send`).
+///
+/// Returns `None` for an order sent otherwise, or sent before the cache held a quote of it.
+#[must_use]
+pub fn entry_quote(entry: &OrderAny) -> Option<EntryQuote> {
+    let tags = entry.tags()?;
+    let tagged = |prefix: &str| {
+        tags.iter()
+            .find_map(|tag| Price::from_str(tag.as_str().strip_prefix(prefix)?).ok())
+    };
+    Some(EntryQuote {
+        bid: tagged(BID_TAG)?,
+        ask: tagged(ASK_TAG)?,
     })
 }
 

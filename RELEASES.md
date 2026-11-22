@@ -4,6 +4,8 @@ Released on TBD (UTC).
 
 ### Enhancements
 
+- Added `backtest --trades <path>`, writing each position to Parquet with the R its trade was sent at, a model decision's expected R and the entry's bid and ask
+
 ### Fixes
 
 ### Internal Improvements
