@@ -165,15 +165,6 @@ impl Commission {
         }
     }
 
-    /// Returns whether the commission charges nothing.
-    #[must_use]
-    pub fn is_zero(&self) -> bool {
-        match *self {
-            Self::PerOrder(amount) | Self::PerQuantity(amount) => amount.is_zero(),
-            Self::Rate(rate) => rate.is_zero(),
-        }
-    }
-
     /// Returns the currency charged on a fill of `instrument`.
     ///
     /// An amount charges in its own currency. A rate charges in the instrument's cost currency.

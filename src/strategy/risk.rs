@@ -22,9 +22,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct R(f64);
 
-// Finite by construction (`new`, `finite`), so equality is an equivalence
-impl Eq for R {}
-
 impl R {
     /// Returns `value` R.
     ///

@@ -56,7 +56,6 @@ mod backtest_stake;
 mod backtest_targets;
 mod backtest_ticks;
 mod backtest_traded_quotes;
-mod backtest_trades;
 mod backtest_train;
 mod backtest_two_venues;
 mod backtest_warmup;

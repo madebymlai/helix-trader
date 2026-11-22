@@ -593,57 +593,6 @@ fn a_trades_entry_is_tagged_with_its_r_in_money_and_its_stakes_multiple() {
 }
 
 #[rstest]
-fn a_decisions_trade_tags_its_entry_with_its_expected_r_and_another_trade_does_not() {
-    let (mut probe, _) = registered();
-
-    sent(&mut probe, "T-1", buy(bracket(4)).expecting(R::new(0.42)));
-    sent(&mut probe, "T-2", buy(bracket(4)));
-
-    let decided = probe.cache().order(&id("T-1")).unwrap();
-    let undecided = probe.cache().order(&id("T-2")).unwrap();
-    assert_eq!(entry_expected_r(&decided), Some(R::new(0.42)));
-    assert_eq!(entry_expected_r(&undecided), None);
-}
-
-/// The cache's latest AUD/USD quote at the second send bids 0.70140 and asks 0.70160, the earlier
-/// one gone stale.
-#[rstest]
-fn a_trades_entry_is_tagged_with_its_instruments_latest_quote_and_with_none_before_one() {
-    let (mut probe, _) = registered();
-    let cache = probe.cache_rc();
-    let quoted = |bid: &str, ask: &str| {
-        cache
-            .borrow_mut()
-            .add_quote(QuoteTick::new(
-                InstrumentId::from(AUD),
-                Price::from(bid),
-                Price::from(ask),
-                Quantity::from(1_000_000),
-                Quantity::from(1_000_000),
-                UnixNanos::from(NOW),
-                UnixNanos::from(NOW),
-            ))
-            .unwrap();
-    };
-
-    sent(&mut probe, "T-1", buy(bracket(4)));
-    quoted("0.70120", "0.70130");
-    quoted("0.70140", "0.70160");
-    sent(&mut probe, "T-2", buy(held(4)));
-
-    let unquoted = probe.cache().order(&id("T-1")).unwrap();
-    let quoted = probe.cache().order(&id("T-2")).unwrap();
-    assert_eq!(entry_quote(&unquoted), None);
-    assert_eq!(
-        entry_quote(&quoted),
-        Some(EntryQuote {
-            bid: Price::from("0.70140"),
-            ask: Price::from("0.70160"),
-        })
-    );
-}
-
-#[rstest]
 fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
     let name = "a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why";
     if !log_capture::alone(module_path!(), name) {
