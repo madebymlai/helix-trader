@@ -2,6 +2,10 @@
 
 Released on TBD (UTC).
 
+### Enhancements
+
+### Fixes
+
 ### Internal Improvements
 
 - Changed `replayed_quotes` to document its batch read as Nautilus' own API rather than a `Temporary` workaround
