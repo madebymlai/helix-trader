@@ -214,7 +214,8 @@ impl Decision {
     /// last trade, else the last close. It is either a bracket with the target's exits on the
     /// instrument's ticks, or a market entry closed at the time limit (`strategy::orders`). One R
     /// is the stop's distance or, for a time-only target, the target's ATR. The trade has no
-    /// quantity: it is sized as it is sent.
+    /// quantity: it is sized as it is sent. Its send tags the entry with `expected_r`
+    /// (`orders::entry_expected_r`), which a dataset run's trade lacks.
     #[must_use]
     pub const fn trade(&self) -> Trade {
         self.trade
@@ -669,7 +670,10 @@ impl Deciding {
             level: taken.expected.level,
             side_call: taken.expected.side_call,
             meta_expected_r: taken.meta_expected_r,
-            trade: targets.of(taken.side).trade(self.instrument_id, taken.side),
+            trade: targets
+                .of(taken.side)
+                .trade(self.instrument_id, taken.side)
+                .expecting(taken.expected_r),
         }))
     }
 }
@@ -1165,6 +1169,7 @@ mod tests {
                     time_limit: Some(SignedDuration::from_hours(2)),
                 },
             )
+            .expecting(decision.expected_r)
         );
         assert!(
             (decision.expected_r.as_f64() - 0.5).abs() < 1e-9,
@@ -1205,6 +1210,7 @@ mod tests {
                     time_limit: Some(SignedDuration::from_hours(2)),
                 },
             )
+            .expecting(decision.expected_r)
         );
     }
 
@@ -1284,6 +1290,7 @@ mod tests {
                     time_limit: Some(SignedDuration::from_hours(1)),
                 },
             )
+            .expecting(decision.expected_r)
         );
         assert!(
             (decision.expected_r.as_f64() - 0.3).abs() < 1e-12,
@@ -1321,6 +1328,7 @@ mod tests {
                     time_limit: Some(SignedDuration::from_hours(1)),
                 },
             )
+            .expecting(decision.expected_r)
         );
         assert!(
             (decision.expected_r.as_f64() - 0.1).abs() < 1e-12,
@@ -1941,7 +1949,9 @@ mod tests {
         probe.warmup = Some(handle.warmup());
         handle.start(&mut probe).unwrap();
         let rows = published();
-        let trade = |decision: Option<Decision>| decision.map(|decision| decision.trade());
+        let trade = |decision: Option<Decision>| {
+            decision.map(|decision| (decision.trade(), decision.expected_r))
+        };
 
         let long = |atr: i64, take_profit: &str, stop_loss: &str| {
             Trade::new(
@@ -1963,13 +1973,13 @@ mod tests {
             &mut probe,
             &mid_bar("2026-10-22T12:00:00Z", "0.69900", "0.70100"),
         );
-        let noon = trade(handle.decide(&mut probe).unwrap());
+        let (noon, noon_r) = trade(handle.decide(&mut probe).unwrap()).unwrap();
         advance(&features, &clock, "2026-10-22T13:00:00Z");
         hand_bar(
             &mut probe,
             &mid_bar("2026-10-22T13:00:00Z", "0.69800", "0.70200"),
         );
-        let one = trade(handle.decide(&mut probe).unwrap());
+        let (one, one_r) = trade(handle.decide(&mut probe).unwrap()).unwrap();
 
         let read: Vec<f64> = rows.borrow().iter().map(|row| row.features[0]).collect();
         assert_eq!(read.len(), 2, "{read:?}");
@@ -1978,8 +1988,8 @@ mod tests {
         assert_eq!(
             (noon, one),
             (
-                Some(long(200, "0.70200", "0.69800")),
-                Some(long(400, "0.70400", "0.69600"))
+                long(200, "0.70200", "0.69800").expecting(noon_r),
+                long(400, "0.70400", "0.69600").expecting(one_r)
             )
         );
     }
