@@ -95,6 +95,7 @@ impl Outcome {
             })
             .collect();
         fills.sort_by_key(|fill| fill.ts_event);
+
         // The replayed quotes as of each fill, for Nautilus' quote and rate lookups
         let mut replayed = Cache::new(
             Some(CacheConfig {

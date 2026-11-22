@@ -8,6 +8,7 @@ Released on TBD (UTC).
 
 ### Fixes
 
+- Fixed backtests dropping a fill's P&L when the account cannot book its commission's currency, now refused before the run, naming the pair that converts it
 - Fixed the backtest report listing a converted commission as `Commission outside PnL`; each cost is in the currency its account books it in
 
 ### Internal Improvements
