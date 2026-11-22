@@ -3,24 +3,28 @@
 //! This module prints the order and position counts, statistics and final balances of the Nautilus
 //! `BacktestResult`. The statistics include the max drawdown, which `node::run` registers. It also
 //! prints the costs, which the result does not hold. The costs come from the fills (`OrderFilled`)
-//! in the engine's cache and the quotes they filled on. A run on bars or trades alone has no
-//! spread to measure.
+//! in the engine's cache, the quotes they filled on and the commissions its accounts booked. A run
+//! on bars or trades alone has no spread to measure.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write,
 };
 
+use ahash::AHashMap;
 use anyhow::Context;
 use nautilus_backtest::result::BacktestResult;
-use nautilus_common::cache::Cache;
+use nautilus_common::cache::{Cache, CacheConfig};
+use nautilus_core::UnixNanos;
 use nautilus_model::{
+    accounts::AccountAny,
     data::QuoteTick,
     enums::{OrderSide, PriceType},
     events::{OrderEventAny, OrderFilled},
     identifiers::InstrumentId,
     instruments::Instrument,
     orders::Order,
+    types::{Currency, Money},
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
@@ -32,19 +36,18 @@ pub struct Outcome {
     pub result: BacktestResult,
     /// Every position of the run, for its trades file (`trades`).
     pub trades: Trades,
-    /// Keyed by currency code, as the result's `stats_pnls` is.
+    /// Keyed by the code of the currency the accounts book them in, as the result's `stats_pnls`
+    /// is.
     costs: BTreeMap<String, Costs>,
 }
 
 #[derive(Debug, Default)]
 struct Costs {
-    /// The commission on fills of positions settled in this currency. Nautilus nets it into their
-    /// PnL.
+    /// The commission the run's accounts booked in this currency, which Nautilus nets into its
+    /// `PnL (total)`.
     commission: Decimal,
-    /// The commission on fills of positions settled in another currency. No PnL nets it.
-    outside_pnl: Decimal,
     /// For a buy, a fill's value at its price less its value at the mid of its quote. For a sell,
-    /// the reverse.
+    /// the reverse. Converted into this currency at the rate Nautilus books the fill at.
     spread: Decimal,
     trades: usize,
     /// Fills of an instrument for which the run replayed no quote. If there are any, the spread is
@@ -56,18 +59,23 @@ impl Outcome {
     /// Returns `result` with the costs of every fill of the orders in `cache`, and the positions in
     /// it (`Trades::of`).
     ///
-    /// Each fill's cost is measured on the quote it filled on. That quote is the last quote of the
-    /// fill's instrument at or before the fill in `streams`, the quote series the run replayed. A
-    /// later stream's quote wins a tie (see `fill_quotes`). A fill of an instrument with no quote
-    /// in `streams` has no spread.
+    /// A fill's costs are in the currency its account books it in: the account's base currency, or
+    /// the fill's own on an account without one (`AccountsManager::update_balances` in Nautilus'
+    /// portfolio crate). Its commission is what the accounts booked (`booked`). Its spread is
+    /// measured on the quote it filled on, the last quote of its instrument at or before it in
+    /// `streams`, the quote series the run replayed, a later stream's quote winning a tie. It is
+    /// converted at the rate Nautilus books the fill at: `Cache::get_xrate` on the fill's venue, at
+    /// the bid for a sell and the ask for a buy, over the replayed quotes at or before it. A fill of
+    /// an instrument with no quote in `streams` has no spread.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - A stream fails or is out of time order.
-    /// - A fill's instrument is not in `cache` or is inverse (its value is not linear in the
-    ///   price).
+    /// - A fill's instrument or account is not in `cache`, or its instrument is inverse (its value
+    ///   is not linear in the price).
     /// - A fill's instrument has quotes and none precedes the fill.
+    /// - No replayed quote converts a fill's currency into its account's.
     /// - Nautilus fails to encode the positions.
     pub(super) fn new<S>(
         result: BacktestResult,
@@ -78,7 +86,7 @@ impl Outcome {
         S: IntoIterator<Item = anyhow::Result<QuoteTick>>,
     {
         let orders = cache.orders(None, None, None, None, None);
-        let fills: Vec<&OrderFilled> = orders
+        let mut fills: Vec<&OrderFilled> = orders
             .iter()
             .flat_map(|order| order.events())
             .filter_map(|event| match event {
@@ -86,49 +94,93 @@ impl Outcome {
                 _ => None,
             })
             .collect();
-        let (quotes, quoted) = fill_quotes(&fills, streams)?;
-        let mut costs: BTreeMap<String, Costs> = BTreeMap::new();
-        for (fill, quote) in fills.into_iter().zip(quotes) {
-            let id = fill.instrument_id;
+        fills.sort_by_key(|fill| fill.ts_event);
+        // The replayed quotes as of each fill, for Nautilus' quote and rate lookups
+        let mut replayed = Cache::new(
+            Some(CacheConfig {
+                data_capacity: 1,
+                ..CacheConfig::default()
+            }),
+            None,
+        );
+
+        for id in cache.instrument_ids(None) {
             let instrument = cache
-                .instrument(&id)
-                .with_context(|| format!("instrument {id} of a fill not in the cache"))?;
-            anyhow::ensure!(!instrument.is_inverse(), "{id} is inverse");
-            let cost = costs.entry(fill.currency.code.to_string()).or_default();
-            cost.trades += 1;
+                .instrument(id)
+                .context("an instrument the cache lists")?;
+            replayed.add_instrument(instrument.clone())?;
+        }
+        let mut costs: BTreeMap<String, Costs> = BTreeMap::new();
+        let mut unquoted = Vec::new();
+        let mut quoted = BTreeSet::new();
+        let mut quotes = in_time_order(streams);
+        let mut fills = fills.into_iter().peekable();
 
-            if let Some(commission) = fill.commission {
-                let code = commission.currency.code.to_string();
-                let charged = costs.entry(code).or_default();
-                if commission.currency == instrument.cost_currency() {
-                    charged.commission += commission.as_decimal();
+        loop {
+            let quote = quotes.next().transpose()?;
+            while let Some(fill) =
+                fills.next_if(|fill| quote.is_none_or(|quote| fill.ts_event < quote.ts_init))
+            {
+                let id = fill.instrument_id;
+                let instrument = cache
+                    .instrument(&id)
+                    .with_context(|| format!("instrument {id} of a fill not in the cache"))?;
+                anyhow::ensure!(!instrument.is_inverse(), "{id} is inverse");
+                let account = cache.account(&fill.account_id).with_context(|| {
+                    format!("account {} of a fill not in the cache", fill.account_id)
+                })?;
+                let booked_in = account.base_currency().unwrap_or(fill.currency);
+                let cost = costs.entry(booked_in.code.to_string()).or_default();
+                cost.trades += 1;
+
+                let Some(quote) = replayed.quote(&id) else {
+                    unquoted.push((fill, booked_in));
+                    continue;
+                };
+                let mid = quote.extract_price(PriceType::Mid)?.as_decimal();
+                let price = fill.last_px.as_decimal();
+                let (paid, rate_side) = if fill.order_side == OrderSide::Buy {
+                    (price - mid, PriceType::Ask)
                 } else {
-                    charged.outside_pnl += commission.as_decimal();
-                }
+                    (mid - price, PriceType::Bid)
+                };
+                let rate = replayed
+                    .get_xrate(id.venue, fill.currency, booked_in, rate_side)
+                    .with_context(|| {
+                        format!(
+                            "no replayed quote on {} converts {} into {booked_in}, the currency of \
+                             the fill of {id} at {}",
+                            id.venue, fill.currency, fill.ts_event
+                        )
+                    })?;
+                let size = fill.last_qty.as_decimal() * instrument.multiplier().as_decimal();
+                cost.spread += paid * size * rate;
             }
+            let Some(quote) = quote else { break };
+            quoted.insert(quote.instrument_id);
+            replayed.add_quote(quote)?;
+        }
 
-            if !quoted.contains(&id) {
-                costs
-                    .entry(fill.currency.code.to_string())
-                    .or_default()
-                    .unquoted += 1;
-                continue;
-            }
-            let quote = quote.with_context(|| {
-                format!("no quote of {id} before its fill at {}", fill.ts_event)
-            })?;
-            let mid = quote.extract_price(PriceType::Mid)?.as_decimal();
-            let price = fill.last_px.as_decimal();
-            let paid = if fill.order_side == OrderSide::Buy {
-                price - mid
-            } else {
-                mid - price
-            };
-            let size = fill.last_qty.as_decimal() * instrument.multiplier().as_decimal();
+        for (fill, booked_in) in unquoted {
+            let id = fill.instrument_id;
+            anyhow::ensure!(
+                !quoted.contains(&id),
+                "no quote of {id} before its fill at {}",
+                fill.ts_event
+            );
             costs
-                .entry(fill.currency.code.to_string())
+                .entry(booked_in.code.to_string())
                 .or_default()
-                .spread += paid * size;
+                .unquoted += 1;
+        }
+
+        for account in cache.accounts_all_owned() {
+            for commission in booked(&account).into_values() {
+                costs
+                    .entry(commission.currency.code.to_string())
+                    .or_default()
+                    .commission += commission.as_decimal();
+            }
         }
         Ok(Self {
             result,
@@ -138,76 +190,64 @@ impl Outcome {
     }
 }
 
-/// Returns the quote each of `fills` filled on, and the instruments `streams` quote.
+/// Returns the commission `account` booked, by currency.
 ///
-/// A fill's quote is the last quote of its instrument at or before the fill in `streams`. A later
-/// stream's quote wins a tie. The function reads each stream once, in time order, and drops it
-/// before the next, so a run's whole quote history is never held in memory.
+/// An account with a base currency books each commission converted into it, at the rate on the
+/// fill's venue; one without books it in the currency charged (`AccountsManager::update_balances`
+/// in Nautilus' portfolio crate).
+fn booked(account: &AccountAny) -> AHashMap<Currency, Money> {
+    match account {
+        AccountAny::Margin(account) => account.commissions(),
+        AccountAny::Cash(account) => account.commissions(),
+        AccountAny::Betting(account) => account.commissions(),
+        AccountAny::Wallet(account) => account.commissions(),
+    }
+}
+
+/// Returns the quotes of `streams` in time order, a later stream's quote after an earlier one's
+/// of the same time, so that it wins a tie.
 ///
-/// # Errors
-///
-/// Returns an error if:
-/// - A stream fails.
-/// - A stream holds a quote stamped before the last quote of its instrument ahead of it.
-fn fill_quotes<S>(
-    fills: &[&OrderFilled],
+/// Each stream is read once, a quote at a time, so a run's whole quote history is never held in
+/// memory. A stream failing, or holding a quote stamped before the last quote of its instrument
+/// ahead of it, is an error item.
+fn in_time_order<S>(
     streams: impl IntoIterator<Item = S>,
-) -> anyhow::Result<(Vec<Option<QuoteTick>>, BTreeSet<InstrumentId>)>
+) -> impl Iterator<Item = anyhow::Result<QuoteTick>>
 where
     S: IntoIterator<Item = anyhow::Result<QuoteTick>>,
 {
-    let mut by_instrument: BTreeMap<InstrumentId, Vec<usize>> = BTreeMap::new();
-    for (at, fill) in fills.iter().enumerate() {
-        by_instrument
-            .entry(fill.instrument_id)
-            .or_default()
-            .push(at);
-    }
-    for ats in by_instrument.values_mut() {
-        ats.sort_by_key(|&at| fills[at].ts_event);
-    }
-    let mut quotes: Vec<Option<QuoteTick>> = vec![None; fills.len()];
-    let mut settle = |at: usize, quote: Option<QuoteTick>| {
-        if let Some(quote) = quote
-            && quotes[at].is_none_or(|best| best.ts_init <= quote.ts_init)
-        {
-            quotes[at] = Some(quote);
-        }
-    };
-    let mut quoted = BTreeSet::new();
+    let mut streams: Vec<_> = streams
+        .into_iter()
+        .map(|stream| stream.into_iter().peekable())
+        .collect();
+    let mut last: BTreeMap<(usize, InstrumentId), UnixNanos> = BTreeMap::new();
+    std::iter::from_fn(move || {
+        // The earliest head, the first stream's of a tie, or the first failed head
+        let mut next: Option<(usize, UnixNanos)> = None;
 
-    for stream in streams {
-        // Per instrument, the first fill the stream has not passed and the last quote
-        let mut walk: BTreeMap<InstrumentId, (usize, Option<QuoteTick>)> = BTreeMap::new();
-        for quote in stream {
-            let quote = quote?;
+        for (at, stream) in streams.iter_mut().enumerate() {
+            match stream.peek() {
+                Some(Err(_)) => return stream.next(),
+                Some(Ok(quote)) if next.is_none_or(|(_, ts)| quote.ts_init < ts) => {
+                    next = Some((at, quote.ts_init));
+                }
+                _ => {}
+            }
+        }
+        let (at, _) = next?;
+        let quote = streams[at].next()?;
+        Some(quote.and_then(|quote| {
             let id = quote.instrument_id;
-            quoted.insert(id);
-            let ats = by_instrument.get(&id).map_or(&[][..], Vec::as_slice);
-            let (next, last) = walk.entry(id).or_default();
-            if let Some(last) = last {
+            if let Some(previous) = last.insert((at, id), quote.ts_init) {
                 anyhow::ensure!(
-                    last.ts_init <= quote.ts_init,
-                    "quotes of {id} out of time order: {} after {}",
-                    quote.ts_init,
-                    last.ts_init
+                    previous <= quote.ts_init,
+                    "quotes of {id} out of time order: {} after {previous}",
+                    quote.ts_init
                 );
             }
-            while let Some(&at) = ats.get(*next)
-                && fills[at].ts_event < quote.ts_init
-            {
-                settle(at, *last);
-                *next += 1;
-            }
-            *last = Some(quote);
-        }
-        for (id, (next, last)) in walk {
-            for &at in &by_instrument.get(&id).map_or(&[][..], Vec::as_slice)[next..] {
-                settle(at, last);
-            }
-        }
-    }
-    Ok((quotes, quoted))
+            Ok(quote)
+        }))
+    })
 }
 
 /// Returns `outcome` as text: one `name: value` line per figure.
@@ -221,10 +261,9 @@ where
 /// holds the spread paid to open. A currency with a fill on no quote prints its spread as not
 /// applicable, and its cost per trade and gross PnL hold the commission alone.
 ///
-/// A commission in a currency other than its position's settlement currency is in no PnL, because
-/// Nautilus nets it only in that currency (`model/src/position.rs`, `handle_order_fill`). It is
-/// listed apart as `Commission outside PnL`. It counts toward neither the cost per trade nor the
-/// gross PnL.
+/// Each figure of a currency is in it: its commission is what the run's accounts booked in it,
+/// which its `PnL (total)`, the change of its balances, nets, and its spread and trades are those
+/// of the fills its accounts book in it, the spread converted at the rate of each fill (`Outcome::new`).
 #[must_use]
 pub fn report(outcome: &Outcome) -> String {
     let result = &outcome.result;
@@ -241,10 +280,6 @@ pub fn report(outcome: &Outcome) -> String {
         let spread = (costs.unquoted == 0).then_some(costs.spread);
         let total = costs.commission + spread.unwrap_or_default();
         let mut figures = BTreeMap::from([("Commission".to_string(), f64(costs.commission))]);
-        if !costs.outside_pnl.is_zero() {
-            figures.insert("Commission outside PnL".to_string(), f64(costs.outside_pnl));
-        }
-
         if let Some(spread) = spread {
             figures.insert("Spread".to_string(), f64(spread));
         }
@@ -294,14 +329,16 @@ fn section<'a>(
 mod tests {
     use nautilus_core::{UUID4, UnixNanos};
     use nautilus_model::{
-        enums::OrderType,
-        identifiers::ClientOrderId,
+        accounts::MarginAccount,
+        enums::{AccountType, OrderType},
+        events::AccountState,
+        identifiers::{AccountId, ClientOrderId, Symbol},
         instruments::{InstrumentAny, stubs::equity_aapl},
         orders::{
             OrderAny, OrderTestBuilder,
             stubs::{OrderFilledTestBuilder, TestOrderStubs},
         },
-        types::{Currency, Money, Price, Quantity},
+        types::{AccountBalance, Price, Quantity},
     };
     use rstest::rstest;
 
@@ -342,6 +379,9 @@ mod tests {
             .build();
         let mut order = TestOrderStubs::make_accepted_order(&order);
         let fill = OrderFilledTestBuilder::new(&order, instrument)
+            .account_id(AccountId::from(
+                format!("{}-001", instrument.id().venue).as_str(),
+            ))
             .last_px(Price::from(px))
             .commission(Money::from(commission))
             .ts_event(UnixNanos::from(ts))
@@ -413,8 +453,63 @@ mod tests {
         ] {
             cache.add_order(order, None, None, false).unwrap();
         }
+        cache
+            .add_account(account(
+                "IBIS-001",
+                "9942.00 EUR",
+                None,
+                &["6 EUR", "1.25 GBP"],
+            ))
+            .unwrap();
+        cache
+            .add_account(account("XNAS-001", "100.00 USD", None, &["0.50 USD"]))
+            .unwrap();
         let quote = quote(&sxr8, "99.90", "100.10", 1);
         Outcome::new(result, &cache, [[Ok(quote)]]).unwrap()
+    }
+
+    /// A margin account holding `balance` that has booked each of `commissions`.
+    fn account(
+        id: &str,
+        balance: &str,
+        base: Option<Currency>,
+        commissions: &[&str],
+    ) -> AccountAny {
+        let balance = Money::from(balance);
+        let state = AccountState::new(
+            AccountId::from(id),
+            AccountType::Margin,
+            vec![AccountBalance::new(
+                balance,
+                Money::zero(balance.currency),
+                balance,
+            )],
+            vec![],
+            true,
+            UUID4::new(),
+            UnixNanos::default(),
+            UnixNanos::default(),
+            base,
+        );
+        let mut account = MarginAccount::new(state, true);
+        for commission in commissions {
+            account
+                .try_update_commissions(Money::from(*commission))
+                .unwrap();
+        }
+        AccountAny::Margin(account)
+    }
+
+    /// A cache holding `instrument` and an account of its venue without a base currency.
+    fn cached(instrument: &InstrumentAny) -> Cache {
+        let mut cache = Cache::default();
+        cache.add_instrument(instrument.clone()).unwrap();
+        let (venue, currency) = (instrument.id().venue, instrument.quote_currency());
+        let balance = format!("10000 {currency}");
+        cache
+            .add_account(account(&format!("{venue}-001"), &balance, None, &[]))
+            .unwrap();
+        cache
     }
 
     fn quote(instrument: &InstrumentAny, bid: &str, ask: &str, ts: u64) -> QuoteTick {
@@ -456,8 +551,7 @@ mod tests {
     #[rstest]
     fn each_fill_costs_on_the_last_quote_at_or_before_it_a_later_stream_winning_a_tie() {
         let sxr8 = sxr8();
-        let mut cache = Cache::default();
-        cache.add_instrument(sxr8.clone()).unwrap();
+        let mut cache = cached(&sxr8);
 
         for (id, ts) in [("O-1", 2), ("O-2", 4), ("O-3", 9)] {
             let order = filled_at(id, &sxr8, OrderSide::Buy, 10, "101.00", "0 EUR", ts);
@@ -484,8 +578,7 @@ mod tests {
     #[rstest]
     fn refuses_a_stream_out_of_time_order() {
         let sxr8 = sxr8();
-        let mut cache = Cache::default();
-        cache.add_instrument(sxr8.clone()).unwrap();
+        let mut cache = cached(&sxr8);
         let order = filled("O-1", &sxr8, OrderSide::Buy, 10, "100.10", "3 EUR");
         cache.add_order(order, None, None, false).unwrap();
         let stream = [
@@ -504,8 +597,7 @@ mod tests {
     #[rstest]
     fn refuses_a_fill_of_a_quoted_instrument_with_no_quote_before_it() {
         let sxr8 = sxr8();
-        let mut cache = Cache::default();
-        cache.add_instrument(sxr8.clone()).unwrap();
+        let mut cache = cached(&sxr8);
         let order = filled("O-1", &sxr8, OrderSide::Buy, 10, "100.10", "3 EUR");
         cache.add_order(order, None, None, false).unwrap();
         let stream = [Ok(quote(&sxr8, "99.90", "100.10", 3))];
@@ -543,9 +635,8 @@ Costs (EUR)
   Spread: 3.000000
 
 Costs (GBP)
-  Commission: 0.000000
-  Commission outside PnL: 1.250000
-  Gross PnL: 3.500000
+  Commission: 1.250000
+  Gross PnL: 4.750000
   Spread: 0.000000
 
 Costs (USD)
@@ -566,5 +657,82 @@ Final balances
   account.IBIS.balance.EUR.total: 9942.00 EUR
 ";
         assert_eq!(report(&outcome()), expected);
+    }
+
+    /// An account in EUR trading AAPL in USD books the commission in EUR, and each fill's spread of
+    /// 0.10 USD is converted at the EUR/USD rate on its venue, 1.25: 0.08 EUR. Its costs are in EUR
+    /// alone, beside its PnL.
+    #[rstest]
+    fn every_cost_is_in_the_currency_the_account_books_it_in() {
+        let aapl = InstrumentAny::Equity(equity_aapl());
+        let eurusd =
+            InstrumentAny::CurrencyPair(nautilus_model::instruments::stubs::default_fx_ccy(
+                Symbol::from("EUR/USD"),
+                Some(aapl.id().venue),
+            ));
+        let mut cache = Cache::default();
+        cache.add_instrument(aapl.clone()).unwrap();
+        cache.add_instrument(eurusd.clone()).unwrap();
+
+        for (id, side, px) in [
+            ("O-1", OrderSide::Buy, "150.10"),
+            ("O-2", OrderSide::Sell, "149.90"),
+        ] {
+            let order = filled(id, &aapl, side, 1, px, "3 EUR");
+            cache.add_order(order, None, None, false).unwrap();
+        }
+        cache
+            .add_account(account(
+                "XNAS-001",
+                "9995.00 EUR",
+                Some(Currency::EUR()),
+                &["6 EUR"],
+            ))
+            .unwrap();
+        let mut result = empty_result();
+        result.stats_pnls = [(
+            "EUR".to_string(),
+            [("PnL (total)".to_string(), -5.0)].into_iter().collect(),
+        )]
+        .into_iter()
+        .collect();
+        let quotes = [
+            quote(&eurusd, "1.25000", "1.25000", 1),
+            quote(&aapl, "149.90", "150.10", 1),
+        ];
+
+        let outcome = Outcome::new(result, &cache, [quotes.map(Ok)]).unwrap();
+
+        let report = report(&outcome);
+        assert!(!report.contains("USD"), "{report}");
+        assert!(
+            report.contains(
+                "Costs (EUR)\n  Commission: 6.000000\n  Cost per trade: 3.080000\n  Gross PnL: 1.160000\n  Spread: 0.160000\n"
+            ),
+            "{report}"
+        );
+    }
+
+    #[rstest]
+    fn refuses_a_spread_no_replayed_quote_converts_into_its_accounts_currency() {
+        let aapl = InstrumentAny::Equity(equity_aapl());
+        let mut cache = Cache::default();
+        cache.add_instrument(aapl.clone()).unwrap();
+        let order = filled("O-1", &aapl, OrderSide::Buy, 1, "150.10", "3 EUR");
+        cache.add_order(order, None, None, false).unwrap();
+        cache
+            .add_account(account("XNAS-001", "10000 EUR", Some(Currency::EUR()), &[]))
+            .unwrap();
+        let quotes = [Ok(quote(&aapl, "149.90", "150.10", 1))];
+
+        let err = Outcome::new(empty_result(), &cache, [quotes]).unwrap_err();
+
+        let err = err.to_string();
+        assert!(
+            ["XNAS", "USD", "EUR", "AAPL.XNAS"]
+                .iter()
+                .all(|named| err.contains(named)),
+            "{err}"
+        );
     }
 }
