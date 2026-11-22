@@ -15,8 +15,11 @@ The maintained example uses IC Markets. Follow the [IC Markets setup](src/venues
 
 ```sh
 cargo build --release
-target/release/helix-trader fill-catalog ema --config config/ema.toml --start 2026-01-01 --end 2026-10-01
-target/release/helix-trader backtest ema --config config/ema.toml --start 2026-02-01 --end 2026-10-01 --commission-rate 0.00003 --balance "10000 USD"
+target/release/helix-trader fill-catalog ema --config config/ema.toml \
+  --start 2026-01-01 --end 2026-10-01
+target/release/helix-trader backtest ema --config config/ema.toml \
+  --start 2026-02-01 --end 2026-10-01 \
+  --commission-rate 0.00003 --balance "10000 USD"
 ```
 
 Check the config and venue requirements when changing instruments. Before running `live`, follow [live setup and the relevant venue guide](src/live/README.md), including account mode and credentials. Live trading can place real orders; use a demo account first. Each command's `--help` lists its options.
