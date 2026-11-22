@@ -22,6 +22,9 @@ ignore = [
   { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, transitive via Arrow and DataFusion" },
   { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained, transitive via arrow-array and datafusion-functions" },
   { id = "RUSTSEC-2026-0542", reason = "humantime unmaintained, transitive via object_store" },
+  # Held by the 3-day cooldown: url 2.5.9 fixes it, published 2026-11-20, and
+  # an unused ignore fails the check once it is bumped
+  { id = "RUSTSEC-2026-0592", reason = "url's Url::origin() runs only in Nautilus' network crate, on venue endpoints and their redirects; 2.5.9 fixes it once out of the cooldown" },
 ]
 
 [licenses]
