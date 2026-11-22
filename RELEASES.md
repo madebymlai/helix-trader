@@ -8,7 +8,7 @@ Released on TBD (UTC).
 
 ### Fixes
 
-- Fixed the backtest report listing a converted commission as `Commission outside PnL`; its costs show the commission the accounts booked, in their currency
+- Fixed the backtest report listing a converted commission as `Commission outside PnL`; each cost is in the currency its account books it in
 
 ### Internal Improvements
 
