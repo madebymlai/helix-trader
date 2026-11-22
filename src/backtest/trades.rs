@@ -16,8 +16,8 @@
 //! - `r_amount` and `r_currency`: the R in money its trade was sent at (`orders::entry_risk`).
 //! - `expected_r`: the expected net R of the model decision that sent it
 //!   (`orders::entry_expected_r`), null for a trade no decision sent.
-//! - `entry_bid` and `entry_ask`: the bid and ask of the instrument's latest quote in the cache when
-//!   it was sent (`orders::entry_quote`), null if the cache held none.
+//! - `entry_bid` and `entry_ask`: the bid and ask of the instrument's latest quote in the cache
+//!   when it was sent (`orders::entry_quote`), null if the cache held none.
 //!
 //! They are set only when the position holds its opening entry's trade whole: every fill that adds
 //! to it is of that entry, and every fill of that entry adds to it. A netting position that another
@@ -52,7 +52,7 @@ use crate::strategy::{
 };
 
 /// The positions of a run, as the trades file holds them.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Trades(RecordBatch);
 
 impl Trades {

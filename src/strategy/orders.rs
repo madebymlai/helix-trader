@@ -128,7 +128,9 @@ pub struct EntryRisk {
 /// (`entry_quote`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntryQuote {
+    /// The quote's bid.
     pub bid: Price,
+    /// The quote's ask.
     pub ask: Price,
 }
 
