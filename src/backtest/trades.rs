@@ -2,12 +2,17 @@
 //!
 //! The positions are those Nautilus' own positions report reads (`ReportProvider`, which the
 //! engine reaches from Python alone): every position in the cache, and every closed cycle Nautilus
-//! archived as a snapshot before reusing its ID on a netting venue. Each is encoded by Nautilus'
-//! display encoder of positions (`encode_positions`), its columns as it names them. A position
-//! still open at the end of the run has no close (`ts_closed`, `avg_px_close`,
-//! `closing_order_id` are null) and its realized P&L so far.
+//! archived as a snapshot before a fill reopened its ID, on a netting or a hedging venue. They come
+//! in the order Nautilus initialized their opening fills (`ts_init`), the order its Parquet writer
+//! declares the file sorted in. Each is encoded by Nautilus' display encoder of positions
+//! (`encode_positions`), its columns as it names them. A position still open at the end of the run
+//! has no close (`ts_closed`, `avg_px_close`, `closing_order_id` are null) and its realized P&L so
+//! far.
 //!
-//! Five columns follow Nautilus' own, read from the tags of the position's opening entry:
+//! `is_snapshot` follows, true on an archived cycle, as Nautilus' positions report marks it: a
+//! snapshot's `position_id` is its position's ID and a UUID, which is not to be parsed.
+//!
+//! Five columns follow, read from the tags of the position's opening entry:
 //! - `r_amount` and `r_currency`: the R in money its trade was sent at (`orders::entry_risk`).
 //! - `expected_r`: the expected net R of the model decision that sent it
 //!   (`orders::entry_expected_r`), null for a trade no decision sent.
@@ -28,7 +33,7 @@ use std::{
 
 use anyhow::Context;
 use arrow::{
-    array::{ArrayRef, Float64Builder, StringBuilder},
+    array::{ArrayRef, BooleanArray, Float64Builder, StringBuilder},
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
@@ -51,19 +56,26 @@ use crate::strategy::{
 pub struct Trades(RecordBatch);
 
 impl Trades {
-    /// Returns the positions in `cache` and its position snapshots, in the order they opened.
+    /// Returns the positions in `cache` and its position snapshots, in the order their opening
+    /// fills were initialized (`ts_init`).
     ///
     /// # Errors
     ///
     /// Returns an error if Nautilus fails to encode them.
     pub(super) fn of(cache: &Cache) -> anyhow::Result<Self> {
-        let mut positions: Vec<Position> = cache
+        let mut rows: Vec<(Position, bool)> = cache
             .positions(None, None, None, None, None)
             .iter()
-            .map(|position| (**position).clone())
-            .chain(cache.position_snapshots(None, None))
+            .map(|position| ((**position).clone(), false))
+            .chain(
+                cache
+                    .position_snapshots(None, None)
+                    .into_iter()
+                    .map(|snapshot| (snapshot, true)),
+            )
             .collect();
-        positions.sort_by_key(|position| (position.ts_opened, position.id));
+        rows.sort_by_key(|(position, _)| (position.ts_init, position.ts_opened, position.id));
+        let (positions, snapshots): (Vec<Position>, Vec<bool>) = rows.into_iter().unzip();
         let mut r_amount = Float64Builder::with_capacity(positions.len());
         let mut r_currency = StringBuilder::new();
         let mut expected_r = Float64Builder::with_capacity(positions.len());
@@ -87,6 +99,7 @@ impl Trades {
             .map(|field| field.as_ref().clone())
             .collect();
         fields.extend([
+            Field::new("is_snapshot", DataType::Boolean, false),
             Field::new("r_amount", DataType::Float64, true),
             Field::new("r_currency", DataType::Utf8, true),
             Field::new("expected_r", DataType::Float64, true),
@@ -95,7 +108,8 @@ impl Trades {
         ]);
         let mut columns: Vec<ArrayRef> = encoded.columns().to_vec();
         columns.extend([
-            Arc::new(r_amount.finish()) as ArrayRef,
+            Arc::new(BooleanArray::from(snapshots)) as ArrayRef,
+            Arc::new(r_amount.finish()),
             Arc::new(r_currency.finish()),
             Arc::new(expected_r.finish()),
             Arc::new(entry_bid.finish()),
@@ -106,7 +120,7 @@ impl Trades {
         Ok(Self(batch))
     }
 
-    /// Returns the rows: Nautilus' columns of a position, then the trade columns.
+    /// Returns the rows: Nautilus' columns of a position, `is_snapshot`, then the trade columns.
     #[must_use]
     pub const fn batch(&self) -> &RecordBatch {
         &self.0
@@ -115,9 +129,13 @@ impl Trades {
     /// Writes the rows to the Parquet file at `path`, through Nautilus' Parquet writer, creating
     /// its directory. An existing file is replaced.
     ///
+    /// The file name is taken as it is (`ObjectPath::parse`), so the file is at `path`, whatever
+    /// characters its name holds that an object store would otherwise percent-encode.
+    ///
     /// # Errors
     ///
-    /// Returns an error if `path` names no file, or the directory or the file cannot be written.
+    /// Returns an error if `path` names no file, or a name an object store refuses, or the
+    /// directory or the file cannot be written.
     pub fn write(&self, path: &Path) -> anyhow::Result<()> {
         let written = || format!("writing the trades file {}", path.display());
         let name = path
@@ -134,7 +152,7 @@ impl Trades {
             .to_str()
             .with_context(|| format!("{}: a directory that is not UTF-8", written()))?;
         let (store, _, _) = create_object_store_from_path(dir, None).with_context(written)?;
-        let object = ObjectPath::from(name);
+        let object = ObjectPath::parse(name).with_context(written)?;
         let batches = [self.0.clone()];
         block_on_nautilus_with(|| {
             write_batches_to_object_store(&batches, store, &object, None, None, None)
@@ -157,7 +175,7 @@ struct EntryTags {
 /// Returns the tags of `position`'s opening entry, if the position holds its trade whole (see the
 /// module doc).
 fn whole_trade(cache: &Cache, position: &Position) -> Option<EntryTags> {
-    let entry = cache.order(&position.opening_order_id)?;
+    let entry = cache.order_ref(&position.opening_order_id)?;
     let adding = position
         .events
         .iter()
@@ -181,13 +199,10 @@ fn whole_trade(cache: &Cache, position: &Position) -> Option<EntryTags> {
 mod tests {
     use nautilus_model::{
         enums::{OrderSide, OrderType},
-        events::{OrderEventAny, OrderFilled},
+        events::{OrderEventAny, OrderFilled, order::spec::OrderFilledSpec},
         identifiers::{ClientOrderId, PositionId, TradeId},
         instruments::{Instrument, InstrumentAny, stubs::equity_aapl},
-        orders::{
-            OrderAny, OrderTestBuilder,
-            stubs::{OrderFilledTestBuilder, TestOrderStubs},
-        },
+        orders::{OrderAny, OrderTestBuilder, stubs::TestOrderStubs},
         types::{Money, Price, Quantity},
     };
     use rstest::rstest;
@@ -218,17 +233,28 @@ mod tests {
         TestOrderStubs::make_accepted_order(&order)
     }
 
+    /// Returns a fill of `qty` of `order` into the one position of the tests, as trade `trade`.
+    fn fill_of(order: &OrderAny, trade: &str, qty: u64) -> OrderFilled {
+        OrderFilledSpec::builder()
+            .trader_id(order.trader_id())
+            .strategy_id(order.strategy_id())
+            .instrument_id(order.instrument_id())
+            .client_order_id(order.client_order_id())
+            .maybe_venue_order_id(order.venue_order_id())
+            .maybe_account_id(order.account_id())
+            .trade_id(TradeId::from(trade))
+            .order_side(order.order_side())
+            .order_type(order.order_type())
+            .last_qty(Quantity::from(qty))
+            .last_px(Price::from("620.65"))
+            .position_id(PositionId::from("AAPL.XNAS-NETTED"))
+            .build()
+    }
+
     /// Fills `qty` of `order` into the one position of the tests, as trade `trade`.
     fn fill(order: &mut OrderAny, trade: &str, qty: u64) -> OrderFilled {
-        let event = OrderFilledTestBuilder::new(order, &aapl())
-            .trade_id(TradeId::from(trade))
-            .position_id(PositionId::from("AAPL.XNAS-NETTED"))
-            .last_qty(Quantity::from(qty))
-            .build();
-        order.apply(event.clone()).unwrap();
-        let OrderEventAny::Filled(fill) = event else {
-            unreachable!("a fill")
-        };
+        let fill = fill_of(order, trade, qty);
+        order.apply(OrderEventAny::Filled(fill.clone())).unwrap();
         fill
     }
 
@@ -294,17 +320,25 @@ mod tests {
     fn the_rest_of_an_entry_that_flipped_a_position_is_no_trade_of_its_own() {
         let mut flip = order("E-2", OrderSide::Sell, 15, &TAGGED);
         fill(&mut flip, "T-2", 15);
-        let rest = OrderFilledTestBuilder::new(&flip, &aapl())
-            .trade_id(TradeId::from("T-2"))
-            .position_id(PositionId::from("AAPL.XNAS-NETTED"))
-            .last_qty(Quantity::from(5))
-            .build();
-        let OrderEventAny::Filled(rest) = rest else {
-            unreachable!("a fill")
-        };
+        let rest = fill_of(&flip, "T-2", 5);
 
         let trade = whole_trade(&cached(&[&flip]), &position_of(&[rest]));
 
         assert_eq!(trade, None);
+    }
+
+    /// An object store percent-encodes `#`, `%`, `[` and `~` in a name it is handed whole.
+    #[rstest]
+    fn the_file_is_written_at_its_path_whatever_characters_its_name_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out").join("run #1 [50%]~.parquet");
+
+        Trades::of(&Cache::default()).unwrap().write(&path).unwrap();
+
+        let written: Vec<_> = fs::read_dir(dir.path().join("out"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(written, [path.file_name().unwrap()]);
     }
 }

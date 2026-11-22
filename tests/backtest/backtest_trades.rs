@@ -14,13 +14,13 @@
 //! spread 0.05 either side of the close: 620.55 and 620.65, 600.55 and 600.65, 610.55 and 610.65.
 //! Each trade is sized at 0.32% of the equity then over its one R, 10 shares each time. Nautilus
 //! archives each closed cycle as a snapshot before the next fill reuses the ID, under the ID and a
-//! UUID, so the file holds the two snapshots and the open position. No decision sent them, so they
-//! have no expected R.
+//! UUID, so the file holds the two snapshots and the open position, `is_snapshot` telling them
+//! apart. No decision sent them, so they have no expected R.
 
 use std::{path::Path, process::Command};
 
 use arrow::{
-    array::{Array, Float64Array, StringArray, TimestampNanosecondArray},
+    array::{Array, BooleanArray, Float64Array, StringArray, TimestampNanosecondArray},
     record_batch::RecordBatch,
 };
 use helix_trader::backtest::Trades;
@@ -48,6 +48,12 @@ fn strings(batch: &RecordBatch, name: &str) -> Vec<Option<String>> {
 fn numbers(batch: &RecordBatch, name: &str) -> Vec<Option<f64>> {
     let column = batch.column_by_name(name).unwrap();
     let column = column.as_any().downcast_ref::<Float64Array>().unwrap();
+    column.iter().collect()
+}
+
+fn flags(batch: &RecordBatch, name: &str) -> Vec<Option<bool>> {
+    let column = batch.column_by_name(name).unwrap();
+    let column = column.as_any().downcast_ref::<BooleanArray>().unwrap();
     column.iter().collect()
 }
 
@@ -86,6 +92,10 @@ fn each_cycle_of_the_position_is_a_row_with_the_r_its_trade_was_sent_at() {
     assert_eq!(batch.num_rows(), 3);
     assert_eq!(strings(batch, "entry"), some(&["BUY", "SELL", "BUY"]));
     assert_eq!(strings(batch, "side"), some(&["FLAT", "FLAT", "LONG"]));
+    assert_eq!(
+        flags(batch, "is_snapshot"),
+        [Some(true), Some(true), Some(false)]
+    );
     assert_eq!(
         times(batch, "ts_opened"),
         ["13:00", "14:00", "15:00"].map(|at| Some(trades::at(at)))
