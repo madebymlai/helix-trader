@@ -6,6 +6,7 @@ Released on TBD (UTC).
 
 - Added `backtest --trades <path>`, writing each position to Parquet with the R its trade was sent at, a model decision's expected R and the entry's bid and ask
 - Added `FeatureSetBuilder::event_filter`: a model strategy's indicator that limits its decisions, dataset rows and trades to the grid ticks it marks as events
+- Added `EventTimes`, the times an edge event filter records, so live keeps an event that a later one read before a late decision callback would replace
 - Added the example strategy `model_cross`: `model_ema` with an event filter, a cross of the simple averages of Nautilus' MACD (`config/model_cross.toml`)
 
 ### Breaking Changes
@@ -13,11 +14,9 @@ Released on TBD (UTC).
 - Changed the dataset version to 11, so every dataset and model store is keyed anew; build the datasets and train again
 - Changed `ModelHandle::decide` to take the decision timer's `TimeEvent` and decide at its scheduled time; pass it the event `on_time_event` gets
 - Changed a model target ATR without `bar_interval` to be refused on a decision interval under one minute; set its `bar_interval`
-- Changed `EventFilter::is_event` to take `&mut self`; change an implementation's receiver, and record an edge filter's events in `EventTimes`
 
 ### Fixes
 
-- Fixed a live edge event filter losing a decision's event when a later event was read before the decision's late callback ran
 - Fixed backtests dropping a fill's P&L when the account cannot book its commission's currency, now refused before the run, naming the pair that converts it
 - Fixed the backtest report listing a converted commission as `Commission outside PnL`; each cost is in the currency its account books it in
 
