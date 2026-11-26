@@ -179,6 +179,39 @@ pub(crate) fn edge_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
     quotes
 }
 
+/// The two levels of `level_quotes`, the low and the high.
+pub(crate) const LEVEL_LOW: f64 = 4000.0;
+pub(crate) const LEVEL_HIGH: f64 = 4010.0;
+
+/// Returns quotes every minute at half past, the bid at one of two levels that alternate every two
+/// hours of the day: `LEVEL_LOW` over hours 0 and 1, `LEVEL_HIGH` over 2 and 3, and so on. The
+/// bid is a dollar higher at half past each hour, so every hour bar has a range; the last quote of
+/// each hour is at its level. The ask is 0.20 above the bid.
+pub(crate) fn level_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
+    let mut quotes = vec![];
+    let mut time = from + SignedDuration::from_secs(30);
+    while time < to {
+        let seconds = time.as_second();
+        let level = if seconds / 7200 % 2 == 0 {
+            LEVEL_LOW
+        } else {
+            LEVEL_HIGH
+        };
+        let bid = if seconds % 3600 / 60 == 30 {
+            level + 1.0
+        } else {
+            level
+        };
+        quotes.push(quote(
+            time,
+            &format!("{bid:.2}"),
+            &format!("{:.2}", bid + 0.2),
+        ));
+        time += SignedDuration::from_mins(1);
+    }
+    quotes
+}
+
 /// Returns quotes from 08:00 to 12:00 at :07.250 and :37.750, the bid stepping from 4000.00 to
 /// 4000.90 by the minute. The last quote of the hours closing 10:00 and 11:00 is set apart.
 pub(crate) fn quotes() -> Vec<QuoteTick> {

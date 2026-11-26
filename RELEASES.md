@@ -6,6 +6,7 @@ Released on TBD (UTC).
 
 - Added `backtest --trades <path>`, writing each position to Parquet with the R its trade was sent at, a model decision's expected R and the entry's bid and ask
 - Added `FeatureSetBuilder::event_filter`: a model strategy's indicator that limits its decisions, dataset rows and trades to the grid ticks it marks as events
+- Added the example strategy `model_cross`: `model_ema` deciding only after a cross of its averages, its event filter (`config/model_cross.toml`)
 
 ### Breaking Changes
 

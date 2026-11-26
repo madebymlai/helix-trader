@@ -1,0 +1,72 @@
+# Model cross (`src/strategy/model_cross/`), read into `ModelCrossConfig`:
+# the example strategy of an event filter. It is Model EMA
+# (config/model_ema.toml, which describes the fields both have) deciding
+# only at the hours after its averages cross:
+#   cargo run --release -- train model_cross --config config/model_cross.toml --from ... --to ...
+#   cargo run --release -- backtest model_cross --config config/model_cross.toml ...
+# A backtest trains nothing: train the retrain times of its span first.
+# Every field is described in `src/strategy/README.md`; the event filter in
+# `src/model/README.md`, "Cadence and decision".
+
+# Defaults to MODEL_CROSS-001 when left out. The strategy id keys the
+# model's store.
+# [base]
+# strategy_id = "MODEL_CROSS-001"
+
+[data]
+# The series read, as Model EMA's: hourly bars of the mid of each
+# instrument, each giving the model its two averages. The cross reads the
+# bars of the traded instrument, which are listed once.
+series = [
+  { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+  { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+]
+# Enough for the slow averages' 30 bars and the target's ATR.
+warmup = "72h"
+
+# The model's two averages of each bars series' closes, Nautilus
+# ExponentialMovingAverages, as Model EMA's: features named after their
+# bars and their table, XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL:fast and so on.
+[indicators.fast]
+period = 10
+
+[indicators.slow]
+period = 30
+
+# The event filter, never a model input: a cross either way of a fast over
+# a slow ExponentialMovingAverage of the traded instrument's closes, each
+# by its constructor's arguments as above, the fast's period below the
+# slow's. A decision is made only when such a cross came after the previous
+# grid point, at most an hour after it. Here they are the features'
+# averages; declared by its own table, the cross may differ from them.
+# Its arguments key the dataset and the models by value, as a feature's.
+[indicators.cross]
+fast = { period = 10 }
+slow = { period = 30 }
+
+[trade]
+instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]
+risk = "0.5%"
+
+[model]
+# The hourly grid the cross is asked on: an hour without a cross has no
+# decision, dataset row, score or trade.
+decision = { every = "1h" }
+target = { bracket = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, atr = { period = 14, ma_type = "WILDER" } }, limit = "45m" }
+# Averages of 10 and 30 hourly closes cross about once in 28 hours of a
+# random walk, near one row a trading day of gold's 23 hours. So the
+# models are retrained weekly on the last 180 days, about 128 weekdays and
+# 105 rows, the last 60 days the calibration slice, about 35 rows.
+retrain = "168h"
+window = "4320h"
+calibration = "1440h"
+margins = { long = "0.03R", short = "0.03R" }
+# A train fails, publishing nothing, if its fit slice or its calibration
+# slice holds fewer than 20 rows.
+min_rows = 20
+# LightGBM's trees of up to 4 leaves of 20 rows at least, the fewest this
+# build allows, over 100 rounds at a rate of 0.05: the fit slice's 70 rows
+# or so split into two or three leaves, too few for the learner's default
+# leaves of 200 rows.
+learner = { kind = "lightgbm", num_iterations = 100, learning_rate = 0.05, num_leaves = 4, min_data_in_leaf = 20 }
+dataset = { commission = { rate = "0.00003" }, balance = "10000 USD" }
