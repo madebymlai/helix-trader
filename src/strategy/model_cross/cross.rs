@@ -26,7 +26,8 @@
 
 use nautilus_core::UnixNanos;
 use nautilus_indicators::{
-    average::MovingAverageType, indicator::Indicator,
+    average::{MovingAverageType, sma::SimpleMovingAverage},
+    indicator::Indicator,
     momentum::macd::MovingAverageConvergenceDivergence,
 };
 use nautilus_model::data::Bar;
@@ -107,8 +108,8 @@ impl EventFilter for Cross {
 ///
 /// Its signal period is 1 and its `ma_type` `SIMPLE`, which the cross needs, and `price_type` is
 /// left out, as bars give their close. `new_checked` is not public, and `new` panics on an
-/// argument it refuses: `build` refuses a fast period of zero or not below the slow, and a period
-/// above Nautilus' maximum panics at load.
+/// argument it refuses: `build` refuses a fast period of zero or not below the slow, and a slow
+/// period the Nautilus `SimpleMovingAverage` it averages by refuses, above Nautilus' maximum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CrossArgs {
@@ -121,7 +122,8 @@ impl IndicatorArgs for CrossArgs {
 
     /// # Errors
     ///
-    /// Returns an error if the fast period is zero or not below the slow.
+    /// Returns an error if the fast period is zero or not below the slow, or the slow period is
+    /// one a `SimpleMovingAverage` refuses.
     fn build(self) -> anyhow::Result<Cross> {
         anyhow::ensure!(
             self.fast_period > 0,
@@ -134,6 +136,7 @@ impl IndicatorArgs for CrossArgs {
             self.fast_period,
             self.slow_period
         );
+        SimpleMovingAverage::new_checked(self.slow_period, None)?;
         Ok(Cross {
             macd: MovingAverageConvergenceDivergence::new(
                 self.fast_period,

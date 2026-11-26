@@ -318,6 +318,16 @@ mod tests {
         );
     }
 
+    /// A slow period above Nautilus' maximum is refused under the cross's table, not panicked on.
+    #[rstest]
+    fn a_cross_whose_slow_period_nautilus_refuses_is_refused_under_its_table() {
+        let toml = CONFIG.replace("slow_period = 3", "slow_period = 16777217");
+
+        let message = format!("{:#}", ModelCrossConfig::load(&toml).unwrap_err());
+
+        assert!(message.contains("indicators.cross"), "{message}");
+    }
+
     /// A changed period of the cross changes the fingerprint with no version bump.
     #[rstest]
     fn a_changed_period_of_the_cross_changes_the_fingerprint() {
