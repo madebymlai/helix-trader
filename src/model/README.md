@@ -35,9 +35,9 @@ A finer grid costs its ticks that are no event, each still a timer event and a d
 | ------------------------------------------------------------- | ----------------------- | ----------------------- |
 | Train over the span: wall, CPU, peak memory                   | 39.1 s, 46.1 s, 324 MiB | 48.6 s, 55.2 s, 321 MiB |
 | The first train, 180 days built: wall, CPU                    | 30.2 s, 35.8 s          | 37.8 s, 43.2 s          |
-| Backtest of the month: wall, CPU, peak memory                 | 5.6 s, 7.5 s, 259 MiB   | 7.0 s, 8.8 s, 269 MiB   |
+| Backtest of the month: wall, CPU, peak memory                 | 5.6 s, 7.5 s, 233 MiB   | 7.0 s, 8.8 s, 232 MiB   |
 | Dataset days built: first train, each later one, backtest     | 180; 8, 172 cached; 4   | the same                |
-| Rows: each train's fit and calibration; the month's decisions | 78/26 to 65/39; 22      | the same                |
+| Rows: each train's fit and calibration; the month's decisions | 88/38 to 81/40; 22      | the same                |
 
 So one second takes about a quarter more time than one minute, in a dataset build as in a backtest, at the same memory. The month's decisions cleared no margin, so the backtest sent no order. Both grids gave the same rows, decisions and scores: the cross falls on its hourly bars' closes, a grid point of either, so the finer grid shortened no delay. A grid finer than the times its event filter's events can fall on decides at the same moments and only costs more; one second pays where an event can fall between them, a sweep or a burst of trades.
 
