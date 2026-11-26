@@ -55,8 +55,8 @@ const CONFIG: &str = r#"
     period = 3
 
     [indicators.cross]
-    fast = { period = 2 }
-    slow = { period = 3 }
+    fast_period = 2
+    slow_period = 3
 
     [trade]
     instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]

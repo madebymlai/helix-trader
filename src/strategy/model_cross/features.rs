@@ -6,9 +6,9 @@
 //! When several are read, it is named after the bar type and the table
 //! (`XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:fast`).
 //!
-//! The event filter is a cross of the `SimpleMovingAverage`s of `[indicators.cross]` on the bars
-//! of the traded instrument (`cross::Cross`), so the strategy decides only at the grid ticks after
-//! a cross.
+//! The event filter is a cross of the simple averages of the `MovingAverageConvergenceDivergence`
+//! of `[indicators.cross]` on the bars of the traded instrument (`cross::Cross`), so the strategy
+//! decides only at the grid ticks after a cross.
 
 use std::rc::Rc;
 
@@ -29,7 +29,7 @@ pub(super) const CROSS: Declared<CrossArgs> = Declared::new("cross");
 /// Bumped when what they compute changes and their names and tables do not, such as the kind of
 /// average or what makes a cross. The periods, the price read and the bar types are in the
 /// fingerprint by value.
-const VERSION: u32 = 2;
+const VERSION: u32 = 1;
 
 // panics-doc-ok (transitive via FeatureSetBuilder::feature and FeatureSetBuilder::event_filter)
 /// Builds the averages of each bar type in turn, the fast then the slow, and the cross on the bars
@@ -76,10 +76,10 @@ pub(super) fn features(config: &ModelCrossConfig) -> anyhow::Result<Rc<FeatureSe
 
 #[cfg(all(test, feature = "strategy-tests"))]
 mod tests {
-    use rstest::rstest;
     use nautilus_common::actor::indicators::ActorIndicator;
-    use nautilus_core::UnixNanos;
+    use nautilus_core::{UnixNanos, datetime::NANOSECONDS_IN_MINUTE};
     use nautilus_model::data::{Bar, BarType};
+    use rstest::rstest;
 
     use super::*;
     use crate::{
@@ -89,7 +89,6 @@ mod tests {
 
     const GOLD: &str = "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
     const GOLD_BARS: &str = r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#;
-    const MINUTE: u64 = 60_000_000_000;
 
     /// Test config:
     /// - gold's minute bars
@@ -112,8 +111,8 @@ mod tests {
         period = 3
 
         [indicators.cross]
-        fast = { period = 2 }
-        slow = { period = 3 }
+        fast_period = 2
+        slow_period = 3
 
         [trade]
         instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]
@@ -137,7 +136,7 @@ mod tests {
 
     /// A bar of gold closing at `close`, at the end of minute `minute`.
     fn bar(minute: u64, close: &str) -> Bar {
-        let ts = UnixNanos::from(minute * MINUTE);
+        let ts = UnixNanos::from(minute * NANOSECONDS_IN_MINUTE);
         Bar::new(
             BarType::from(GOLD),
             close.into(),
@@ -164,7 +163,10 @@ mod tests {
         let features = fed(&["11.00", "12.00"]);
 
         assert_eq!(
-            features.event(UnixNanos::default(), UnixNanos::from(3 * MINUTE)),
+            features.event(
+                UnixNanos::default(),
+                UnixNanos::from(3 * NANOSECONDS_IN_MINUTE)
+            ),
             Err(NoEvent::Cold)
         );
     }
@@ -177,7 +179,10 @@ mod tests {
         let features = fed(&["11.00", "12.00", "13.00", "14.00"]);
 
         assert_eq!(
-            features.event(UnixNanos::from(3 * MINUTE), UnixNanos::from(5 * MINUTE)),
+            features.event(
+                UnixNanos::from(3 * NANOSECONDS_IN_MINUTE),
+                UnixNanos::from(5 * NANOSECONDS_IN_MINUTE)
+            ),
             Err(NoEvent::Unmarked)
         );
     }
@@ -189,10 +194,10 @@ mod tests {
     /// none for one whose previous grid point is at it. Nor is it one for a decision before minute
     /// 4, whose callback a live clock ran after the bar came: it is the next decision's.
     #[rstest]
-    #[case::between_the_grid_points(3 * MINUTE + 1, 5 * MINUTE, Ok(()))]
-    #[case::at_the_decision(3 * MINUTE + 1, 4 * MINUTE, Ok(()))]
-    #[case::at_the_previous_grid_point(4 * MINUTE, 5 * MINUTE, Err(NoEvent::Unmarked))]
-    #[case::after_the_decision(3 * MINUTE + 1, 4 * MINUTE - 1, Err(NoEvent::Unmarked))]
+    #[case::between_the_grid_points(3 * NANOSECONDS_IN_MINUTE + 1, 5 * NANOSECONDS_IN_MINUTE, Ok(()))]
+    #[case::at_the_decision(3 * NANOSECONDS_IN_MINUTE + 1, 4 * NANOSECONDS_IN_MINUTE, Ok(()))]
+    #[case::at_the_previous_grid_point(4 * NANOSECONDS_IN_MINUTE, 5 * NANOSECONDS_IN_MINUTE, Err(NoEvent::Unmarked))]
+    #[case::after_the_decision(3 * NANOSECONDS_IN_MINUTE + 1, 4 * NANOSECONDS_IN_MINUTE - 1, Err(NoEvent::Unmarked))]
     fn a_cross_is_an_event_for_the_decision_after_it(
         #[case] previous: u64,
         #[case] now: u64,
@@ -220,8 +225,8 @@ mod tests {
 
         assert_eq!(
             features.event(
-                UnixNanos::from((fourth - 1) * MINUTE),
-                UnixNanos::from((fourth + 1) * MINUTE)
+                UnixNanos::from((fourth - 1) * NANOSECONDS_IN_MINUTE),
+                UnixNanos::from((fourth + 1) * NANOSECONDS_IN_MINUTE)
             ),
             Ok(())
         );
@@ -244,8 +249,8 @@ mod tests {
 
         assert_eq!(
             features.event(
-                UnixNanos::from((last - 1) * MINUTE),
-                UnixNanos::from(last * MINUTE)
+                UnixNanos::from((last - 1) * NANOSECONDS_IN_MINUTE),
+                UnixNanos::from(last * NANOSECONDS_IN_MINUTE)
             ),
             Ok(())
         );
@@ -289,7 +294,7 @@ mod tests {
     /// Averages of one period never cross, so the load refuses them under the cross's table.
     #[rstest]
     fn a_cross_whose_fast_period_is_not_below_its_slow_is_refused_under_its_table() {
-        let toml = CONFIG.replace("fast = { period = 2 }", "fast = { period = 3 }");
+        let toml = CONFIG.replace("fast_period = 2", "fast_period = 3");
 
         let message = format!("{:#}", ModelCrossConfig::load(&toml).unwrap_err());
 
@@ -299,10 +304,24 @@ mod tests {
         );
     }
 
+    /// An average of no closes has no value, so the load refuses a fast period of zero under the
+    /// cross's table rather than Nautilus panicking on it.
+    #[rstest]
+    fn a_cross_whose_fast_period_is_zero_is_refused_under_its_table() {
+        let toml = CONFIG.replace("fast_period = 2", "fast_period = 0");
+
+        let message = format!("{:#}", ModelCrossConfig::load(&toml).unwrap_err());
+
+        assert!(
+            message.contains("indicators.cross") && message.contains("fast period 0"),
+            "{message}"
+        );
+    }
+
     /// A changed period of the cross changes the fingerprint with no version bump.
     #[rstest]
     fn a_changed_period_of_the_cross_changes_the_fingerprint() {
-        let changed = CONFIG.replace("slow = { period = 3 }", "slow = { period = 4 }");
+        let changed = CONFIG.replace("slow_period = 3", "slow_period = 4");
 
         assert_ne!(
             features_of(&changed).fingerprint(),
