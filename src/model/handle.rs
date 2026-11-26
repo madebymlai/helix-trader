@@ -11,6 +11,8 @@
 //! - The target's ATR, if any, is initialized. The handle reads this itself, not through
 //!   Nautilus' indicators.
 //! - The decision is fresh: data of the target's instrument has come since the previous decision.
+//! - The decision is an event: the event filter, if any, is initialized and marks it
+//!   (`FeatureSet::event`).
 //! - Every feature is initialized.
 //!
 //! Then the mode decides what happens:
@@ -24,7 +26,7 @@
 //!   The handle sends no order and reads no equity. The strategy sends `Decision::trade` through
 //!   `strategy::orders`, at a stake of its own. The models see the target at the reference stake
 //!   alone. With no model set valid yet, no side trades. These are no decision, never an error: a
-//!   stale decision, cold features, an uninitialized ATR, a target of no size, no side clearing
+//!   stale decision, a cold event filter or no event, cold features, an uninitialized ATR, a target of no size, no side clearing
 //!   its margin, or a tie. The target is set before the models are asked, so `decide` errs when
 //!   the instrument is missing from the cache.
 //! - `Mode::Dataset`: opens the decision's target (`targets::Targets`) and returns no decision.
@@ -63,8 +65,8 @@
 //! (`Roller::custom_roots`). `start` subscribes each series once, on the contract standing for its
 //! instrument or root, and sets each root's roll alert. The strategy hands the handle its time
 //! events, after `strategy::orders::on_time_event`, for the roller. At a roll, the root's series
-//! move to the post contract (`Subscriptions::roll`) and its features restart there
-//! (`FeatureSet::roll`), so decisions wait until they refill. A backtest and a dataset run roll on
+//! move to the post contract (`Subscriptions::roll`) and its features and event filter restart
+//! there (`FeatureSet::roll`), so decisions wait until they refill. A backtest and a dataset run roll on
 //! the catalog's contract slices (`DataRequirements::slices`). Live, the roller loads each post
 //! contract before its roll (`Roller::live`).
 //!
@@ -393,10 +395,12 @@ impl ModelHandle {
         Rc::clone(&self.warmup)
     }
 
-    /// Returns the decision to trade now for `strategy`, if any.
+    // panics-doc-ok (transitive via decide::decide)
+    /// Returns the decision to trade at `event`, the decision timer's, for `strategy`, if any
+    /// (`decide::decide`).
     ///
     /// Returns `None` while the warmup is answering, the target's ATR is not initialized, or
-    /// `decide::decide` publishes no row. In backtest and live, a working order or open position
+    /// `decide::decide` publishes no row: a stale decision, no event, or cold features. In backtest and live, a working order or open position
     /// of this strategy on the traded instrument suppresses the entry, not the feature row.
     ///
     /// # Errors
@@ -405,7 +409,11 @@ impl ModelHandle {
     /// - A model fails to predict.
     /// - `TargetSetter::at` fails.
     /// - In a dataset run, `Targets::open` fails.
-    pub fn decide<S>(&self, strategy: &mut S) -> anyhow::Result<Option<Decision>>
+    ///
+    /// # Panics
+    ///
+    /// Panics if `event` is not the decision timer's, or as `decide::decide` does otherwise.
+    pub fn decide<S>(&self, strategy: &mut S, event: &TimeEvent) -> anyhow::Result<Option<Decision>>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
@@ -417,7 +425,8 @@ impl ModelHandle {
             log::debug!("No decision: the target's ATR is not initialized");
             return Ok(None);
         }
-        let Some(row) = decide::decide(strategy, &self.features, self.rule, self.traded) else {
+        let Some(row) = decide::decide(strategy, event, &self.features, self.rule, self.traded)
+        else {
             return Ok(None);
         };
         match &self.serving {
@@ -728,7 +737,10 @@ mod tests {
                 gold, meta, meta_baseline, model_set_of, model_store, r, requirements, store,
                 with_meta,
             },
-            features::testing::{last_mid, mid_over},
+            features::{
+                NoEvent,
+                testing::{RISE, last_mid, mid_over},
+            },
             schedule::Retrain,
             targets::{
                 BracketSpec, BracketWidth, DEFAULT_ATR, Distance, Side, Target, TargetConfig,
@@ -878,6 +890,16 @@ mod tests {
         .unwrap()
     }
 
+    /// Decides on `handle` as the decision timer firing at the probe's clock, as in a backtest.
+    fn decide_now<S>(handle: &ModelHandle, probe: &mut S) -> anyhow::Result<Option<Decision>>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        let now = probe.clock().timestamp_ns();
+        let event = TimeEvent::new(decide::DECISION_TIMER.into(), UUID4::new(), now, now);
+        handle.decide(probe, &event)
+    }
+
     /// Returns the level of `decision`, which is the model's R.
     fn level(decision: Option<Decision>) -> Option<f64> {
         decision.map(|decision| decision.level)
@@ -899,7 +921,7 @@ mod tests {
         .unwrap();
         started(&cold, &mut probe);
 
-        assert_eq!(cold.decide(&mut probe).unwrap(), None);
+        assert_eq!(decide_now(&cold, &mut probe).unwrap(), None);
     }
 
     #[rstest]
@@ -915,7 +937,7 @@ mod tests {
             .borrow_mut()
             .advance_time(UnixNanos::from(at("2026-10-22T12:00:00Z")), true);
 
-        assert_eq!(handle.decide(&mut probe).unwrap(), None);
+        assert_eq!(decide_now(&handle, &mut probe).unwrap(), None);
     }
 
     #[rstest]
@@ -952,7 +974,7 @@ mod tests {
         .unwrap();
         started(&handle, &mut probe);
 
-        assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
+        assert_eq!(level(decide_now(&handle, &mut probe).unwrap()), Some(r(8)));
     }
 
     #[rstest]
@@ -1042,7 +1064,7 @@ mod tests {
         let handle = sides_handle(&probe, models.path(), &config(), (Some(6), None));
         started(&handle, &mut probe);
 
-        let decision = handle.decide(&mut probe).unwrap().unwrap();
+        let decision = decide_now(&handle, &mut probe).unwrap().unwrap();
 
         assert_eq!(
             (
@@ -1108,7 +1130,7 @@ mod tests {
         let handle = sides_handle(&probe, models.path(), &in_euros(), (Some(6), None));
         started(&handle, &mut probe);
 
-        let decision = handle.decide(&mut probe).unwrap();
+        let decision = decide_now(&handle, &mut probe).unwrap();
 
         assert_eq!(level(decision), Some(r(6)));
     }
@@ -1121,7 +1143,7 @@ mod tests {
         let handle = sides_handle(&probe, models.path(), &in_euros(), (Some(6), None));
         started(&handle, &mut probe);
 
-        let decision = handle.decide(&mut probe).unwrap();
+        let decision = decide_now(&handle, &mut probe).unwrap();
 
         assert_eq!(decision, None);
     }
@@ -1152,7 +1174,7 @@ mod tests {
         let handle = sides_handle(&probe, models.path(), &bracket_config(10), (Some(10), None));
         handle.start(&mut probe).unwrap();
 
-        let decision = handle.decide(&mut probe).unwrap().unwrap();
+        let decision = decide_now(&handle, &mut probe).unwrap().unwrap();
 
         assert_eq!(
             decision.trade(),
@@ -1192,7 +1214,7 @@ mod tests {
         let handle = sides_handle(&probe, models.path(), &config, (Some(6), Some(10)));
         handle.start(&mut probe).unwrap();
 
-        let decision = handle.decide(&mut probe).unwrap().unwrap();
+        let decision = decide_now(&handle, &mut probe).unwrap().unwrap();
 
         assert_eq!(decision.side, OrderSide::Sell);
         assert_eq!(
@@ -1259,7 +1281,7 @@ mod tests {
         let (mut probe, _clock) = on_a_half_tick(at("2026-10-22T12:00:00Z"));
         let handle = sides_handle(&probe, models.path(), &half_tick_config(), (Some(2), None));
 
-        assert_eq!(handle.decide(&mut probe).unwrap(), None);
+        assert_eq!(decide_now(&handle, &mut probe).unwrap(), None);
     }
 
     #[rstest]
@@ -1272,7 +1294,7 @@ mod tests {
         };
         let handle = sides_handle(&probe, models.path(), &config, (Some(2), Some(8)));
 
-        let decision = handle.decide(&mut probe).unwrap().unwrap();
+        let decision = decide_now(&handle, &mut probe).unwrap().unwrap();
 
         assert_eq!(decision.side, OrderSide::Sell);
         assert_eq!(
@@ -1314,7 +1336,7 @@ mod tests {
             ),
         );
 
-        let decision = handle.decide(&mut probe).unwrap().unwrap();
+        let decision = decide_now(&handle, &mut probe).unwrap().unwrap();
 
         assert_eq!(
             decision.trade(),
@@ -1444,7 +1466,7 @@ mod tests {
         handle.start(&mut probe).unwrap();
         let rows = published();
 
-        let decision = handle.decide(&mut probe).unwrap();
+        let decision = decide_now(&handle, &mut probe).unwrap();
 
         assert_eq!(decision, None);
         assert_eq!(rows.borrow().len(), 0);
@@ -1487,9 +1509,9 @@ mod tests {
             UnixNanos::from(at("2026-10-22T12:00:00Z")),
         );
 
-        let cold = handle.decide(&mut probe).unwrap();
+        let cold = decide_now(&handle, &mut probe).unwrap();
         DataActor::on_quote(&mut probe, &quote).unwrap();
-        let quoted = handle.decide(&mut probe).unwrap();
+        let quoted = decide_now(&handle, &mut probe).unwrap();
         hand_bar(
             &mut probe,
             &hour_bar(
@@ -1497,7 +1519,7 @@ mod tests {
                 ["0.69950", "0.70020", "0.69940", "0.70000"],
             ),
         );
-        let barred = handle.decide(&mut probe).unwrap();
+        let barred = decide_now(&handle, &mut probe).unwrap();
 
         assert_eq!(
             (level(cold), level(quoted), level(barred)),
@@ -1973,13 +1995,13 @@ mod tests {
             &mut probe,
             &mid_bar("2026-10-22T12:00:00Z", "0.69900", "0.70100"),
         );
-        let (noon, noon_r) = trade(handle.decide(&mut probe).unwrap()).unwrap();
+        let (noon, noon_r) = trade(decide_now(&handle, &mut probe).unwrap()).unwrap();
         advance(&features, &clock, "2026-10-22T13:00:00Z");
         hand_bar(
             &mut probe,
             &mid_bar("2026-10-22T13:00:00Z", "0.69800", "0.70200"),
         );
-        let (one, one_r) = trade(handle.decide(&mut probe).unwrap()).unwrap();
+        let (one, one_r) = trade(decide_now(&handle, &mut probe).unwrap()).unwrap();
 
         let read: Vec<f64> = rows.borrow().iter().map(|row| row.features[0]).collect();
         assert_eq!(read.len(), 2, "{read:?}");
@@ -2071,7 +2093,7 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T11:00:00Z"));
         let handle = live_handle(&mut probe, models.path(), &features());
 
-        assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
+        assert_eq!(level(decide_now(&handle, &mut probe).unwrap()), Some(r(8)));
     }
 
     #[rstest]
@@ -2083,11 +2105,11 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T11:00:00Z"));
         let handle = warming_handle(&mut probe, models.path(), &features());
 
-        let warming = level(handle.decide(&mut probe).unwrap());
+        let warming = level(decide_now(&handle, &mut probe).unwrap());
         handle.warmup().complete(&probe).unwrap();
 
         assert_eq!(warming, None);
-        assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
+        assert_eq!(level(decide_now(&handle, &mut probe).unwrap()), Some(r(8)));
     }
 
     #[rstest]
@@ -2098,13 +2120,13 @@ mod tests {
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
         let features = features();
         let handle = live_handle(&mut probe, models.path(), &features);
-        let before = level(handle.decide(&mut probe).unwrap());
+        let before = level(decide_now(&handle, &mut probe).unwrap());
 
         store.publish(&baseline("2026-10-22T23:00:00Z", 9)).unwrap();
         advance(&features, &clock, "2026-10-23T01:00:00Z");
 
         assert_eq!(before, Some(r(7)));
-        assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(9)));
+        assert_eq!(level(decide_now(&handle, &mut probe).unwrap()), Some(r(9)));
     }
 
     /// Returns a long model of 0.1R from midnight, with a meta model predicting `r(meta_tenths)`.
@@ -2136,7 +2158,7 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         started(&handle, &mut probe);
 
-        let decision = handle.decide(&mut probe).unwrap().unwrap();
+        let decision = decide_now(&handle, &mut probe).unwrap().unwrap();
 
         assert_eq!(
             (
@@ -2249,7 +2271,7 @@ mod tests {
         let handle = handle_on_an_instrument_not_in_the_cache(models.path(), &config, eur);
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
 
-        let err = handle.decide(&mut probe).unwrap_err();
+        let err = decide_now(&handle, &mut probe).unwrap_err();
 
         assert!(format!("{err:#}").contains("EUR/USD.SIM"), "{err:#}");
     }
@@ -2290,7 +2312,7 @@ mod tests {
             },
         );
 
-        let err = handle.decide(&mut probe).unwrap_err();
+        let err = decide_now(&handle, &mut probe).unwrap_err();
 
         assert!(format!("{err:#}").contains("EUR/USD.SIM"), "{err:#}");
     }
@@ -2305,13 +2327,13 @@ mod tests {
         let features = features();
         let handle = handle(&probe, models.path(), &features);
         started(&handle, &mut probe);
-        let before = level(handle.decide(&mut probe).unwrap());
+        let before = level(decide_now(&handle, &mut probe).unwrap());
 
         store.break_listing();
         advance(&features, &clock, "2026-10-22T12:00:00Z");
 
         assert_eq!(before, Some(r(7)));
-        assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
+        assert_eq!(level(decide_now(&handle, &mut probe).unwrap()), Some(r(8)));
     }
 
     /// Records the data commands the probe's actor sends from now, in order.
@@ -2503,6 +2525,133 @@ mod tests {
         );
         assert!(!cold);
         assert!(features.initialized());
+    }
+
+    fn gc_trade(contract: &str, time: &str, price: &str) -> TradeTick {
+        TradeTick {
+            instrument_id: InstrumentId::from(contract),
+            ..gcz6_trade(time, price)
+        }
+    }
+
+    /// Decides at a rise of the price of GC's trades.
+    fn filtered_on_gc() -> Rc<FeatureSet> {
+        let tables: IndicatorsConfig = toml::from_str(
+            r#"
+            mid = { period = 1, price_type = "MID" }
+            rise = { step = 0.0 }
+            "#,
+        )
+        .unwrap();
+        last_mid(InstrumentId::from(AUD))
+            .event_filter(
+                &[Series::trades(InstrumentId::from("GC.GLBX"))],
+                RISE,
+                &tables,
+            )
+            .build()
+            .unwrap()
+    }
+
+    fn gc_trades() -> TickSeries {
+        TickSeries {
+            data: NautilusDataType::TradeTick,
+            instrument_id: InstrumentId::from("GC.GLBX"),
+        }
+    }
+
+    fn event_at(features: &FeatureSet, previous: &str, now: &str) -> Result<(), NoEvent> {
+        features.event(UnixNanos::from(at(previous)), UnixNanos::from(at(now)))
+    }
+
+    /// Live on 2026-08-10 at 14:30, the event filter on GC's trades reads GCZ26's history, whose
+    /// rise at 14:29 makes the first decision, at 14:30, an event.
+    #[rstest]
+    fn a_live_start_warms_the_event_filter_from_its_series_history() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-08-10T14:30:00Z"));
+        let features = filtered_on_gc();
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![aud_quotes(), gc_trades()],
+            custom: vec![],
+            warmup: SignedDuration::from_hours(1),
+        };
+        let handle = ModelHandle::new(
+            &blueprint_of(&features, &bracket_config(10), requirements),
+            &live(models.path().to_path_buf()),
+        )
+        .unwrap();
+        probe.warmup = Some(handle.warmup());
+        let sent = sent_commands();
+
+        handle.start(&mut probe).unwrap();
+        let cold = event_at(&features, "2026-08-10T14:15:00Z", "2026-08-10T14:30:00Z");
+        probe.handle_trades_response(&TradesResponse::new(
+            UUID4::new(),
+            ClientId::from("GLBX"),
+            InstrumentId::from("GCZ26.GLBX"),
+            vec![
+                gcz6_trade("2026-08-10T14:00:00Z", "4000.0"),
+                gcz6_trade("2026-08-10T14:29:00Z", "4002.0"),
+            ],
+            None,
+            None,
+            UnixNanos::from(at("2026-08-10T14:30:00Z")),
+            None,
+        ));
+        handle.warmup().complete(&probe).unwrap();
+
+        assert!(sent.take().iter().any(|line| line
+            == "request trades [GCZ26.GLBX] \
+                    Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)"),);
+        assert_eq!(cold, Err(NoEvent::Cold));
+        assert_eq!(
+            event_at(&features, "2026-08-10T14:15:00Z", "2026-08-10T14:30:00Z"),
+            Ok(())
+        );
+    }
+
+    /// GC rolls into GCG27 at 00:00 UTC on 2026-11-26. The roll resets the event filter on GC's
+    /// trades, which then warms on GCG27's.
+    #[rstest]
+    fn a_roll_of_its_root_resets_the_event_filter() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, clock) = registered(at("2026-11-25T23:00:00Z"));
+        let features = filtered_on_gc();
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![aud_quotes(), gc_trades()],
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+        let handle = ModelHandle::new(
+            &blueprint_of(&features, &config(), requirements),
+            &Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        probe.warmup = Some(handle.warmup());
+        handle.start(&mut probe).unwrap();
+        let trade = |probe: &mut Decider, contract: &str, time: &str, price: &str| {
+            DataActor::on_trade(probe, &gc_trade(contract, time, price)).unwrap();
+        };
+
+        trade(&mut probe, "GCZ26.GLBX", "2026-11-25T23:10:00Z", "4000.0");
+        trade(&mut probe, "GCZ26.GLBX", "2026-11-25T23:20:00Z", "4002.0");
+        let before_the_roll = event_at(&features, "2026-11-25T23:00:00Z", "2026-11-26T00:00:00Z");
+        run_to(&handle, &mut probe, &clock, "2026-11-26T00:30:00Z");
+        let rolled = event_at(&features, "2026-11-25T23:00:00Z", "2026-11-26T00:30:00Z");
+        trade(&mut probe, "GCG27.GLBX", "2026-11-26T00:40:00Z", "4100.0");
+        trade(&mut probe, "GCG27.GLBX", "2026-11-26T00:50:00Z", "4105.0");
+
+        assert_eq!(before_the_roll, Ok(()));
+        assert_eq!(rolled, Err(NoEvent::Cold));
+        assert_eq!(
+            event_at(&features, "2026-11-26T00:30:00Z", "2026-11-26T01:00:00Z"),
+            Ok(())
+        );
     }
 
     fn started_live(

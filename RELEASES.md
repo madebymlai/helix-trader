@@ -5,9 +5,13 @@ Released on TBD (UTC).
 ### Enhancements
 
 - Added `backtest --trades <path>`, writing each position to Parquet with the R its trade was sent at, a model decision's expected R and the entry's bid and ask
+- Added `FeatureSetBuilder::event_filter`: a model strategy's indicator that limits its decisions, dataset rows and trades to the grid ticks it marks as events
+- Added the example strategy `model_cross`: `model_ema` with an event filter, a cross of the simple averages of Nautilus' MACD (`config/model_cross.toml`)
 
 ### Breaking Changes
 
+- Changed the dataset version to 11, so every dataset and model store is keyed anew; build the datasets and train again
+- Changed `ModelHandle::decide` to take the decision timer's `TimeEvent` and decide at its scheduled time; pass it the event `on_time_event` gets
 - Changed a model target ATR without `bar_interval` to be refused on a decision interval under one minute; set its `bar_interval`
 
 ### Fixes
@@ -21,6 +25,7 @@ Released on TBD (UTC).
 
 ### Documentation Updates
 
+- Added to the model guide the measured cost of a one-second decision grid against one minute, in a train and in a backtest
 - Changed the README's quick-start commands to wrap over several lines, so they read without scrolling
 
 ---

@@ -2,13 +2,15 @@
 
 use std::rc::Rc;
 
+use nautilus_core::{UnixNanos, datetime::NANOSECONDS_IN_MINUTE};
 use nautilus_indicators::indicator::Indicator;
 use nautilus_model::{
-    data::{CustomData, OrderBookDeltas, OrderBookDepth, QuoteTick},
+    data::{CustomData, OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick},
+    enums::PriceType,
     identifiers::InstrumentId,
 };
 
-use super::{CustomHandler, Feature, FeatureSet, FeatureSetBuilder, OverBracket};
+use super::{CustomHandler, EventFilter, Feature, FeatureSet, FeatureSetBuilder, OverBracket};
 use crate::{
     model::targets::BracketWidth,
     strategy::{
@@ -67,6 +69,17 @@ impl Feature for MidOverWidth {
             .as_ref()
             .expect("a width, handed as the set is built");
         mid / width.length(mid).expect("a length")
+    }
+
+    fn over_bracket(&mut self) -> Option<&mut dyn OverBracket> {
+        Some(self)
+    }
+}
+
+/// An event at every decision once initialized, which reads the width.
+impl EventFilter for MidOverWidth {
+    fn is_event(&self, _previous: UnixNanos, _now: UnixNanos) -> bool {
+        self.initialized()
     }
 
     fn over_bracket(&mut self) -> Option<&mut dyn OverBracket> {
@@ -201,6 +214,17 @@ impl Feature for CustomCount {
     }
 }
 
+/// An event at every decision once a point has come.
+impl EventFilter for CustomCount {
+    fn is_event(&self, _previous: UnixNanos, _now: UnixNanos) -> bool {
+        true
+    }
+
+    fn custom_handler(&mut self) -> Option<&mut dyn CustomHandler> {
+        Some(self)
+    }
+}
+
 impl CustomHandler for CustomCount {
     fn handle_custom(&mut self, _data: &CustomData) -> anyhow::Result<()> {
         self.count += 1;
@@ -217,5 +241,123 @@ impl IndicatorArgs for CustomCountArgs {
 
     fn build(self) -> anyhow::Result<CustomCount> {
         Ok(CustomCount { count: 0 })
+    }
+}
+
+pub(crate) const RISE: Declared<RiseArgs> = Declared::new("rise");
+
+/// An edge event filter: an event is a quote's mid, or a trade's price, more than `step` above the
+/// price before it. It is initialized once a price has come.
+pub(crate) struct Rise {
+    step: f64,
+    last: Option<f64>,
+    risen_at: Option<UnixNanos>,
+}
+
+impl Rise {
+    fn read(&mut self, price: f64, ts_init: UnixNanos) {
+        if self.last.is_some_and(|last| price > last + self.step) {
+            self.risen_at = Some(ts_init);
+        }
+        self.last = Some(price);
+    }
+}
+
+impl Indicator for Rise {
+    fn name(&self) -> String {
+        "Rise".to_string()
+    }
+
+    fn has_inputs(&self) -> bool {
+        self.last.is_some()
+    }
+
+    fn initialized(&self) -> bool {
+        self.last.is_some()
+    }
+
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.read(quote.extract_price(PriceType::Mid)?.as_f64(), quote.ts_init);
+        Ok(())
+    }
+
+    fn handle_trade(&mut self, trade: &TradeTick) {
+        self.read(trade.price.as_f64(), trade.ts_init);
+    }
+
+    fn reset(&mut self) {
+        self.last = None;
+        self.risen_at = None;
+    }
+}
+
+/// Its value is the last price, so it can be declared as a feature too.
+impl Feature for Rise {
+    fn value(&self) -> f64 {
+        self.last.expect("a price, once initialized")
+    }
+}
+
+impl EventFilter for Rise {
+    fn is_event(&self, previous: UnixNanos, now: UnixNanos) -> bool {
+        self.risen_at
+            .is_some_and(|risen_at| previous < risen_at && risen_at <= now)
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RiseArgs {
+    step: f64,
+}
+
+impl IndicatorArgs for RiseArgs {
+    type Indicator = Rise;
+
+    fn build(self) -> anyhow::Result<Rise> {
+        Ok(Rise {
+            step: self.step,
+            last: None,
+            risen_at: None,
+        })
+    }
+}
+
+pub(crate) const FIRST_HALF_HOUR: Declared<FirstHalfHourArgs> = Declared::new("first_half_hour");
+
+/// An event filter of time alone: every decision in the first half of an hour is an event.
+pub(crate) struct FirstHalfHour;
+
+impl Indicator for FirstHalfHour {
+    fn name(&self) -> String {
+        "FirstHalfHour".to_string()
+    }
+
+    fn has_inputs(&self) -> bool {
+        false
+    }
+
+    fn initialized(&self) -> bool {
+        true
+    }
+
+    fn reset(&mut self) {}
+}
+
+impl EventFilter for FirstHalfHour {
+    fn is_event(&self, _previous: UnixNanos, now: UnixNanos) -> bool {
+        now.as_u64() / NANOSECONDS_IN_MINUTE % 60 < 30
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FirstHalfHourArgs {}
+
+impl IndicatorArgs for FirstHalfHourArgs {
+    type Indicator = FirstHalfHour;
+
+    fn build(self) -> anyhow::Result<FirstHalfHour> {
+        Ok(FirstHalfHour)
     }
 }

@@ -7,7 +7,7 @@ use nautilus_common::{
     msgbus::{self, ShareableMessageHandler, switchboard::get_custom_topic},
     timer::TimeEventCallback,
 };
-use nautilus_core::UUID4;
+use nautilus_core::{UUID4, datetime::NANOSECONDS_IN_MILLISECOND};
 use nautilus_model::{
     data::{QuoteTick, TradeTick},
     enums::AggressorSide,
@@ -22,7 +22,10 @@ use nautilus_trading::{
 use rstest::rstest;
 
 use super::*;
-use crate::strategy::{Declared, EmaArgs, IndicatorsConfig, Series};
+use crate::{
+    model::features::testing::RISE,
+    strategy::{Declared, EmaArgs, IndicatorsConfig, Series},
+};
 
 const STRATEGY: &str = "PROBE-001";
 const AUD: &str = "AUD/USD.SIM";
@@ -87,6 +90,7 @@ fn tables() -> IndicatorsConfig {
         r#"
         mid = { period = 1, price_type = "MID" }
         mid_2 = { period = 2, price_type = "MID" }
+        rise = { step = 0.0 }
         "#,
     )
     .unwrap()
@@ -113,6 +117,16 @@ fn quote_of(instrument: &str, mid: f64, ns: u64) -> QuoteTick {
 
 fn quote(mid: f64) -> QuoteTick {
     quote_of(AUD, mid, NOW - SECOND)
+}
+
+/// The decision timer's event scheduled at `ns`.
+fn fired(ns: u64) -> TimeEvent {
+    TimeEvent::new(
+        DECISION_TIMER.into(),
+        UUID4::new(),
+        UnixNanos::from(ns),
+        UnixNanos::from(ns),
+    )
 }
 
 fn published() -> Rc<RefCell<Vec<FeatureRow>>> {
@@ -235,13 +249,30 @@ fn another_timer_is_no_decision() {
 }
 
 #[rstest]
+#[should_panic(expected = "EMA-HOLD:O-1 is no decision")]
+fn another_timers_event_is_refused_as_a_decision() {
+    let (probe, _clock) = registered(NOW);
+    let hold = TimeEvent::new(
+        "EMA-HOLD:O-1".into(),
+        UUID4::new(),
+        UnixNanos::from(NOW),
+        UnixNanos::from(NOW),
+    );
+
+    let _ = decide(&probe, &hold, &features(), every(15), aud());
+}
+
+#[rstest]
 fn cold_features_give_no_decision_and_publish_nothing() {
     let (probe, _clock) = registered(NOW);
     let rows = published();
     let features = features();
     features.handle_quote(&quote(0.7)).unwrap();
 
-    assert_eq!(decide(&probe, &features, every(15), aud()), None);
+    assert_eq!(
+        decide(&probe, &fired(NOW), &features, every(15), aud()),
+        None
+    );
     assert!(rows.borrow().is_empty());
 }
 
@@ -253,7 +284,7 @@ fn a_decision_publishes_the_features_keyed_by_the_strategy() {
     features.handle_quote(&quote(0.7)).unwrap();
     features.handle_quote(&quote(0.8)).unwrap();
 
-    let row = decide(&probe, &features, every(15), aud()).unwrap();
+    let row = decide(&probe, &fired(NOW), &features, every(15), aud()).unwrap();
 
     assert_eq!(row.strategy_id, StrategyId::from(STRATEGY));
     assert_eq!(row.ts_event, UnixNanos::from(NOW));
@@ -278,7 +309,10 @@ fn a_cadence_without_data_since_its_previous_decision_skips_and_publishes_nothin
     let rows = published();
     let features = warm_until(NOW - 16 * 60 * SECOND);
 
-    assert_eq!(decide(&probe, &features, every(15), aud()), None);
+    assert_eq!(
+        decide(&probe, &fired(NOW), &features, every(15), aud()),
+        None
+    );
     assert!(rows.borrow().is_empty());
 }
 
@@ -288,10 +322,19 @@ fn data_since_the_previous_decision_is_fresh_and_data_up_to_it_stale() {
     let previous = NOW - 15 * 60 * SECOND;
 
     assert_eq!(
-        decide(&probe, &warm_until(previous), every(15), aud()),
+        decide(&probe, &fired(NOW), &warm_until(previous), every(15), aud()),
         None
     );
-    assert!(decide(&probe, &warm_until(previous + 1), every(15), aud()).is_some());
+    assert!(
+        decide(
+            &probe,
+            &fired(NOW),
+            &warm_until(previous + 1),
+            every(15),
+            aud()
+        )
+        .is_some()
+    );
 }
 
 #[rstest]
@@ -304,8 +347,13 @@ fn the_decision_an_interval_after_the_epoch_judges_its_data_from_the_epoch() {
         features
     };
 
-    assert_eq!(decide(&probe, &warm_at(0), every(15), aud()), None);
-    assert!(decide(&probe, &warm_at(1), every(15), aud()).is_some());
+    let decision = fired(900 * SECOND);
+
+    assert_eq!(
+        decide(&probe, &decision, &warm_at(0), every(15), aud()),
+        None
+    );
+    assert!(decide(&probe, &decision, &warm_at(1), every(15), aud()).is_some());
 }
 
 #[rstest]
@@ -313,7 +361,7 @@ fn the_decision_an_interval_after_the_epoch_judges_its_data_from_the_epoch() {
 fn a_decision_within_an_interval_of_the_epoch_is_refused() {
     let (probe, _clock) = registered(600 * SECOND);
 
-    let _ = decide(&probe, &features(), every(15), aud());
+    let _ = decide(&probe, &fired(600 * SECOND), &features(), every(15), aud());
 }
 
 /// The traded instrument is closed and another is open.
@@ -333,8 +381,20 @@ fn data_of_another_instrument_makes_no_decision_fresh() {
         .handle_quote(&quote_of(GBP, 1.3, NOW - SECOND))
         .unwrap();
 
-    assert_eq!(decide(&probe, &features, every(15), aud()), None);
-    assert!(decide(&probe, &features, every(15), InstrumentId::from(GBP)).is_some());
+    assert_eq!(
+        decide(&probe, &fired(NOW), &features, every(15), aud()),
+        None
+    );
+    assert!(
+        decide(
+            &probe,
+            &fired(NOW),
+            &features,
+            every(15),
+            InstrumentId::from(GBP)
+        )
+        .is_some()
+    );
 }
 
 #[rstest]
@@ -347,7 +407,10 @@ fn a_trade_of_the_traded_instrument_in_the_cache_makes_the_decision_fresh() {
     features
         .handle_quote(&quote_of(GBP, 1.3, NOW - 16 * 60 * SECOND))
         .unwrap();
-    assert_eq!(decide(&probe, &features, every(15), aud()), None);
+    assert_eq!(
+        decide(&probe, &fired(NOW), &features, every(15), aud()),
+        None
+    );
 
     probe
         .cache_rc()
@@ -363,7 +426,7 @@ fn a_trade_of_the_traded_instrument_in_the_cache_makes_the_decision_fresh() {
         ))
         .unwrap();
 
-    assert!(decide(&probe, &features, every(15), aud()).is_some());
+    assert!(decide(&probe, &fired(NOW), &features, every(15), aud()).is_some());
 }
 
 #[rstest]
@@ -401,5 +464,195 @@ fn a_fingerprint_without_a_build_delay_keeps_the_rules_part_as_it_was() {
     assert_eq!(
         fingerprint(&features, every(15), SignedDuration::ZERO),
         features.fingerprint().with(b"every 900000000000 ns")
+    );
+}
+
+/// The grid point before the decision at `NOW` on `every(15)`.
+const PREVIOUS: u64 = NOW - 15 * 60 * SECOND;
+
+/// The features of `features`, warm and fresh at `NOW`, decided only at a rise of GBP's mid.
+fn filtered() -> Rc<FeatureSet> {
+    let features = FeatureSet::builder()
+        .feature(&[Series::quotes(aud())], MID_2, &tables())
+        .event_filter(&[Series::quotes(InstrumentId::from(GBP))], RISE, &tables())
+        .build()
+        .unwrap();
+    features
+        .handle_quote(&quote_of(AUD, 0.7, NOW - 2 * SECOND))
+        .unwrap();
+    features.handle_quote(&quote(0.8)).unwrap();
+    features
+}
+
+/// Hands `features` GBP's mids, each at its time.
+fn gbp(features: &FeatureSet, mids: &[(f64, u64)]) {
+    for &(mid, ns) in mids {
+        features.handle_quote(&quote_of(GBP, mid, ns)).unwrap();
+    }
+}
+
+#[rstest]
+fn a_cold_event_filter_gives_no_decision_and_publishes_nothing() {
+    let (probe, _clock) = registered(NOW);
+    let rows = published();
+
+    assert_eq!(
+        decide(&probe, &fired(NOW), &filtered(), every(15), aud()),
+        None
+    );
+    assert!(rows.borrow().is_empty());
+}
+
+/// GBP's mid rose before the previous grid point and fell since.
+#[rstest]
+fn a_decision_whose_filter_marks_no_event_since_the_previous_grid_point_publishes_nothing() {
+    let (probe, _clock) = registered(NOW);
+    let rows = published();
+    let features = filtered();
+    gbp(
+        &features,
+        &[
+            (1.3, PREVIOUS - 2 * SECOND),
+            (1.4, PREVIOUS - SECOND),
+            (1.2, PREVIOUS + 60 * SECOND),
+        ],
+    );
+
+    assert_eq!(
+        decide(&probe, &fired(NOW), &features, every(15), aud()),
+        None
+    );
+    assert!(rows.borrow().is_empty());
+}
+
+/// GBP's mid rose 2 minutes after the previous grid point, 13 minutes before the decision.
+#[rstest]
+fn an_event_between_grid_points_makes_the_next_decision() {
+    let (probe, _clock) = registered(NOW);
+    let rows = published();
+    let features = filtered();
+    gbp(
+        &features,
+        &[
+            (1.3, PREVIOUS + 60 * SECOND),
+            (1.4, PREVIOUS + 120 * SECOND),
+        ],
+    );
+
+    let row = decide(&probe, &fired(NOW), &features, every(15), aud()).unwrap();
+
+    assert_eq!(row.ts_init, UnixNanos::from(NOW));
+    assert!((row.features[0] - 0.75).abs() < 1e-9, "{row:?}");
+    assert_eq!(*rows.borrow(), [row]);
+}
+
+/// An event at the previous grid point is the previous decision's, as data at it is.
+#[rstest]
+#[case::on_the_previous_grid_point(PREVIOUS, false)]
+#[case::just_after_it(PREVIOUS + 1, true)]
+fn an_event_is_a_decisions_from_just_after_the_previous_grid_point(
+    #[case] risen_at: u64,
+    #[case] decided: bool,
+) {
+    let (probe, _clock) = registered(NOW);
+    let features = filtered();
+    gbp(&features, &[(1.3, PREVIOUS - SECOND), (1.4, risen_at)]);
+
+    assert_eq!(
+        decide(&probe, &fired(NOW), &features, every(15), aud()).is_some(),
+        decided
+    );
+}
+
+/// AUD, the traded instrument, had no data over the interval to the previous grid point, so the
+/// decision there was stale. An event in that interval is no event of the next decision, which
+/// judges it from the previous grid point, not from the last decision made.
+#[rstest]
+#[case::in_the_stale_interval(PREVIOUS - 5 * 60 * SECOND, false)]
+#[case::after_it(PREVIOUS + 5 * 60 * SECOND, true)]
+fn an_event_after_a_stale_interval_makes_a_decision_and_one_in_it_does_not(
+    #[case] risen_at: u64,
+    #[case] decided: bool,
+) {
+    let (probe, _clock) = registered(NOW);
+    let features = FeatureSet::builder()
+        .feature(&[Series::quotes(aud())], MID_2, &tables())
+        .event_filter(&[Series::quotes(InstrumentId::from(GBP))], RISE, &tables())
+        .build()
+        .unwrap();
+    features
+        .handle_quote(&quote_of(AUD, 0.7, PREVIOUS - 20 * 60 * SECOND))
+        .unwrap();
+    features.handle_quote(&quote(0.8)).unwrap();
+    gbp(&features, &[(1.3, risen_at - SECOND), (1.4, risen_at)]);
+
+    assert_eq!(
+        decide(&probe, &fired(NOW), &features, every(15), aud()).is_some(),
+        decided
+    );
+}
+
+/// The grid point after `NOW` on `every(15)`.
+const NEXT: u64 = NOW + 15 * 60 * SECOND;
+
+/// A live clock reads past a decision's scheduled time by the delay before its callback runs, a
+/// different one at each decision. GBP's mid rises 200 ms after the scheduled time `NOW`: a delay
+/// of 300 ms there has the rise read before that decision, one of 100 ms after it. Each decision
+/// asks the filter from the scheduled time before it to its own, so the rise is the decision at
+/// `NEXT`'s alone, counted once, whatever the delays.
+#[rstest]
+#[case::read_before_a_late_decision(300, 100)]
+#[case::read_after_an_early_decision(100, 300)]
+fn an_event_just_after_a_scheduled_time_is_the_next_decisions_alone_whatever_the_clocks_delays(
+    #[case] first_delay_ms: u64,
+    #[case] second_delay_ms: u64,
+) {
+    let (probe, clock) = registered(NOW);
+    let features = filtered();
+    gbp(&features, &[(1.3, PREVIOUS - SECOND)]);
+    let risen_at = NOW + 200 * NANOSECONDS_IN_MILLISECOND;
+    let first_read = NOW + first_delay_ms * NANOSECONDS_IN_MILLISECOND;
+
+    if risen_at <= first_read {
+        gbp(&features, &[(1.4, risen_at)]);
+    }
+    clock
+        .borrow_mut()
+        .advance_time(UnixNanos::from(first_read), true);
+    let first = decide(&probe, &fired(NOW), &features, every(15), aud());
+    if risen_at > first_read {
+        gbp(&features, &[(1.4, risen_at)]);
+    }
+    features
+        .handle_quote(&quote_of(AUD, 0.8, NEXT - SECOND))
+        .unwrap();
+    clock.borrow_mut().advance_time(
+        UnixNanos::from(NEXT + second_delay_ms * NANOSECONDS_IN_MILLISECOND),
+        true,
+    );
+    let second = decide(&probe, &fired(NEXT), &features, every(15), aud());
+
+    assert_eq!((first.is_some(), second.is_some()), (false, true));
+}
+
+/// A decision is at its scheduled time, which picks its model and keys its dataset row, and the
+/// row was read at the clock's time, 300 ms later.
+#[rstest]
+fn a_decision_read_past_its_scheduled_time_is_at_that_time_and_read_at_the_clocks() {
+    let (probe, clock) = registered(NOW - 2 * SECOND);
+    let features = features();
+    features.handle_quote(&quote(0.7)).unwrap();
+    features.handle_quote(&quote(0.8)).unwrap();
+    clock.borrow_mut().advance_time(
+        UnixNanos::from(NOW + 300 * NANOSECONDS_IN_MILLISECOND),
+        true,
+    );
+
+    let row = decide(&probe, &fired(NOW), &features, every(15), aud()).unwrap();
+
+    assert_eq!(row.ts_event, UnixNanos::from(NOW));
+    assert_eq!(
+        row.ts_init,
+        UnixNanos::from(NOW + 300 * NANOSECONDS_IN_MILLISECOND)
     );
 }

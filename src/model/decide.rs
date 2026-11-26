@@ -3,7 +3,9 @@
 //! A strategy decides on a clock cadence (`DecisionRule`). The cadence is a Nautilus timer,
 //! `DECISION_TIMER`. `start` sets it on an epoch-aligned time, so decisions sit on the UTC grid of
 //! the interval's multiples, whatever the run start, in a backtest as live. The strategy calls
-//! `decide` from `on_time_event` when `is_decision`.
+//! `decide` from `on_time_event` when `is_decision`, with the timer's event. A decision is at the
+//! event's scheduled time, which a backtest's clock reads in the callback and a live one passes by
+//! however long the callback waited.
 //!
 //! A node builds the bars of a composite bar type a delay after their close
 //! (`warmup::bar_build_delay`). The cadence starts with that delay. Each decision fires
@@ -14,15 +16,22 @@
 //!
 //! A stale decision gives none either, because it would trade a closed market on its last quote.
 //! A decision is fresh if the features read market data of the traded instrument with a
-//! `ts_init` after the previous decision on the grid, an interval before. This holds whether the
-//! strategy ran then or not. A stale decision gives no row, targets or trade, and is logged at
-//! debug.
+//! `ts_init` after the previous decision on the grid, an interval before its scheduled time. This
+//! holds whether the strategy ran then or not. A stale decision gives no row, targets or trade, and
+//! is logged at debug.
 //!
 //! The market data is the quotes, trades, bars, depth and deltas of the traded instrument that a
-//! feature reads (`FeatureSet::last_update`), plus its last quote and trade in the cache. There is
-//! no calendar of sessions. The quotes added by `StandardConfig::data_requirements` count when no
+//! feature or the event filter reads (`FeatureSet::last_update`), plus its last quote and trade in
+//! the cache. There is no calendar of sessions. The quotes added by `StandardConfig::data_requirements` count when no
 //! series reads the traded instrument. Other instruments and custom data do not count. The node
 //! builds no time bar for a period without data (`warmup::data_engine_config`), so a bar is data.
+//!
+//! A fresh decision that is no event gives none either (`FeatureSet::event`): a cold event filter,
+//! or one that marks no event, gives no row, targets or trade, and is logged at debug. The filter
+//! is asked with the previous grid point, the boundary freshness reads, and the decision's
+//! scheduled time, so consecutive decisions ask it over windows that tile the grid. An edge event
+//! between two grid points makes the next decision, at most an interval later, and one at the
+//! previous grid point is the previous decision's. Then the features' values are read.
 
 use std::sync::Arc;
 
@@ -70,9 +79,10 @@ pub struct FeatureRow {
     pub strategy_id: StrategyId,
     /// The value of each feature, in the order of the names in the feature set.
     pub features: Vec<f64>,
-    /// The time of the decision.
+    /// The time of the decision, its timer's scheduled time.
     pub ts_event: UnixNanos,
-    /// The time of the row, which is also the time of the decision.
+    /// The time the features were read, the clock's in the decision's callback. A backtest's clock
+    /// reads the decision's time there, and a live one later.
     pub ts_init: UnixNanos,
 }
 
@@ -186,17 +196,25 @@ pub fn is_decision(event: &TimeEvent) -> bool {
     event.name == DECISION_TIMER
 }
 
-/// Decides now on `rule`, trading `instrument_id`.
+/// Decides at `event`, the cadence's timer firing, on `rule`, trading `instrument_id`.
 ///
-/// Publishes a row of `features` if the decision is fresh and every feature is initialized.
+/// The decision is at the event's scheduled time, its `ts_event`, and its previous grid point an
+/// interval before. A backtest's clock reads that time in the callback. A live clock reads later,
+/// by however long the callback waited, so its time would leave gaps and overlaps between
+/// consecutive decisions. The scheduled times tile the grid exactly.
+///
+/// Publishes a row of `features` if, checked in this order, the decision is fresh, it is an event
+/// (`FeatureSet::event`) and every feature is initialized.
 ///
 /// # Panics
 ///
 /// Panics if:
+/// - `event` is not the cadence's timer (`is_decision`).
 /// - `strategy` is not registered with a trader, or has no id.
-/// - Now is less than an interval after the epoch, so there is no previous decision.
+/// - The decision is less than an interval after the epoch, so there is no previous decision.
 pub fn decide<S>(
     strategy: &S,
+    event: &TimeEvent,
     features: &FeatureSet,
     rule: DecisionRule,
     instrument_id: InstrumentId,
@@ -204,11 +222,12 @@ pub fn decide<S>(
 where
     S: Strategy + StrategyNative + DataActor + DataActorNative,
 {
-    let now = strategy.clock().timestamp_ns();
+    assert!(is_decision(event), "{} is no decision", event.name);
+    let at = event.ts_event;
     let DecisionRule::Every(interval) = rule;
     let previous = DurationNanos::try_from(interval)
         .ok()
-        .and_then(|interval| now.checked_sub(interval))
+        .and_then(|interval| at.checked_sub(interval))
         .expect("a decision an interval after the epoch");
     let cache = strategy.cache();
     let quoted = cache.quote(&instrument_id).map(|quote| quote.ts_init);
@@ -220,8 +239,13 @@ where
         .is_none_or(|last| last <= previous)
     {
         log::debug!(
-            "decision at {now} skipped: no data of {instrument_id} since the previous, at {previous}"
+            "decision at {at} skipped: no data of {instrument_id} since the previous, at {previous}"
         );
+        return None;
+    }
+
+    if let Err(no_event) = features.event(previous, at) {
+        log::debug!("decision at {at} skipped: {no_event}, the previous grid point at {previous}");
         return None;
     }
     let values = features.values()?;
@@ -231,8 +255,8 @@ where
     let row = FeatureRow {
         strategy_id,
         features: values,
-        ts_event: now,
-        ts_init: now,
+        ts_event: at,
+        ts_init: strategy.clock().timestamp_ns(),
     };
     let data_type = FeatureRow::data_type(strategy_id);
     let data = CustomData::new(Arc::new(row.clone()), data_type.clone());

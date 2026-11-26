@@ -69,13 +69,13 @@ fn only_an_open_position_of_the_strategy_on_its_traded_instrument_blocks_entry(
         .borrow_mut()
         .add_position(&position, OmsType::Hedging)
         .unwrap();
-    assert_eq!(handle.decide(&mut probe).unwrap().is_none(), blocks);
+    assert_eq!(decide_now(&handle, &mut probe).unwrap().is_none(), blocks);
     let close = fill(&market(owner, symbol, true), &instrument, position_id);
     cache
         .borrow_mut()
         .update_position_from_fill(position_id, &close)
         .unwrap();
-    assert!(handle.decide(&mut probe).unwrap().is_some());
+    assert!(decide_now(&handle, &mut probe).unwrap().is_some());
 }
 
 #[rstest]
@@ -100,7 +100,7 @@ fn only_a_working_order_of_the_strategy_on_its_traded_instrument_blocks_entry(
         .add_order(order.clone(), None, None, false)
         .unwrap();
     assert_eq!(
-        handle.decide(&mut probe).unwrap().is_none(),
+        decide_now(&handle, &mut probe).unwrap().is_none(),
         blocks,
         "initialized"
     );
@@ -113,12 +113,12 @@ fn only_a_working_order_of_the_strategy_on_its_traded_instrument_blocks_entry(
     ] {
         cache.borrow_mut().update_order(&event).unwrap();
         assert_eq!(
-            handle.decide(&mut probe).unwrap().is_none(),
+            decide_now(&handle, &mut probe).unwrap().is_none(),
             blocks,
             "{event:?}"
         );
     }
     let canceled = TestOrderEventStubs::canceled(&order, account, Some(venue_id));
     cache.borrow_mut().update_order(&canceled).unwrap();
-    assert!(handle.decide(&mut probe).unwrap().is_some());
+    assert!(decide_now(&handle, &mut probe).unwrap().is_some());
 }
