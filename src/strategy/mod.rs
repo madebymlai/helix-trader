@@ -49,9 +49,7 @@ pub mod warmup;
 // Includes one module per strategy and `StrategyName` (see `build.rs`)
 include!(concat!(env!("OUT_DIR"), "/strategies.rs"));
 
-pub use indicators::{
-    AtrArgs, Declaration, Declared, EmaArgs, IndicatorArgs, IndicatorsConfig, SmaArgs,
-};
+pub use indicators::{AtrArgs, Declaration, Declared, EmaArgs, IndicatorArgs, IndicatorsConfig};
 pub use kind::{PlainStrategy, Visitor};
 pub use session::Session;
 pub use standard::{DataConfig, Part, Series, StandardConfig, TradeConfig, TradedInstrument};

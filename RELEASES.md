@@ -6,8 +6,7 @@ Released on TBD (UTC).
 
 - Added `backtest --trades <path>`, writing each position to Parquet with the R its trade was sent at, a model decision's expected R and the entry's bid and ask
 - Added `FeatureSetBuilder::event_filter`: a model strategy's indicator that limits its decisions, dataset rows and trades to the grid ticks it marks as events
-- Added the example strategy `model_cross`: `model_ema` deciding only after a cross of two simple averages, its event filter (`config/model_cross.toml`)
-- Added `SmaArgs`, declaring Nautilus' `SimpleMovingAverage` from an `[indicators.<name>]` table
+- Added the example strategy `model_cross`: `model_ema` with an event filter, a cross of the simple averages of Nautilus' MACD (`config/model_cross.toml`)
 
 ### Breaking Changes
 

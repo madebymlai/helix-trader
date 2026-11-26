@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, marker::PhantomData};
 
 use nautilus_common::config::{ConfigError, ConfigErrorCollector};
 use nautilus_indicators::{
-    average::{MovingAverageType, ema::ExponentialMovingAverage, sma::SimpleMovingAverage},
+    average::{MovingAverageType, ema::ExponentialMovingAverage},
     indicator::Indicator,
     volatility::atr::AverageTrueRange,
 };
@@ -22,9 +22,9 @@ pub struct IndicatorsConfig(pub BTreeMap<String, toml::Table>);
 /// The arguments of an indicator, and how the indicator is built.
 ///
 /// The arguments are the `[indicators.<name>]` table. For Nautilus' indicators they are the
-/// constructor's arguments, under its names (`EmaArgs`, `SmaArgs`, `AtrArgs`). A custom indicator
-/// brings its own. They serialize as they parse, so a feature's arguments enter its fingerprint by
-/// value (`canonical_args`).
+/// constructor's arguments, under its names (`EmaArgs`, `AtrArgs`). A custom indicator brings its
+/// own. They serialize as they parse, so a feature's arguments enter its fingerprint by value
+/// (`canonical_args`).
 pub trait IndicatorArgs: DeserializeOwned + Serialize {
     type Indicator: Indicator;
 
@@ -100,26 +100,6 @@ impl IndicatorArgs for EmaArgs {
 
     fn build(self) -> anyhow::Result<ExponentialMovingAverage> {
         ExponentialMovingAverage::new_checked(self.period, self.price_type)
-    }
-}
-
-/// The arguments of a Nautilus `SimpleMovingAverage`, built by its `new_checked`.
-///
-/// The arguments are those of `EmaArgs`: `period` and `price_type`, the price read from quotes.
-/// `LAST` is left out, and bars give their close.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SmaArgs {
-    pub period: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub price_type: Option<PriceType>,
-}
-
-impl IndicatorArgs for SmaArgs {
-    type Indicator = SimpleMovingAverage;
-
-    fn build(self) -> anyhow::Result<SimpleMovingAverage> {
-        SimpleMovingAverage::new_checked(self.period, self.price_type)
     }
 }
 

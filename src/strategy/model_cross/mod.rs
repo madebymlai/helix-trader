@@ -67,7 +67,8 @@ pub type ModelCrossConfig = StandardConfig<ModelCrossParams>;
 ///
 /// It trades the one instrument of `[trade]` on a model. Its features are a fast and a slow
 /// `ExponentialMovingAverage` of every bars series of `[data]`, and its event filter a cross of the
-/// `SimpleMovingAverage`s of `[indicators.cross]` on the one bars series of the traded instrument.
+/// simple averages of the `MovingAverageConvergenceDivergence` of `[indicators.cross]` on the one
+/// bars series of the traded instrument.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCrossParams {}
