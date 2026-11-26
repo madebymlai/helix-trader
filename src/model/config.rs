@@ -1013,6 +1013,101 @@ mod tests {
         );
     }
 
+    /// The section deciding `every`, with the target's ATR table `atr` under `owner`.
+    fn deciding_with_atr(every: &str, owner: &str, atr: &str) -> String {
+        let toml = match owner {
+            "model.target.atr" => section(&format!("target = {{ limit = '45m', atr = {atr} }}")),
+            "model.target.bracket.atr" => atr_section(Some(atr)),
+            owner => panic!("no ATR under {owner}"),
+        };
+        toml.replace("every = \"1h\"", &format!("every = \"{every}\""))
+    }
+
+    #[rstest]
+    fn a_target_atr_falling_back_to_a_sub_minute_decision_interval_is_refused_under_it(
+        #[values("30s", "1s", "250ms")] every: &str,
+        #[values("model.target.atr", "model.target.bracket.atr")] owner: &str,
+    ) {
+        let toml = deciding_with_atr(every, owner, "{ period = 2 }");
+
+        assert_eq!(
+            refused_fields_warming(&toml, SignedDuration::from_hours(14)),
+            [owner]
+        );
+        let err = format!(
+            "{:#}",
+            load_warming(&toml, SignedDuration::from_hours(14)).unwrap_err()
+        );
+        assert!(err.contains(every) && err.contains("bar_interval"), "{err}");
+    }
+
+    #[rstest]
+    fn a_brackets_default_atr_falling_back_to_a_sub_minute_decision_interval_is_refused_under_it() {
+        let toml = atr_section(None).replace("every = \"1h\"", "every = \"30s\"");
+
+        assert_eq!(
+            refused_fields_warming(&toml, SignedDuration::from_hours(14)),
+            ["model.target.bracket.atr"]
+        );
+        let err = format!(
+            "{:#}",
+            load_warming(&toml, SignedDuration::from_hours(14)).unwrap_err()
+        );
+        assert!(err.contains("30s") && err.contains("bar_interval"), "{err}");
+    }
+
+    #[rstest]
+    #[case::sub_minute_on_its_interval(
+        "250ms",
+        "250ms",
+        "XAUUSD.ICMARKETS-250-MILLISECOND-MID-INTERNAL"
+    )]
+    #[case::seconds_on_a_second_grid("1s", "1s", "XAUUSD.ICMARKETS-1-SECOND-MID-INTERNAL")]
+    #[case::quarter_hours_on_a_second_grid("1s", "15m", "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL")]
+    #[case::seconds_on_an_hourly_grid("1h", "30s", "XAUUSD.ICMARKETS-30-SECOND-MID-INTERNAL")]
+    fn a_target_atr_with_its_bar_interval_loads_at_any_decision_interval(
+        #[case] every: &str,
+        #[case] interval: &str,
+        #[case] bar_type: &str,
+        #[values("model.target.atr", "model.target.bracket.atr")] owner: &str,
+    ) {
+        let toml = deciding_with_atr(
+            every,
+            owner,
+            &format!("{{ period = 2, bar_interval = '{interval}' }}"),
+        );
+
+        let config = load_warming(&toml, SignedDuration::from_hours(14)).unwrap();
+
+        let atr = config
+            .target
+            .atr_bars(config.decision, &reading(GOLD))
+            .unwrap()
+            .unwrap();
+        assert_eq!(atr.bar_type, BarType::from(bar_type));
+    }
+
+    #[rstest]
+    #[case::a_minute("1m", "XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL")]
+    #[case::two_minutes("2m", "XAUUSD.ICMARKETS-2-MINUTE-MID-INTERNAL")]
+    #[case::an_hour("1h", "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")]
+    fn a_target_atr_without_its_bar_interval_takes_a_decision_interval_of_a_minute_or_more(
+        #[case] every: &str,
+        #[case] bar_type: &str,
+        #[values("model.target.atr", "model.target.bracket.atr")] owner: &str,
+    ) {
+        let toml = deciding_with_atr(every, owner, "{ period = 2 }");
+
+        let config = load_warming(&toml, SignedDuration::from_hours(14)).unwrap();
+
+        let atr = config
+            .target
+            .atr_bars(config.decision, &reading(GOLD))
+            .unwrap()
+            .unwrap();
+        assert_eq!(atr.bar_type, BarType::from(bar_type));
+    }
+
     #[rstest]
     fn a_time_only_targets_atr_warming_longer_than_the_warmup_is_refused_under_it() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);

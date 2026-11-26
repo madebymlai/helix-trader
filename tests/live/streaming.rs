@@ -584,7 +584,7 @@ const MODEL_EMA_CONFIG: &str = r#"
     [model]
     dataset = { commission = { per_order = "1 USD" }, balance = "1000000 USD" }
     decision = { every = "2s" }
-    target = { limit = "1s", atr = { period = 1 } }
+    target = { limit = "1s", atr = { period = 1, bar_interval = "2s" } }
     retrain = "24h"
     window = "46h"
     calibration = "12h"

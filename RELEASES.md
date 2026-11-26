@@ -12,6 +12,7 @@ Released on TBD (UTC).
 
 - Changed the dataset version to 11, so every dataset and model store is keyed anew; build the datasets and train again
 - Changed `ModelHandle::decide` to take the decision timer's `TimeEvent` and decide at its scheduled time; pass it the event `on_time_event` gets
+- Changed a model target ATR without `bar_interval` to be refused on a decision interval under one minute; set its `bar_interval`
 
 ### Fixes
 
