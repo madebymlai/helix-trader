@@ -6,8 +6,9 @@
 //! When several are read, it is named after the bar type and the table
 //! (`XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:fast`).
 //!
-//! The event filter is a cross of the averages of `[indicators.cross]` on the bars of the traded
-//! instrument (`cross::Cross`), so the strategy decides only at the grid ticks after a cross.
+//! The event filter is a cross of the `SimpleMovingAverage`s of `[indicators.cross]` on the bars
+//! of the traded instrument (`cross::Cross`), so the strategy decides only at the grid ticks after
+//! a cross.
 
 use std::rc::Rc;
 
@@ -28,7 +29,7 @@ pub(super) const CROSS: Declared<CrossArgs> = Declared::new("cross");
 /// Bumped when what they compute changes and their names and tables do not, such as the kind of
 /// average or what makes a cross. The periods, the price read and the bar types are in the
 /// fingerprint by value.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 // panics-doc-ok (transitive via FeatureSetBuilder::feature and FeatureSetBuilder::event_filter)
 /// Builds the averages of each bar type in turn, the fast then the slow, and the cross on the bars
@@ -93,7 +94,7 @@ mod tests {
     /// Test config:
     /// - gold's minute bars
     /// - features of a fast average of 2 bars and a slow average of 3
-    /// - a cross of the same averages
+    /// - a cross of simple averages of the same periods
     /// - a warmup of 3 hours
     /// - a time-only target
     /// - a unit of the ATR of 3 hourly bars
@@ -168,10 +169,9 @@ mod tests {
         );
     }
 
-    /// Closes of 11, 12, 13 then 14. The fast average starts from the mean of its first two, 11.5,
-    /// then weighs each close 2/3: 12.5, then 13.5. The slow starts from the mean of its first
-    /// three, 12, then weighs each close 1/2: 13. The fast is above the slow after the third bar
-    /// and the fourth.
+    /// Closes of 11, 12, 13 then 14. The cross's fast average is the mean of the last two closes,
+    /// 12.5 after the third bar and 13.5 after the fourth, and its slow the mean of the last three,
+    /// 12 then 13. The fast is above the slow after the third bar and the fourth.
     #[rstest]
     fn averages_that_do_not_cross_mark_no_decision() {
         let features = fed(&["11.00", "12.00", "13.00", "14.00"]);
@@ -182,23 +182,48 @@ mod tests {
         );
     }
 
-    /// Closes of 11, 12, 13 then 10. After the third bar the fast average, 12.5, is above the
-    /// slow, 12. The fourth brings the fast to 12.5 + 2/3 (10 - 12.5), 10.83, and the slow to
-    /// 12 + 1/2 (10 - 12), 11: the fast is below, a cross at the fourth bar, minute 4. It is an
-    /// event for a decision whose previous grid point is before minute 4, and none for one whose
-    /// previous grid point is at it.
+    /// Closes of 11, 12, 13 then 10. After the third bar the fast average, (12 + 13) / 2 = 12.5, is
+    /// above the slow, (11 + 12 + 13) / 3 = 12. The fourth brings the fast to (13 + 10) / 2 = 11.5
+    /// and the slow to (12 + 13 + 10) / 3 = 11.67: the fast is below, a cross at the fourth bar,
+    /// minute 4. It is an event for a decision whose previous grid point is before minute 4, and
+    /// none for one whose previous grid point is at it. Nor is it one for a decision before minute
+    /// 4, whose callback a live clock ran after the bar came: it is the next decision's.
     #[rstest]
-    #[case::between_the_grid_points(3 * MINUTE + 1, Ok(()))]
-    #[case::at_the_previous_grid_point(4 * MINUTE, Err(NoEvent::Unmarked))]
+    #[case::between_the_grid_points(3 * MINUTE + 1, 5 * MINUTE, Ok(()))]
+    #[case::at_the_decision(3 * MINUTE + 1, 4 * MINUTE, Ok(()))]
+    #[case::at_the_previous_grid_point(4 * MINUTE, 5 * MINUTE, Err(NoEvent::Unmarked))]
+    #[case::after_the_decision(3 * MINUTE + 1, 4 * MINUTE - 1, Err(NoEvent::Unmarked))]
     fn a_cross_is_an_event_for_the_decision_after_it(
         #[case] previous: u64,
+        #[case] now: u64,
         #[case] event: Result<(), NoEvent>,
     ) {
         let features = fed(&["11.00", "12.00", "13.00", "10.00"]);
 
         assert_eq!(
-            features.event(UnixNanos::from(previous), UnixNanos::from(5 * MINUTE)),
+            features.event(UnixNanos::from(previous), UnixNanos::from(now)),
             event
+        );
+    }
+
+    /// Closes of 13, 10, 11 then 12. After the third bar the fast average, (10 + 11) / 2 = 10.5,
+    /// is below the slow, (13 + 10 + 11) / 3 = 11.33. The fourth brings the fast to 11.5 and the
+    /// slow to 11, above: a cross at the fourth bar. The averages read those closes alone, so bars
+    /// before them, here three at 100, leave the cross as it is, whatever bar a replay starts at.
+    #[rstest]
+    #[case::from_the_first_of_the_closes(&[])]
+    #[case::after_earlier_bars(&["100.00", "100.00", "100.00"])]
+    fn a_cross_is_the_same_whatever_came_before_its_averages_bars(#[case] earlier: &[&str]) {
+        let closes: Vec<&str> = [earlier, &["13.00", "10.00", "11.00", "12.00"]].concat();
+        let fourth = closes.len() as u64;
+        let features = fed(&closes);
+
+        assert_eq!(
+            features.event(
+                UnixNanos::from((fourth - 1) * MINUTE),
+                UnixNanos::from((fourth + 1) * MINUTE)
+            ),
+            Ok(())
         );
     }
 

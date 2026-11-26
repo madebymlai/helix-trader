@@ -299,8 +299,9 @@ impl Feature for Rise {
 }
 
 impl EventFilter for Rise {
-    fn is_event(&self, previous: UnixNanos, _now: UnixNanos) -> bool {
-        self.risen_at.is_some_and(|risen_at| risen_at > previous)
+    fn is_event(&self, previous: UnixNanos, now: UnixNanos) -> bool {
+        self.risen_at
+            .is_some_and(|risen_at| previous < risen_at && risen_at <= now)
     }
 }
 

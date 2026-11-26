@@ -125,6 +125,7 @@ impl DataActor for FeatureProbe {
         if decide::is_decision(event) {
             decide::decide(
                 self,
+                event,
                 &self.features,
                 EVERY,
                 InstrumentId::from(INSTRUMENT_ID),
