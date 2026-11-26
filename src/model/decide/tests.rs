@@ -22,7 +22,10 @@ use nautilus_trading::{
 use rstest::rstest;
 
 use super::*;
-use crate::strategy::{Declared, EmaArgs, IndicatorsConfig, Series};
+use crate::{
+    model::features::testing::RISE,
+    strategy::{Declared, EmaArgs, IndicatorsConfig, Series},
+};
 
 const STRATEGY: &str = "PROBE-001";
 const AUD: &str = "AUD/USD.SIM";
@@ -87,6 +90,7 @@ fn tables() -> IndicatorsConfig {
         r#"
         mid = { period = 1, price_type = "MID" }
         mid_2 = { period = 2, price_type = "MID" }
+        rise = { step = 0.0 }
         "#,
     )
     .unwrap()
@@ -401,5 +405,124 @@ fn a_fingerprint_without_a_build_delay_keeps_the_rules_part_as_it_was() {
     assert_eq!(
         fingerprint(&features, every(15), SignedDuration::ZERO),
         features.fingerprint().with(b"every 900000000000 ns")
+    );
+}
+
+/// The grid point before the decision at `NOW` on `every(15)`.
+const PREVIOUS: u64 = NOW - 15 * 60 * SECOND;
+
+/// The features of `features`, warm and fresh at `NOW`, decided only at a rise of GBP's mid.
+fn filtered() -> Rc<FeatureSet> {
+    let features = FeatureSet::builder()
+        .feature(&[Series::quotes(aud())], MID_2, &tables())
+        .event_filter(&[Series::quotes(InstrumentId::from(GBP))], RISE, &tables())
+        .build()
+        .unwrap();
+    features
+        .handle_quote(&quote_of(AUD, 0.7, NOW - 2 * SECOND))
+        .unwrap();
+    features.handle_quote(&quote(0.8)).unwrap();
+    features
+}
+
+/// Hands `features` GBP's mids, each at its time.
+fn gbp(features: &FeatureSet, mids: &[(f64, u64)]) {
+    for &(mid, ns) in mids {
+        features.handle_quote(&quote_of(GBP, mid, ns)).unwrap();
+    }
+}
+
+#[rstest]
+fn a_cold_event_filter_gives_no_decision_and_publishes_nothing() {
+    let (probe, _clock) = registered(NOW);
+    let rows = published();
+
+    assert_eq!(decide(&probe, &filtered(), every(15), aud()), None);
+    assert!(rows.borrow().is_empty());
+}
+
+/// GBP's mid rose before the previous grid point and fell since.
+#[rstest]
+fn a_decision_whose_filter_marks_no_event_since_the_previous_grid_point_publishes_nothing() {
+    let (probe, _clock) = registered(NOW);
+    let rows = published();
+    let features = filtered();
+    gbp(
+        &features,
+        &[
+            (1.3, PREVIOUS - 2 * SECOND),
+            (1.4, PREVIOUS - SECOND),
+            (1.2, PREVIOUS + 60 * SECOND),
+        ],
+    );
+
+    assert_eq!(decide(&probe, &features, every(15), aud()), None);
+    assert!(rows.borrow().is_empty());
+}
+
+/// GBP's mid rose 2 minutes after the previous grid point, 13 minutes before the decision.
+#[rstest]
+fn an_event_between_grid_points_makes_the_next_decision() {
+    let (probe, _clock) = registered(NOW);
+    let rows = published();
+    let features = filtered();
+    gbp(
+        &features,
+        &[
+            (1.3, PREVIOUS + 60 * SECOND),
+            (1.4, PREVIOUS + 120 * SECOND),
+        ],
+    );
+
+    let row = decide(&probe, &features, every(15), aud()).unwrap();
+
+    assert_eq!(row.ts_init, UnixNanos::from(NOW));
+    assert!((row.features[0] - 0.75).abs() < 1e-9, "{row:?}");
+    assert_eq!(*rows.borrow(), [row]);
+}
+
+/// An event at the previous grid point is the previous decision's, as data at it is.
+#[rstest]
+#[case::on_the_previous_grid_point(PREVIOUS, false)]
+#[case::just_after_it(PREVIOUS + 1, true)]
+fn an_event_is_a_decisions_from_just_after_the_previous_grid_point(
+    #[case] risen_at: u64,
+    #[case] decided: bool,
+) {
+    let (probe, _clock) = registered(NOW);
+    let features = filtered();
+    gbp(&features, &[(1.3, PREVIOUS - SECOND), (1.4, risen_at)]);
+
+    assert_eq!(
+        decide(&probe, &features, every(15), aud()).is_some(),
+        decided
+    );
+}
+
+/// AUD, the traded instrument, had no data over the interval to the previous grid point, so the
+/// decision there was stale. An event in that interval is no event of the next decision, which
+/// judges it from the previous grid point, not from the last decision made.
+#[rstest]
+#[case::in_the_stale_interval(PREVIOUS - 5 * 60 * SECOND, false)]
+#[case::after_it(PREVIOUS + 5 * 60 * SECOND, true)]
+fn an_event_after_a_stale_interval_makes_a_decision_and_one_in_it_does_not(
+    #[case] risen_at: u64,
+    #[case] decided: bool,
+) {
+    let (probe, _clock) = registered(NOW);
+    let features = FeatureSet::builder()
+        .feature(&[Series::quotes(aud())], MID_2, &tables())
+        .event_filter(&[Series::quotes(InstrumentId::from(GBP))], RISE, &tables())
+        .build()
+        .unwrap();
+    features
+        .handle_quote(&quote_of(AUD, 0.7, PREVIOUS - 20 * 60 * SECOND))
+        .unwrap();
+    features.handle_quote(&quote(0.8)).unwrap();
+    gbp(&features, &[(1.3, risen_at - SECOND), (1.4, risen_at)]);
+
+    assert_eq!(
+        decide(&probe, &features, every(15), aud()).is_some(),
+        decided
     );
 }

@@ -32,8 +32,9 @@
 //! - A tie counts none.
 //!
 //! A meta takes the trades of the side picked that its margin accepts (`earnings::MetaMargin`).
-//! This judges the decision the handle returns, on the target's trade, not what the strategy
-//! actually traded, which can differ when it filters its decisions.
+//! This judges the decision the handle returns, on the target's trade, at the events the strategy's
+//! event filter marks. What the strategy actually traded differs from it only where it filters the
+//! model's answer on account or execution state, such as an open position or a loss limit.
 
 use std::{collections::BTreeSet, fmt::Display};
 

@@ -48,15 +48,22 @@
 //! two contracts, and decisions wait until the windows refill. A raw feature reads the post
 //! contract's latest cached point.
 //!
-//! `ticks`, `bar_types` and `custom` gather the series of all features, each once, in the order
-//! declared. Three things use them:
+//! A set may declare one event filter (`FeatureSetBuilder::event_filter`, an `EventFilter`), on a
+//! list of series and from its table, as a feature is declared. It says whether a decision is an
+//! event, the only decisions the strategy makes (`event`, read by `decide`). A filter of time alone
+//! reads no series. The filter reads its series, warms, rolls and is fingerprinted as a feature
+//! does. It is no feature: its name and value are in neither `names` nor `values`. The same
+//! indicator can be declared as a feature too, which the model then reads.
+//!
+//! `ticks`, `bar_types` and `custom` gather the series of all features and the event filter, each
+//! once, in the order declared. Three things use them:
 //! - The model handle subscribes to them (`strategy::subscriptions`).
 //! - A live warmup requests them.
 //! - `[data] series` is checked against them (`model::reads`).
 //!
-//! An update reaches only the features declared on a series of its kind and source. It reaches each
-//! such feature once, however many of the feature's series it matches. An update no feature reads
-//! is a no-op, so the panicking defaults of Nautilus' `Indicator` are never called.
+//! An update reaches only the features, and the event filter, declared on a series of its kind and
+//! source. It reaches each once, however many of its series it matches. An update none reads is a
+//! no-op, so the panicking defaults of Nautilus' `Indicator` are never called.
 //!
 //! The set never returns an error. Nautilus stops handling a bar at an indicator's error, before
 //! the strategy's handler, and the warmup stops its hand-over of ticks. So the set logs one
@@ -68,19 +75,20 @@
 //! - A meta model reads them, then the side picked and the decision's level and side call
 //!   (`meta_names`, `meta_row`).
 //!
-//! The set records the `ts_init` of the latest update a feature read, for each instrument
-//! (`last_update`). A root's is recorded under the root. A decision is fresh only if data of the
-//! traded instrument came since the previous decision (`decide`). Custom data is no update of any
-//! instrument.
+//! The set records the `ts_init` of the latest update a feature or the event filter read, for each
+//! instrument (`last_update`). A root's is recorded under the root. A decision is fresh only if
+//! data of the traded instrument came since the previous decision (`decide`). Custom data is no
+//! update of any instrument.
 //!
 //! The warmup (`FeatureSetBuilder::warmup`) is how much data the features read before a decision.
 //! A dataset build replays it before its first day (`dataset`).
 //!
 //! A feature over the target's bracket (`Feature::over_bracket`, an `OverBracket`) is declared
 //! like any other. It is handed the width (`targets::BracketWidth`) that the builder takes once
-//! (`FeatureSetBuilder::bracket`). The set refuses:
-//! - Such a feature with no width given.
-//! - A width that no feature reads.
+//! (`FeatureSetBuilder::bracket`). The event filter may be formed over it too
+//! (`EventFilter::over_bracket`). The set refuses:
+//! - Such a feature or filter with no width given.
+//! - A width that no feature or filter reads.
 //! - A second width.
 //!
 //! A feature that reads a width it was never handed panics, and never reads NaN. The model handle
@@ -95,6 +103,7 @@
 //! - The whole data type of each custom series.
 //! - The arguments of each table by value (`IndicatorsConfig::canonical_args`), however the TOML
 //!   spells them.
+//! - The event filter's table and series, if any.
 //! - The warmup.
 //! - The version of the strategy's feature code (`FeatureSetBuilder::version`), which is bumped by
 //!   hand when what the code computes changes.
@@ -199,7 +208,51 @@ pub trait Feature: Indicator {
     }
 }
 
-/// How a feature reads custom data (`Feature::custom_handler`).
+/// A Nautilus indicator that says whether a decision is an event, the only decisions the strategy
+/// makes (`FeatureSetBuilder::event_filter`).
+///
+/// Its answer is a function of the data it read and the grid alone:
+/// - An edge event (a cross, a sweep) keeps the `ts_init` of its last event and answers whether it
+///   lies after `previous`.
+/// - A session answers from `now`.
+/// - A regime answers from its own state.
+pub trait EventFilter: Indicator {
+    /// Returns whether the decision at `now` is an event, `previous` being the grid point before
+    /// it. It is asked once initialized.
+    fn is_event(&self, previous: UnixNanos, now: UnixNanos) -> bool;
+
+    /// Returns the handler for custom data, or `None` if the filter has none. A filter on a custom
+    /// series with no handler is refused at build.
+    fn custom_handler(&mut self) -> Option<&mut dyn CustomHandler> {
+        None
+    }
+
+    /// Returns how it reads the target's bracket, or `None` unless it is formed over it.
+    fn over_bracket(&mut self) -> Option<&mut dyn OverBracket> {
+        None
+    }
+}
+
+/// Why a decision is no event (`FeatureSet::event`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoEvent {
+    /// The event filter is not initialized.
+    Cold,
+    /// The event filter marks no event.
+    Unmarked,
+}
+
+impl Display for NoEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cold => write!(f, "the event filter is not initialized"),
+            Self::Unmarked => write!(f, "the event filter marks no event"),
+        }
+    }
+}
+
+/// How a feature or an event filter reads custom data (`Feature::custom_handler`,
+/// `EventFilter::custom_handler`).
 pub trait CustomHandler {
     /// Reads `data`, a point of one of the feature's custom series, in the order it comes.
     ///
@@ -228,9 +281,10 @@ pub trait OverBracket {
 type Read = Box<dyn Fn(&CustomData) -> f64>;
 
 enum Slot {
-    Indicator(Vec<Source>, Box<dyn Feature>),
+    Feature(Vec<Source>, Box<dyn Feature>),
     /// A raw feature: a custom series read from the cache by its data type.
     Custom(CustomSeries, Option<Reading>, Read),
+    EventFilter(Vec<Source>, Box<dyn EventFilter>),
 }
 
 /// How an update matches a source.
@@ -255,6 +309,8 @@ struct Reading {
 pub struct FeatureSet {
     names: Vec<String>,
     slots: RefCell<Vec<Slot>>,
+    /// What each slot is in a log: `feature <name>`, or the event filter and its table.
+    labels: Vec<String>,
     width: Option<Rc<BracketWidth>>,
     updates: RefCell<BTreeMap<InstrumentId, UnixNanos>>,
     /// Set by `register`.
@@ -307,6 +363,8 @@ pub struct FeatureSetBuilder {
 enum Name {
     Table(&'static str),
     Given(String),
+    /// The event filter, by its table. It names no feature.
+    EventFilter(&'static str),
 }
 
 /// A SHA-256 hash of what makes rows, models and decisions comparable.
@@ -342,8 +400,36 @@ impl FeatureSet {
         self.slots
             .borrow()
             .iter()
+            .filter(|slot| !matches!(slot, Slot::EventFilter(..)))
             .map(|slot| slot.value(cache.as_deref()))
             .collect()
+    }
+
+    /// Returns whether the decision at `now` is an event, `previous` being the grid point before
+    /// it.
+    ///
+    /// Without an event filter every decision is one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the decision is no event, saying why: the event filter is cold, or marks
+    /// no event.
+    pub fn event(&self, previous: UnixNanos, now: UnixNanos) -> Result<(), NoEvent> {
+        let slots = self.slots.borrow();
+        let Some(filter) = slots.iter().find_map(|slot| match slot {
+            Slot::EventFilter(_, filter) => Some(filter),
+            Slot::Feature(..) | Slot::Custom(..) => None,
+        }) else {
+            return Ok(());
+        };
+
+        if !filter.initialized() {
+            Err(NoEvent::Cold)
+        } else if filter.is_event(previous, now) {
+            Ok(())
+        } else {
+            Err(NoEvent::Unmarked)
+        }
     }
 
     #[must_use]
@@ -363,8 +449,8 @@ impl FeatureSet {
         self.warmup
     }
 
-    /// The tick series the features read, each once, in the order declared. Bars and custom series
-    /// are not among them.
+    /// The tick series the features and the event filter read, each once, in the order declared.
+    /// Bars and custom series are not among them.
     #[must_use]
     pub fn ticks(&self) -> Vec<TickSeries> {
         let mut ticks: Vec<TickSeries> = Vec::new();
@@ -379,7 +465,7 @@ impl FeatureSet {
         ticks
     }
 
-    /// The bar types the features read, each once, in the order declared.
+    /// The bar types the features and the event filter read, each once, in the order declared.
     #[must_use]
     pub fn bar_types(&self) -> Vec<BarType> {
         let mut bar_types: Vec<BarType> = Vec::new();
@@ -396,8 +482,9 @@ impl FeatureSet {
         bar_types
     }
 
-    /// The custom series the features read, each once, in the order declared. It covers the series
-    /// of raw features and the custom series among a feature's series.
+    /// The custom series the features and the event filter read, each once, in the order declared.
+    /// It covers the series of raw features and the custom series among a feature's or the event
+    /// filter's series.
     #[must_use]
     pub fn custom(&self) -> Vec<CustomSeries> {
         let mut custom: Vec<CustomSeries> = Vec::new();
@@ -405,7 +492,7 @@ impl FeatureSet {
         for slot in self.slots.borrow().iter() {
             let read = match slot {
                 Slot::Custom(series, ..) => vec![series],
-                Slot::Indicator(sources, _) => sources
+                Slot::Feature(sources, _) | Slot::EventFilter(sources, _) => sources
                     .iter()
                     .filter_map(|source| match source {
                         Source::Custom(series, _) => Some(series),
@@ -423,8 +510,8 @@ impl FeatureSet {
         custom
     }
 
-    /// The custom series among the features' series, which the set hands to their custom handlers.
-    /// The series of raw features are not among them.
+    /// The custom series among the series of the features and the event filter, which the set hands
+    /// to their custom handlers. The series of raw features are not among them.
     #[must_use]
     pub fn handled_custom(&self) -> Vec<CustomSeries> {
         let mut custom: Vec<CustomSeries> = Vec::new();
@@ -537,7 +624,7 @@ impl FeatureSet {
 impl BookIndicator for FeatureSet {
     fn handle_depth(&self, depth: &OrderBookDepth) {
         for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Indicator(sources, feature) = slot
+            if let Some((sources, indicator)) = slot.indicator_mut()
                 && self.reads_ticks(
                     sources,
                     &NautilusDataType::OrderBookDepth,
@@ -545,14 +632,14 @@ impl BookIndicator for FeatureSet {
                     depth.ts_init,
                 )
             {
-                feature.handle_depth(depth);
+                indicator.handle_depth(depth);
             }
         }
     }
 
     fn handle_deltas(&self, deltas: &OrderBookDeltas) {
         for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Indicator(sources, feature) = slot
+            if let Some((sources, indicator)) = slot.indicator_mut()
                 && self.reads_ticks(
                     sources,
                     &NautilusDataType::OrderBookDelta,
@@ -560,7 +647,7 @@ impl BookIndicator for FeatureSet {
                     deltas.ts_init,
                 )
             {
-                feature.handle_deltas(deltas);
+                indicator.handle_deltas(deltas);
             }
         }
     }
@@ -570,40 +657,71 @@ impl BookIndicator for FeatureSet {
 impl CustomIndicator for FeatureSet {
     fn handle_custom(&self, data: &CustomData) {
         let mut slots = self.slots.borrow_mut();
-        for (slot, name) in slots.iter_mut().zip(&self.names) {
-            if let Slot::Indicator(sources, feature) = slot
-                && sources.iter().any(|source| source.reads_custom(data))
-                && let Err(e) = feature
+        for (slot, label) in slots.iter_mut().zip(&self.labels) {
+            if slot
+                .sources()
+                .iter()
+                .any(|source| source.reads_custom(data))
+                && let Err(e) = slot
                     .custom_handler()
-                    .expect("a feature on a custom series has a custom handler, checked at build")
+                    .expect("a reader of a custom series has a custom handler, checked at build")
                     .handle_custom(data)
             {
-                log::error!("feature {name} on the custom data {}: {e}", data.data_type);
+                log::error!("{label} on the custom data {}: {e}", data.data_type);
             }
         }
     }
 }
 
 impl Slot {
+    /// # Panics
+    ///
+    /// Panics if the slot is the event filter, which has no value.
     fn value(&self, cache: Option<&Cache>) -> Option<f64> {
         match self {
-            Self::Indicator(_, feature) => feature.initialized().then(|| feature.value()),
+            Self::Feature(_, feature) => feature.initialized().then(|| feature.value()),
             Self::Custom(series, reading, read) => cache?
                 .custom_data(&read_type(series, reading.as_ref()))
                 .map(&**read),
+            Self::EventFilter(..) => unreachable!("the event filter has no value"),
         }
     }
 
     fn sources(&self) -> &[Source] {
         match self {
-            Self::Indicator(sources, _) => sources,
+            Self::Feature(sources, _) | Self::EventFilter(sources, _) => sources,
             Self::Custom(..) => &[],
+        }
+    }
+
+    /// The series and indicator of a feature or the event filter. A raw feature has none.
+    fn indicator_mut(&mut self) -> Option<(&[Source], &mut dyn Indicator)> {
+        match self {
+            Self::Feature(sources, feature) => Some((sources, feature.as_mut())),
+            Self::EventFilter(sources, filter) => Some((sources, filter.as_mut())),
+            Self::Custom(..) => None,
+        }
+    }
+
+    fn custom_handler(&mut self) -> Option<&mut dyn CustomHandler> {
+        match self {
+            Self::Feature(_, feature) => feature.custom_handler(),
+            Self::EventFilter(_, filter) => filter.custom_handler(),
+            Self::Custom(..) => None,
+        }
+    }
+
+    fn over_bracket(&mut self) -> Option<&mut dyn OverBracket> {
+        match self {
+            Self::Feature(_, feature) => feature.over_bracket(),
+            Self::EventFilter(_, filter) => filter.over_bracket(),
+            Self::Custom(..) => None,
         }
     }
 
     fn readings_mut(&mut self) -> Vec<&mut Reading> {
         match self {
-            Self::Indicator(sources, _) => sources
+            Self::Feature(sources, _) | Self::EventFilter(sources, _) => sources
                 .iter_mut()
                 .filter_map(|source| match source {
                     Source::Ticks(_, reading) => Some(reading),
@@ -631,16 +749,15 @@ impl Slot {
     }
 
     fn reset(&mut self) {
-        match self {
-            Self::Indicator(_, feature) => feature.reset(),
-            Self::Custom(..) => {}
+        if let Some((_, indicator)) = self.indicator_mut() {
+            indicator.reset();
         }
     }
 
     /// The series as they appear in a feature's name and the fingerprint.
     fn series(&self) -> String {
         match self {
-            Self::Indicator(sources, _) => sources
+            Self::Feature(sources, _) | Self::EventFilter(sources, _) => sources
                 .iter()
                 .map(Source::series)
                 .collect::<Vec<_>>()
@@ -732,17 +849,17 @@ impl ActorIndicator for FeatureSet {
 
     fn handle_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
         let mut slots = self.slots.borrow_mut();
-        for (slot, name) in slots.iter_mut().zip(&self.names) {
-            if let Slot::Indicator(sources, feature) = slot
+        for (slot, label) in slots.iter_mut().zip(&self.labels) {
+            if let Some((sources, indicator)) = slot.indicator_mut()
                 && self.reads_ticks(
                     sources,
                     &NautilusDataType::QuoteTick,
                     quote.instrument_id,
                     quote.ts_init,
                 )
-                && let Err(e) = feature.handle_quote(quote)
+                && let Err(e) = indicator.handle_quote(quote)
             {
-                log::error!("feature {name} on the quote {quote}: {e}");
+                log::error!("{label} on the quote {quote}: {e}");
             }
         }
         Ok(())
@@ -750,7 +867,7 @@ impl ActorIndicator for FeatureSet {
 
     fn handle_trade(&self, trade: &TradeTick) -> anyhow::Result<()> {
         for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Indicator(sources, feature) = slot
+            if let Some((sources, indicator)) = slot.indicator_mut()
                 && self.reads_ticks(
                     sources,
                     &NautilusDataType::TradeTick,
@@ -758,7 +875,7 @@ impl ActorIndicator for FeatureSet {
                     trade.ts_init,
                 )
             {
-                feature.handle_trade(trade);
+                indicator.handle_trade(trade);
             }
         }
         Ok(())
@@ -766,10 +883,10 @@ impl ActorIndicator for FeatureSet {
 
     fn handle_bar(&self, bar: &Bar) -> anyhow::Result<()> {
         for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Indicator(sources, feature) = slot
+            if let Some((sources, indicator)) = slot.indicator_mut()
                 && self.reads_bar(sources, bar)
             {
-                feature.handle_bar(bar);
+                indicator.handle_bar(bar);
             }
         }
         Ok(())
@@ -801,6 +918,52 @@ impl FeatureSetBuilder {
     {
         let feature = Box::new(self.built(declared, indicators));
         self.indicator(declared.name(), series, feature)
+    }
+
+    /// Declares the event filter of `declared`, built from its table in `indicators`, on `series`.
+    ///
+    /// A filter of time alone reads no series. `build` refuses a second event filter, and a custom
+    /// series if the filter has no custom handler. The load refuses its table as a feature's
+    /// (`feature`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - Its table is missing.
+    /// - Its table does not parse or is refused.
+    #[must_use]
+    pub fn event_filter<A>(
+        mut self,
+        series: &[Series],
+        declared: Declared<A>,
+        indicators: &IndicatorsConfig,
+    ) -> Self
+    where
+        A: IndicatorArgs,
+        A::Indicator: EventFilter + 'static,
+    {
+        let table = declared.name();
+        let declared_first = self.names.iter().find_map(|name| match name {
+            Name::EventFilter(first) => Some(*first),
+            Name::Table(_) | Name::Given(_) => None,
+        });
+
+        if let Some(first) = declared_first {
+            self.refused.push(format!(
+                "the set declares the event filter of [indicators.{table}] beside that of \
+                 [indicators.{first}]: a strategy decides on one event filter"
+            ));
+        }
+        let mut filter: Box<dyn EventFilter> = Box::new(self.built(declared, indicators));
+        if filter.custom_handler().is_none() {
+            self.refuse_unread_custom(
+                &format!("the event filter of [indicators.{table}]"),
+                series,
+                "EventFilter::custom_handler",
+            );
+        }
+        let sources = series.iter().map(Source::of).collect();
+        self.declare(Name::EventFilter(table), Slot::EventFilter(sources, filter))
     }
 
     /// Takes the bracket `width` (`FeatureSet::bracket_width`).
@@ -868,8 +1031,9 @@ impl FeatureSetBuilder {
     /// (`Fingerprint::with`):
     /// - The names in order.
     /// - `series <series>` of each feature.
+    /// - `event filter indicators.<table> series <series>`, with an event filter.
     /// - `indicators.<table> <arguments>` of each table by name
-    ///   (`IndicatorsConfig::canonical_args`).
+    ///   (`IndicatorsConfig::canonical_args`), the event filter's among them.
     /// - `version <n>`.
     /// - `warmup <ns> ns`.
     ///
@@ -879,27 +1043,43 @@ impl FeatureSetBuilder {
     /// - No feature is declared.
     /// - A feature is declared on no series, or on a custom series it has no custom handler for
     ///   (see `feature`).
+    /// - A second event filter is declared, or one on a custom series it has no custom handler for
+    ///   (see `event_filter`).
     /// - Two features share a name.
-    /// - A feature over the target's bracket is given no width.
-    /// - A width is given twice or read by no feature (see `bracket`).
+    /// - A feature or the event filter over the target's bracket is given no width.
+    /// - A width is given twice or read by no feature or event filter (see `bracket`).
     /// - The warmup is negative.
     pub fn build(self) -> anyhow::Result<Rc<FeatureSet>> {
-        anyhow::ensure!(!self.names.is_empty(), "a feature set needs a feature");
+        anyhow::ensure!(
+            self.names
+                .iter()
+                .any(|name| !matches!(name, Name::EventFilter(_))),
+            "a feature set needs a feature"
+        );
+
         if let Some(refused) = self.refused.first() {
             anyhow::bail!("{refused}");
         }
-        let names: Vec<String> = self
-            .names
-            .iter()
-            .zip(&self.slots)
-            .map(|(name, slot)| match name {
+        let (mut names, mut labels, mut filtering) = (vec![], vec![], None);
+        for (name, slot) in self.names.iter().zip(&self.slots) {
+            let feature = match name {
                 Name::Table(table) if self.feeds_several(table) => {
                     format!("{}:{table}", slot.series())
                 }
                 Name::Table(table) => (*table).to_string(),
                 Name::Given(name) => name.clone(),
-            })
-            .collect();
+                Name::EventFilter(table) => {
+                    labels.push(format!("event filter of [indicators.{table}]"));
+                    filtering = Some(format!(
+                        "event filter indicators.{table} series {}",
+                        slot.series()
+                    ));
+                    continue;
+                }
+            };
+            labels.push(format!("feature {feature}"));
+            names.push(feature);
+        }
         let mut seen = BTreeSet::new();
         if let Some(name) = names.iter().find(|name| !seen.insert(*name)) {
             anyhow::bail!("two features are named {name}");
@@ -907,30 +1087,28 @@ impl FeatureSetBuilder {
         let mut slots = self.slots;
         let mut over = slots
             .iter_mut()
-            .zip(&names)
-            .filter_map(|(slot, name)| match slot {
-                Slot::Indicator(_, feature) => feature.over_bracket().map(|over| (over, name)),
-                Slot::Custom(..) => None,
-            })
+            .zip(&labels)
+            .filter_map(|(slot, label)| slot.over_bracket().map(|over| (over, label)))
             .peekable();
 
         match &self.width {
             Some(width) => {
                 anyhow::ensure!(
                     over.peek().is_some(),
-                    "the set is given a width of the target's bracket, and no feature is formed \
-                     over the bracket (`Feature::over_bracket`)"
+                    "the set is given a width of the target's bracket, and no feature or event \
+                     filter is formed over the bracket (`Feature::over_bracket`, \
+                     `EventFilter::over_bracket`)"
                 );
 
-                for (feature, _) in over {
-                    feature.over(Rc::clone(width));
+                for (reader, _) in over {
+                    reader.over(Rc::clone(width));
                 }
             }
             None => {
-                if let Some((_, name)) = over.next() {
+                if let Some((_, label)) = over.next() {
                     anyhow::bail!(
-                        "the feature {name} is formed over the target's bracket, and the set is \
-                         given no width of it (`FeatureSetBuilder::bracket`)"
+                        "the {label} is formed over the target's bracket, and the set is given no \
+                         width of it (`FeatureSetBuilder::bracket`)"
                     );
                 }
             }
@@ -940,7 +1118,10 @@ impl FeatureSetBuilder {
             "the features' warmup {:#} is negative",
             self.warmup
         );
-        let series = slots.iter().map(|slot| format!("series {}", slot.series()));
+        let series = slots
+            .iter()
+            .filter(|slot| !matches!(slot, Slot::EventFilter(..)))
+            .map(|slot| format!("series {}", slot.series()));
         let arguments = self
             .arguments
             .iter()
@@ -951,6 +1132,7 @@ impl FeatureSetBuilder {
             .iter()
             .cloned()
             .chain(series)
+            .chain(filtering)
             .chain(arguments)
             .chain([version, warmup])
             .fold(Fingerprint::default(), |hash, part| {
@@ -959,6 +1141,7 @@ impl FeatureSetBuilder {
         Ok(Rc::new(FeatureSet {
             names,
             slots: RefCell::new(slots),
+            labels,
             width: self.width,
             updates: RefCell::default(),
             cache: RefCell::default(),
@@ -991,18 +1174,26 @@ impl FeatureSetBuilder {
         }
 
         if feature.custom_handler().is_none() {
-            for series in series {
-                if let Series::Custom(custom) = series {
-                    self.refused.push(format!(
-                        "the feature of [indicators.{table}] is declared on the custom series \
-                         {custom}, which it does not read: it has no custom handler \
-                         (`Feature::custom_handler`)"
-                    ));
-                }
-            }
+            self.refuse_unread_custom(
+                &format!("the feature of [indicators.{table}]"),
+                series,
+                "Feature::custom_handler",
+            );
         }
         let sources = series.iter().map(Source::of).collect();
-        self.declare(Name::Table(table), Slot::Indicator(sources, feature))
+        self.declare(Name::Table(table), Slot::Feature(sources, feature))
+    }
+
+    /// Refuses each custom series among `series` of `reader`, which has no custom `handler`.
+    fn refuse_unread_custom(&mut self, reader: &str, series: &[Series], handler: &str) {
+        for series in series {
+            if let Series::Custom(custom) = series {
+                self.refused.push(format!(
+                    "{reader} is declared on the custom series {custom}, which it does not read: \
+                     it has no custom handler (`{handler}`)"
+                ));
+            }
+        }
     }
 
     fn feeds_several(&self, table: &str) -> bool {

@@ -1441,7 +1441,7 @@ mod tests {
             models(Path::new("models"), &config).directory(),
             Path::new(
                 "models/STORE-001/\
-                 0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9"
+                 caaea0d5e3455014f85a52e3efb40d9276913c537309e341bc9c8639190b11f2"
             )
             .join(key)
         );
