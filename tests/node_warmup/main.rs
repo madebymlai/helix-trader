@@ -2133,6 +2133,7 @@ mod model_handle {
         model::{
             blueprint::ModelBlueprint,
             config::{Margins, ModelConfig},
+            decide,
             features::{FeatureSet, side_names},
             handle::{Decision, Mode, ModelHandle},
             learner::{LearnerConfig, TrainingSet},
@@ -2140,7 +2141,7 @@ mod model_handle {
         },
         strategy::{Declared, EmaArgs, IndicatorsConfig, Series, risk::R},
     };
-    use nautilus_common::messages::data::DataResponseEnvelope;
+    use nautilus_common::{messages::data::DataResponseEnvelope, timer::TimeEvent};
     use nautilus_model::identifiers::StrategyId;
     use nautilus_trading::{
         nautilus_strategy,
@@ -2187,7 +2188,10 @@ mod model_handle {
             }
 
             if !warmup.is_warming() {
-                match Rc::clone(&self.model).decide(self) {
+                // The decision timer as if it fired now, the warmup having answered.
+                let now = self.clock().timestamp_ns();
+                let event = TimeEvent::new(decide::DECISION_TIMER.into(), UUID4::new(), now, now);
+                match Rc::clone(&self.model).decide(self, &event) {
                     Ok(decision) => self.decisions.borrow_mut().push(decision),
                     Err(e) => *self.failure.borrow_mut() = Some(format!("{e:#}")),
                 }

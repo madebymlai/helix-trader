@@ -179,7 +179,7 @@ impl DataActor for ModelEma {
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
-            return match Rc::clone(&self.model).decide(self)? {
+            return match Rc::clone(&self.model).decide(self, event)? {
                 Some(decision) => decision.trade().send(self, self.stake, self.rates),
                 None => Ok(()),
             };

@@ -5,16 +5,15 @@
 //!
 //! The fixture catalog is IC's gold at two levels (`ic::level_quotes`): its hours 0 and 1 of the
 //! day close at the low level, 2 and 3 ten dollars higher, and so on, so the level changes with
-//! the bar closing at each odd hour. The averages are of 2 and 3 hourly closes, as the cross's.
-//! The fast one moves two thirds of the way to each close and the slow one half, so a changed
-//! level takes the fast past the slow, onto the new level's side, where the next bar at the level
-//! keeps it. In dollars over the low level: a day's replay starts 3 hours before it, at 21:00,
-//! low; its bars of 22:00, 23:00 and 00:00 close at 0, 10 and 10. At 00:00 the slow, warm, is
-//! their mean 6.67, and the fast 5 + 2/3 of 5 = 8.33, above it. At 01:00, low, the fast is 2.78
-//! and the slow 3.33, below; at 02:00 0.93 and 1.67; at 03:00, high, 6.98 and 5.83, above; and so
-//! on: a cross at every odd hour's bar and none at the even hours'. A decision on the hourly grid
-//! is made 10 ms past its hour (`decide::DECISION_MARGIN`), so the decisions at odd hours are
-//! events and those at even hours none.
+//! the bar closing at each odd hour. The cross's averages are simple ones of the last 2 and 3
+//! hourly closes, so a changed level takes the fast past the slow, onto the new level's side,
+//! where the next bar at the level keeps it. In dollars over the low level: a day's replay starts
+//! 3 hours before it, at 21:00, low; its bars of 22:00, 23:00 and 00:00 close at 0, 10 and 10. At
+//! 00:00 the slow, warm, is their mean 6.67, and the fast the mean of the last two, 10, above it.
+//! At 01:00, low, the fast is 5 and the slow 6.67, below; at 02:00 0 and 3.33; at 03:00, high, 5
+//! and 3.33, above; and so on: a cross at every odd hour's bar and none at the even hours'. A
+//! decision on the hourly grid is made 10 ms past its hour (`decide::DECISION_MARGIN`), so the
+//! decisions at odd hours are events and those at even hours none.
 //!
 //! The models are trained at midnight of the 22nd and the 23rd, each on a window of 46 hours. The
 //! catalog runs from 21:00 of the 19th, the 3 hours of warmup before the first day of the first

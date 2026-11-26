@@ -133,7 +133,7 @@ impl DataActor for ModelProbe {
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
-            if let Some(decision) = Rc::clone(&self.model).decide(self)? {
+            if let Some(decision) = Rc::clone(&self.model).decide(self, event)? {
                 let now = self.clock().timestamp_ns();
                 self.record.borrow_mut().trades.push((now, decision));
                 let unconverted = Conversions::default().rates();

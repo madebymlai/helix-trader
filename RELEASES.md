@@ -6,11 +6,13 @@ Released on TBD (UTC).
 
 - Added `backtest --trades <path>`, writing each position to Parquet with the R its trade was sent at, a model decision's expected R and the entry's bid and ask
 - Added `FeatureSetBuilder::event_filter`: a model strategy's indicator that limits its decisions, dataset rows and trades to the grid ticks it marks as events
-- Added the example strategy `model_cross`: `model_ema` deciding only after a cross of its averages, its event filter (`config/model_cross.toml`)
+- Added the example strategy `model_cross`: `model_ema` deciding only after a cross of two simple averages, its event filter (`config/model_cross.toml`)
+- Added `SmaArgs`, declaring Nautilus' `SimpleMovingAverage` from an `[indicators.<name>]` table
 
 ### Breaking Changes
 
 - Changed the dataset version to 11, so every dataset and model store is keyed anew; build the datasets and train again
+- Changed `ModelHandle::decide` to take the decision timer's `TimeEvent` and decide at its scheduled time; pass it the event `on_time_event` gets
 
 ### Fixes
 

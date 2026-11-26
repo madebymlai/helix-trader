@@ -284,7 +284,7 @@ impl DataActor for TargetProbe {
         if decide::is_decision(event) {
             let instrument_id = self.source.instrument_id();
             let rule = DecisionRule::Every(self.every);
-            if let Some(row) = decide::decide(self, &self.features, rule, instrument_id) {
+            if let Some(row) = decide::decide(self, event, &self.features, rule, instrument_id) {
                 self.record.borrow_mut().decisions += 1;
                 Rc::clone(&self.targets).open(self, row)?;
             }

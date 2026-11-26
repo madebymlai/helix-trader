@@ -34,12 +34,14 @@ period = 10
 period = 30
 
 # The event filter, never a model input: a cross either way of a fast over
-# a slow ExponentialMovingAverage of the traded instrument's closes, each
-# by its constructor's arguments as above, the fast's period below the
-# slow's. A decision is made only when such a cross came after the previous
-# grid point, at most an hour after it. Here they are the features'
-# averages; declared by its own table, the cross may differ from them.
-# Its arguments key the dataset and the models by value, as a feature's.
+# a slow SimpleMovingAverage of the traded instrument's closes, each by
+# its constructor's arguments, period and price_type, the fast's period
+# below the slow's. A decision is made only when such a cross came after
+# the previous grid point, at most an hour after it. Simple averages read
+# their last closes alone, so a cross does not depend on where a replay
+# starts, as an exponential average's would. Here they have the features'
+# periods; declared by its own table, the cross may differ from them. Its
+# arguments key the dataset and the models by value, as a feature's.
 [indicators.cross]
 fast = { period = 10 }
 slow = { period = 30 }

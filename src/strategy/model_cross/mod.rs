@@ -67,7 +67,7 @@ pub type ModelCrossConfig = StandardConfig<ModelCrossParams>;
 ///
 /// It trades the one instrument of `[trade]` on a model. Its features are a fast and a slow
 /// `ExponentialMovingAverage` of every bars series of `[data]`, and its event filter a cross of the
-/// averages of `[indicators.cross]` on the one bars series of the traded instrument.
+/// `SimpleMovingAverage`s of `[indicators.cross]` on the one bars series of the traded instrument.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCrossParams {}
@@ -185,7 +185,7 @@ impl DataActor for ModelCross {
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
-            return match Rc::clone(&self.model).decide(self)? {
+            return match Rc::clone(&self.model).decide(self, event)? {
                 Some(decision) => decision.trade().send(self, self.stake, self.rates),
                 None => Ok(()),
             };

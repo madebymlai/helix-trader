@@ -213,7 +213,8 @@ pub trait Feature: Indicator {
 ///
 /// Its answer is a function of the data it read and the grid alone:
 /// - An edge event (a cross, a sweep) keeps the `ts_init` of its last event and answers whether it
-///   lies after `previous`.
+///   lies after `previous` and not after `now`. Live, the filter may have read data past `now`
+///   before the decision's callback ran; an event there is the next decision's.
 /// - A session answers from `now`.
 /// - A regime answers from its own state.
 pub trait EventFilter: Indicator {
