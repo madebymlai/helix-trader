@@ -180,16 +180,6 @@ fn atr_refused(rule: DecisionRule, requirements: &DataRequirements) -> String {
 #[case::hours(quotes(), every(60), "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")]
 #[case::two_hours(quotes(), every(120), "XAUUSD.ICMARKETS-2-HOUR-MID-INTERNAL")]
 #[case::days(quotes(), every(24 * 60), "XAUUSD.ICMARKETS-1-DAY-MID-INTERNAL")]
-#[case::seconds(
-    quotes(),
-    DecisionRule::Every(SignedDuration::from_secs(30)),
-    "XAUUSD.ICMARKETS-30-SECOND-MID-INTERNAL"
-)]
-#[case::milliseconds(
-    quotes(),
-    DecisionRule::Every(SignedDuration::from_millis(250)),
-    "XAUUSD.ICMARKETS-250-MILLISECOND-MID-INTERNAL"
-)]
 #[case::bars_of_quotes(
     reading(&[], &["XAUUSD.ICMARKETS-1-HOUR-BID-INTERNAL"]),
     rule(),
@@ -241,6 +231,31 @@ fn the_atr_is_on_the_instruments_prices_built_at_the_decision_cadence(
     #[case] expected: &str,
 ) {
     assert_eq!(atr_bar_type(rule, &requirements), expected);
+}
+
+/// An interval under a minute is the ATR's own, as the decision cadence is refused, and its step is
+/// in its largest whole unit.
+#[rstest]
+#[case::seconds(
+    SignedDuration::from_secs(30),
+    "XAUUSD.ICMARKETS-30-SECOND-MID-INTERNAL"
+)]
+#[case::milliseconds(
+    SignedDuration::from_millis(250),
+    "XAUUSD.ICMARKETS-250-MILLISECOND-MID-INTERNAL"
+)]
+fn an_atr_interval_under_a_minute_is_in_its_largest_whole_unit(
+    #[case] interval: SignedDuration,
+    #[case] expected: &str,
+) {
+    let target = of(toml::from_str(&format!(
+        "limit = '2h'\natr = {{ period = 14, bar_interval = '{interval:#}' }}"
+    ))
+    .unwrap());
+
+    let bars = atr_bars(&target, DecisionRule::Every(interval)).unwrap();
+
+    assert_eq!(bars.0, expected);
 }
 
 #[rstest]

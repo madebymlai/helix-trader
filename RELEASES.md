@@ -6,6 +6,10 @@ Released on TBD (UTC).
 
 - Added `backtest --trades <path>`, writing each position to Parquet with the R its trade was sent at, a model decision's expected R and the entry's bid and ask
 
+### Breaking Changes
+
+- Changed a model target ATR without `bar_interval` to be refused on a decision interval under one minute; set its `bar_interval`
+
 ### Fixes
 
 - Fixed backtests dropping a fill's P&L when the account cannot book its commission's currency, now refused before the run, naming the pair that converts it
