@@ -215,12 +215,14 @@ pub trait Feature: Indicator {
 /// A Nautilus indicator that says whether a decision is an event, the only decisions the strategy
 /// makes (`FeatureSetBuilder::event_filter`).
 ///
-/// Its answer is a function of the data it read and the grid alone, so live and a backtest mark
-/// the same events:
+/// Its answer is a function of the data it read and the grid alone:
 /// - An edge event (a cross, a sweep, a burst) records the `ts_init` of each of its events in an
 ///   `EventTimes`, and answers whether one lies after `previous` and not after `now`. Live, the
 ///   filter may have read data past `now`, by at most the callback's delay, before the decision's
 ///   callback ran: the events there are the next decision's, and they replace none before them.
+///   Live and a backtest mark the same edge events, except one whose data, stamped by `now`, was
+///   still queued behind the decision's timer: the filter reads it after the callback, and the
+///   next window excludes it.
 /// - A session answers from `now`.
 /// - A regime answers from its own state.
 pub trait EventFilter: Indicator {

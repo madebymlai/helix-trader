@@ -23,7 +23,7 @@ use rstest::rstest;
 
 use super::*;
 use crate::{
-    model::features::testing::RISE,
+    model::features::{NoEvent, testing::RISE},
     strategy::{Declared, EmaArgs, IndicatorsConfig, Series},
 };
 
@@ -723,4 +723,39 @@ fn a_rise_a_long_interval_before_one_read_inside_a_late_callbacks_delay_is_its_d
     );
 
     assert!(first, "the decision at NOW is no event");
+}
+
+/// AUD, the traded instrument, has no data after `NOW`, so the decisions at the next three grid
+/// points are stale, while GBP's mid rises every minute over them, each rise read before the
+/// decision after it. Each stale decision still has the filter drop the rises no window still to
+/// come holds: after the last, at `NOW + 45m`, it holds none at or before that decision's previous
+/// grid point, `NOW + 30m`. Asked from the epoch to that grid point, a window holding every rise
+/// it kept up to there, it marks none.
+#[rstest]
+fn stale_decisions_have_the_event_filter_drop_the_events_of_their_windows() {
+    let (probe, clock) = registered(NOW);
+    let features = filtered();
+    let minute = 60 * SECOND;
+    gbp(&features, &[(1.3, NOW + SECOND)]);
+    let grid = [NOW + 15 * minute, NOW + 30 * minute, NOW + 45 * minute];
+
+    let mut decided = vec![];
+    let mut mid = 1.3;
+
+    for &at in &grid {
+        for step in 1..=15 {
+            mid += 0.01;
+            gbp(&features, &[(mid, at - 15 * minute + step * minute)]);
+        }
+        clock
+            .borrow_mut()
+            .advance_time(UnixNanos::from(at + 100 * NANOSECONDS_IN_MILLISECOND), true);
+        decided.push(decide(&probe, &fired(at), &features, every(15), aud()).is_some());
+    }
+
+    assert_eq!(decided, [false, false, false]);
+    assert_eq!(
+        features.event(UnixNanos::default(), UnixNanos::from(NOW + 30 * minute)),
+        Err(NoEvent::Unmarked)
+    );
 }
