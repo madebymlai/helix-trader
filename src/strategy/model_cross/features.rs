@@ -29,7 +29,7 @@ pub(super) const CROSS: Declared<CrossArgs> = Declared::new("cross");
 /// Bumped when what they compute changes and their names and tables do not, such as the kind of
 /// average or what makes a cross. The periods, the price read and the bar types are in the
 /// fingerprint by value.
-const VERSION: u32 = 3;
+const VERSION: u32 = 1;
 
 // panics-doc-ok (transitive via FeatureSetBuilder::feature and FeatureSetBuilder::event_filter)
 /// Builds the averages of each bar type in turn, the fast then the slow, and the cross on the bars
