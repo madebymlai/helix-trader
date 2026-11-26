@@ -5,6 +5,11 @@ Released on TBD (UTC).
 ### Enhancements
 
 - Added `backtest --trades <path>`, writing each position to Parquet with the R its trade was sent at, a model decision's expected R and the entry's bid and ask
+- Added `FeatureSetBuilder::event_filter`: a model strategy's indicator that limits its decisions, dataset rows and trades to the grid ticks it marks as events
+
+### Breaking Changes
+
+- Changed the dataset version to 11, so every dataset and model store is keyed anew; build the datasets and train again
 
 ### Fixes
 

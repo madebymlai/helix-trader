@@ -19,10 +19,16 @@
 //! debug.
 //!
 //! The market data is the quotes, trades, bars, depth and deltas of the traded instrument that a
-//! feature reads (`FeatureSet::last_update`), plus its last quote and trade in the cache. There is
-//! no calendar of sessions. The quotes added by `StandardConfig::data_requirements` count when no
+//! feature or the event filter reads (`FeatureSet::last_update`), plus its last quote and trade in
+//! the cache. There is no calendar of sessions. The quotes added by `StandardConfig::data_requirements` count when no
 //! series reads the traded instrument. Other instruments and custom data do not count. The node
 //! builds no time bar for a period without data (`warmup::data_engine_config`), so a bar is data.
+//!
+//! A fresh decision that is no event gives none either (`FeatureSet::event`): a cold event filter,
+//! or one that marks no event, gives no row, targets or trade, and is logged at debug. The filter
+//! is asked with the previous grid point, the boundary freshness reads. So an edge event between
+//! two grid points makes the next decision, at most an interval later, and one at the previous grid
+//! point is the previous decision's. Then the features' values are read.
 
 use std::sync::Arc;
 
@@ -188,7 +194,8 @@ pub fn is_decision(event: &TimeEvent) -> bool {
 
 /// Decides now on `rule`, trading `instrument_id`.
 ///
-/// Publishes a row of `features` if the decision is fresh and every feature is initialized.
+/// Publishes a row of `features` if, checked in this order, the decision is fresh, it is an event
+/// (`FeatureSet::event`) and every feature is initialized.
 ///
 /// # Panics
 ///
@@ -222,6 +229,11 @@ where
         log::debug!(
             "decision at {now} skipped: no data of {instrument_id} since the previous, at {previous}"
         );
+        return None;
+    }
+
+    if let Err(no_event) = features.event(previous, now) {
+        log::debug!("decision at {now} skipped: {no_event}, the previous grid point at {previous}");
         return None;
     }
     let values = features.values()?;

@@ -1396,3 +1396,265 @@ fn the_fingerprint_changes_with_the_custom_series_a_feature_reads() {
         reading_custom(&custom_series("Yield", "yields", "US10Y"))
     );
 }
+
+fn filter_tables(step: &str) -> IndicatorsConfig {
+    tables_with(&format!("rise = {{ step = {step} }}"))
+}
+
+fn tables_with(more: &str) -> IndicatorsConfig {
+    let mut tables = tables();
+    tables
+        .0
+        .extend(toml::from_str::<IndicatorsConfig>(more).unwrap().0);
+    tables
+}
+
+fn rise_quote(instrument: &str, mid: f64, ns: u64) -> QuoteTick {
+    QuoteTick {
+        ts_event: UnixNanos::from(ns),
+        ts_init: UnixNanos::from(ns),
+        ..quote(instrument, mid)
+    }
+}
+
+#[rstest]
+fn an_event_filter_enters_neither_the_names_nor_the_values() {
+    let tables = filter_tables("0.0");
+
+    let features = FeatureSet::builder()
+        .event_filter(&[quotes(AUD)], testing::RISE, &tables)
+        .feature(&[quotes(AUD)], LAST, &tables)
+        .build()
+        .unwrap();
+    features.handle_quote(&quote(AUD, 0.7)).unwrap();
+
+    assert_eq!(features.names(), ["last"]);
+    assert_eq!(features.values(), Some(vec![0.7]));
+}
+
+/// The indicator of the event filter is declared as a feature too, from the same table.
+#[rstest]
+fn a_table_feeding_a_feature_and_the_event_filter_names_the_feature_after_the_table() {
+    let tables = filter_tables("0.0");
+
+    let features = FeatureSet::builder()
+        .feature(&[quotes(AUD)], testing::RISE, &tables)
+        .event_filter(&[quotes(GBP)], testing::RISE, &tables)
+        .build()
+        .unwrap();
+    features.handle_quote(&quote(AUD, 0.7)).unwrap();
+
+    assert_eq!(features.names(), ["rise"]);
+    assert_eq!(features.values(), Some(vec![0.7]));
+}
+
+#[rstest]
+fn the_event_filters_series_join_the_sets_series_each_once() {
+    let series = level_series(AUD);
+    let tables = filter_tables("0.0");
+    let ticks_features = FeatureSet::builder()
+        .feature(&[quotes(AUD)], LAST, &tables)
+        .event_filter(
+            &[quotes(AUD), trades(GBP), bars(AUD_BARS)],
+            testing::RISE,
+            &tables,
+        )
+        .build()
+        .unwrap();
+    let custom_features = testing::custom_count(&series)
+        .event_filter(
+            &[custom(&series)],
+            testing::CUSTOM,
+            &toml::from_str("custom = {}").unwrap(),
+        )
+        .build()
+        .unwrap();
+    let tick = |data, instrument: &str| TickSeries {
+        data,
+        instrument_id: id(instrument),
+    };
+
+    assert_eq!(
+        ticks_features.ticks(),
+        [
+            tick(NautilusDataType::QuoteTick, AUD),
+            tick(NautilusDataType::TradeTick, GBP),
+        ]
+    );
+    assert_eq!(ticks_features.bar_types(), [BarType::from(AUD_BARS)]);
+    assert_eq!(custom_features.custom(), std::slice::from_ref(&series));
+    assert_eq!(custom_features.handled_custom(), [series]);
+}
+
+#[rstest]
+fn an_event_filter_reads_the_updates_of_its_series() {
+    let tables = filter_tables("0.0");
+    let features = FeatureSet::builder()
+        .feature(&[quotes(AUD)], LAST, &tables)
+        .event_filter(&[quotes(GBP), trades(GBP)], testing::RISE, &tables)
+        .build()
+        .unwrap();
+    let previous = UnixNanos::from(10);
+    let now = UnixNanos::from(100);
+
+    let cold = features.event(previous, now);
+    features.handle_quote(&rise_quote(GBP, 1.3, 5)).unwrap();
+    let unmarked = features.event(previous, now);
+    features
+        .handle_trade(&TradeTick {
+            ts_event: UnixNanos::from(20),
+            ts_init: UnixNanos::from(20),
+            ..trade(GBP, 1.4)
+        })
+        .unwrap();
+
+    assert_eq!(cold, Err(NoEvent::Cold));
+    assert_eq!(unmarked, Err(NoEvent::Unmarked));
+    assert_eq!(features.event(previous, now), Ok(()));
+    assert_eq!(features.last_update(id(GBP)), Some(UnixNanos::from(20)));
+}
+
+/// 2026-10-26T10:07:30Z and 10:37:30Z.
+#[rstest]
+fn an_event_filter_of_time_alone_reads_no_series() {
+    let tables = tables_with("first_half_hour = {}");
+    let at = |ns: u64| UnixNanos::from(ns);
+
+    let features = FeatureSet::builder()
+        .feature(&[quotes(AUD)], LAST, &tables)
+        .event_filter(&[], testing::FIRST_HALF_HOUR, &tables)
+        .build()
+        .unwrap();
+
+    assert_eq!(features.ticks(), [quotes_series(AUD)]);
+    assert_eq!(features.event(at(0), at(1_792_922_850_000_000_000)), Ok(()));
+    assert_eq!(
+        features.event(at(0), at(1_792_924_650_000_000_000)),
+        Err(NoEvent::Unmarked)
+    );
+}
+
+fn quotes_series(instrument: &str) -> TickSeries {
+    TickSeries {
+        data: NautilusDataType::QuoteTick,
+        instrument_id: id(instrument),
+    }
+}
+
+#[rstest]
+fn a_set_without_an_event_filter_marks_every_decision_an_event() {
+    let features = FeatureSet::builder()
+        .feature(&[quotes(AUD)], LAST, &tables())
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        features.event(UnixNanos::from(10), UnixNanos::from(100)),
+        Ok(())
+    );
+}
+
+#[rstest]
+fn a_second_event_filter_is_refused_when_the_set_is_built() {
+    let tables = tables_with("rise = { step = 0.0 }\nfirst_half_hour = {}");
+
+    let err = FeatureSet::builder()
+        .feature(&[quotes(AUD)], LAST, &tables)
+        .event_filter(&[quotes(AUD)], testing::RISE, &tables)
+        .event_filter(&[], testing::FIRST_HALF_HOUR, &tables)
+        .build()
+        .unwrap_err()
+        .to_string();
+
+    for table in ["rise", "first_half_hour"] {
+        assert!(err.contains(table), "{err}");
+    }
+}
+
+/// The test's rise reads no custom data (it has no `EventFilter::custom_handler`).
+#[rstest]
+fn an_event_filter_on_a_custom_series_without_a_handler_is_refused_when_the_set_is_built() {
+    let yields = levels("yields", "US10Y");
+
+    let err = FeatureSet::builder()
+        .feature(&[quotes(AUD)], LAST, &tables())
+        .event_filter(
+            &[quotes(AUD), custom(&yields)],
+            testing::RISE,
+            &filter_tables("0.0"),
+        )
+        .build()
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains(&yields.to_string()), "{err}");
+    assert!(err.contains("rise"), "{err}");
+}
+
+fn filtered(series: &[Series], tables: &IndicatorsConfig) -> Fingerprint {
+    FeatureSet::builder()
+        .feature(&[quotes(AUD)], LAST, tables)
+        .event_filter(series, testing::RISE, tables)
+        .build()
+        .unwrap()
+        .fingerprint()
+}
+
+#[rstest]
+fn the_fingerprint_changes_with_the_event_filter_its_series_and_its_table() {
+    let base = filtered(&[quotes(GBP)], &filter_tables("0.0"));
+    let unfiltered = FeatureSet::builder()
+        .feature(&[quotes(AUD)], LAST, &filter_tables("0.0"))
+        .build()
+        .unwrap()
+        .fingerprint();
+
+    assert_eq!(base, filtered(&[quotes(GBP)], &filter_tables("0.0")));
+    assert_ne!(base, unfiltered);
+    assert_ne!(base, filtered(&[trades(GBP)], &filter_tables("0.0")));
+    assert_ne!(
+        base,
+        filtered(&[quotes(GBP), quotes(AUD)], &filter_tables("0.0"))
+    );
+    assert_ne!(base, filtered(&[quotes(GBP)], &filter_tables("0.5")));
+}
+
+/// A filter's table spelled otherwise keeps the fingerprint, as a table only the strategy's own
+/// logic reads does.
+#[rstest]
+fn the_fingerprint_keeps_to_the_tables_the_set_reads_by_value() {
+    let base = filtered(&[quotes(GBP)], &filter_tables("0.0"));
+    let with_strategys_own = tables_with("rise = { step = 0.00 }\nown = { period = 3 }");
+
+    assert_eq!(base, filtered(&[quotes(GBP)], &with_strategys_own));
+}
+
+/// The test's filter over the bracket is an event once it has a mid and an initialized width.
+#[rstest]
+fn an_event_filter_over_the_bracket_reads_the_sets_width() {
+    let width = width_of(Distance::BasisPoints(Decimal::from(10)));
+    let over = over_tables();
+
+    let features = FeatureSet::builder()
+        .bracket(&width)
+        .feature(&[quotes(AUD)], LAST, &tables())
+        .event_filter(&[quotes(AUD)], testing::OVER, &over)
+        .build()
+        .unwrap();
+    features.handle_quote(&quote(AUD, 0.7)).unwrap();
+    let unwidthed = FeatureSet::builder()
+        .feature(&[quotes(AUD)], LAST, &tables())
+        .event_filter(&[quotes(AUD)], testing::OVER, &over)
+        .build()
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        features.event(UnixNanos::from(10), UnixNanos::from(100)),
+        Ok(())
+    );
+
+    for part in ["over", "bracket"] {
+        assert!(unwidthed.contains(part), "{unwidthed}");
+    }
+}

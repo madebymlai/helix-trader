@@ -11,6 +11,8 @@
 //! - The target's ATR, if any, is initialized. The handle reads this itself, not through
 //!   Nautilus' indicators.
 //! - The decision is fresh: data of the target's instrument has come since the previous decision.
+//! - The decision is an event: the event filter, if any, is initialized and marks it
+//!   (`FeatureSet::event`).
 //! - Every feature is initialized.
 //!
 //! Then the mode decides what happens:
@@ -24,7 +26,7 @@
 //!   The handle sends no order and reads no equity. The strategy sends `Decision::trade` through
 //!   `strategy::orders`, at a stake of its own. The models see the target at the reference stake
 //!   alone. With no model set valid yet, no side trades. These are no decision, never an error: a
-//!   stale decision, cold features, an uninitialized ATR, a target of no size, no side clearing
+//!   stale decision, a cold event filter or no event, cold features, an uninitialized ATR, a target of no size, no side clearing
 //!   its margin, or a tie. The target is set before the models are asked, so `decide` errs when
 //!   the instrument is missing from the cache.
 //! - `Mode::Dataset`: opens the decision's target (`targets::Targets`) and returns no decision.
@@ -63,8 +65,8 @@
 //! (`Roller::custom_roots`). `start` subscribes each series once, on the contract standing for its
 //! instrument or root, and sets each root's roll alert. The strategy hands the handle its time
 //! events, after `strategy::orders::on_time_event`, for the roller. At a roll, the root's series
-//! move to the post contract (`Subscriptions::roll`) and its features restart there
-//! (`FeatureSet::roll`), so decisions wait until they refill. A backtest and a dataset run roll on
+//! move to the post contract (`Subscriptions::roll`) and its features and event filter restart
+//! there (`FeatureSet::roll`), so decisions wait until they refill. A backtest and a dataset run roll on
 //! the catalog's contract slices (`DataRequirements::slices`). Live, the roller loads each post
 //! contract before its roll (`Roller::live`).
 //!
@@ -396,7 +398,7 @@ impl ModelHandle {
     /// Returns the decision to trade now for `strategy`, if any.
     ///
     /// Returns `None` while the warmup is answering, the target's ATR is not initialized, or
-    /// `decide::decide` publishes no row. In backtest and live, a working order or open position
+    /// `decide::decide` publishes no row: a stale decision, no event, or cold features. In backtest and live, a working order or open position
     /// of this strategy on the traded instrument suppresses the entry, not the feature row.
     ///
     /// # Errors
@@ -728,7 +730,10 @@ mod tests {
                 gold, meta, meta_baseline, model_set_of, model_store, r, requirements, store,
                 with_meta,
             },
-            features::testing::{last_mid, mid_over},
+            features::{
+                NoEvent,
+                testing::{RISE, last_mid, mid_over},
+            },
             schedule::Retrain,
             targets::{
                 BracketSpec, BracketWidth, DEFAULT_ATR, Distance, Side, Target, TargetConfig,
@@ -2503,6 +2508,133 @@ mod tests {
         );
         assert!(!cold);
         assert!(features.initialized());
+    }
+
+    fn gc_trade(contract: &str, time: &str, price: &str) -> TradeTick {
+        TradeTick {
+            instrument_id: InstrumentId::from(contract),
+            ..gcz6_trade(time, price)
+        }
+    }
+
+    /// Decides at a rise of the price of GC's trades.
+    fn filtered_on_gc() -> Rc<FeatureSet> {
+        let tables: IndicatorsConfig = toml::from_str(
+            r#"
+            mid = { period = 1, price_type = "MID" }
+            rise = { step = 0.0 }
+            "#,
+        )
+        .unwrap();
+        last_mid(InstrumentId::from(AUD))
+            .event_filter(
+                &[Series::trades(InstrumentId::from("GC.GLBX"))],
+                RISE,
+                &tables,
+            )
+            .build()
+            .unwrap()
+    }
+
+    fn gc_trades() -> TickSeries {
+        TickSeries {
+            data: NautilusDataType::TradeTick,
+            instrument_id: InstrumentId::from("GC.GLBX"),
+        }
+    }
+
+    fn event_at(features: &FeatureSet, previous: &str, now: &str) -> Result<(), NoEvent> {
+        features.event(UnixNanos::from(at(previous)), UnixNanos::from(at(now)))
+    }
+
+    /// Live on 2026-08-10 at 14:30, the event filter on GC's trades reads GCZ26's history, whose
+    /// rise at 14:29 makes the first decision, at 14:30, an event.
+    #[rstest]
+    fn a_live_start_warms_the_event_filter_from_its_series_history() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-08-10T14:30:00Z"));
+        let features = filtered_on_gc();
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![aud_quotes(), gc_trades()],
+            custom: vec![],
+            warmup: SignedDuration::from_hours(1),
+        };
+        let handle = ModelHandle::new(
+            &blueprint_of(&features, &bracket_config(10), requirements),
+            &live(models.path().to_path_buf()),
+        )
+        .unwrap();
+        probe.warmup = Some(handle.warmup());
+        let sent = sent_commands();
+
+        handle.start(&mut probe).unwrap();
+        let cold = event_at(&features, "2026-08-10T14:15:00Z", "2026-08-10T14:30:00Z");
+        probe.handle_trades_response(&TradesResponse::new(
+            UUID4::new(),
+            ClientId::from("GLBX"),
+            InstrumentId::from("GCZ26.GLBX"),
+            vec![
+                gcz6_trade("2026-08-10T14:00:00Z", "4000.0"),
+                gcz6_trade("2026-08-10T14:29:00Z", "4002.0"),
+            ],
+            None,
+            None,
+            UnixNanos::from(at("2026-08-10T14:30:00Z")),
+            None,
+        ));
+        handle.warmup().complete(&probe).unwrap();
+
+        assert!(sent.take().iter().any(|line| line
+            == "request trades [GCZ26.GLBX] \
+                    Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)"),);
+        assert_eq!(cold, Err(NoEvent::Cold));
+        assert_eq!(
+            event_at(&features, "2026-08-10T14:15:00Z", "2026-08-10T14:30:00Z"),
+            Ok(())
+        );
+    }
+
+    /// GC rolls into GCG27 at 00:00 UTC on 2026-11-26. The roll resets the event filter on GC's
+    /// trades, which then warms on GCG27's.
+    #[rstest]
+    fn a_roll_of_its_root_resets_the_event_filter() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, clock) = registered(at("2026-11-25T23:00:00Z"));
+        let features = filtered_on_gc();
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![aud_quotes(), gc_trades()],
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+        let handle = ModelHandle::new(
+            &blueprint_of(&features, &config(), requirements),
+            &Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        probe.warmup = Some(handle.warmup());
+        handle.start(&mut probe).unwrap();
+        let trade = |probe: &mut Decider, contract: &str, time: &str, price: &str| {
+            DataActor::on_trade(probe, &gc_trade(contract, time, price)).unwrap();
+        };
+
+        trade(&mut probe, "GCZ26.GLBX", "2026-11-25T23:10:00Z", "4000.0");
+        trade(&mut probe, "GCZ26.GLBX", "2026-11-25T23:20:00Z", "4002.0");
+        let before_the_roll = event_at(&features, "2026-11-25T23:00:00Z", "2026-11-26T00:00:00Z");
+        run_to(&handle, &mut probe, &clock, "2026-11-26T00:30:00Z");
+        let rolled = event_at(&features, "2026-11-25T23:00:00Z", "2026-11-26T00:30:00Z");
+        trade(&mut probe, "GCG27.GLBX", "2026-11-26T00:40:00Z", "4100.0");
+        trade(&mut probe, "GCG27.GLBX", "2026-11-26T00:50:00Z", "4105.0");
+
+        assert_eq!(before_the_roll, Ok(()));
+        assert_eq!(rolled, Err(NoEvent::Cold));
+        assert_eq!(
+            event_at(&features, "2026-11-26T00:30:00Z", "2026-11-26T01:00:00Z"),
+            Ok(())
+        );
     }
 
     fn started_live(

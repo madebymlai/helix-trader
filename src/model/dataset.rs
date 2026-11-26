@@ -12,10 +12,10 @@
 //! fingerprint is `decide::fingerprint` extended by `targets::fingerprint`, the `DatasetVenue` of
 //! the dataset runs and the dataset `VERSION`. A change to any of them finds no row and rebuilds
 //! the dataset. That covers the feature names, their `[indicators]` arguments, warmup or version,
-//! the decision rule, the target, what its ATR is built from, and the commission, balance or
-//! latency. The config is read by value and the code by version. Each version is bumped by hand:
-//! the dataset's for the code that makes every strategy's rows, and the strategy's for its
-//! features (`FeatureSetBuilder::version`).
+//! the event filter's table, arguments and series, the decision rule, the target, what its ATR is
+//! built from, and the commission, balance or latency. The config is read by value and the code by
+//! version. Each version is bumped by hand: the dataset's for the code that makes every strategy's
+//! rows, and the strategy's for its features and event filter (`FeatureSetBuilder::version`).
 //!
 //! The feature names and the payoff names (`TargetConfig::payoff_names`) are in the metadata of
 //! the data type of the rows. `read` checks them and the width of each row.
@@ -100,7 +100,7 @@ use crate::{
 /// that code makes something else of the same data and config, a Nautilus pin bump included. The
 /// golden rows (`tests/backtest/backtest_golden_rows.rs`) fail on a change of their rows made
 /// without a bump. A change that reaches none of them is bumped all the same.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 
 const FEATURE_NAMES: &str = "feature_names";
 
@@ -1410,7 +1410,7 @@ mod tests {
 
         assert_eq!(
             dataset.identifier(),
-            "DATASET-001-ebabdcfdc08b9b3f91bb4242f96cab59906b9cbfea0e52869e73ef5d85125798"
+            "DATASET-001-ab9b41c6e0542886327266ccb579445ab4421daf1479086cd77f6390b95c6a6a"
         );
     }
 
