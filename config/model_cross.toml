@@ -38,10 +38,12 @@ period = 30
 # its constructor's arguments, period and price_type, the fast's period
 # below the slow's. A decision is made only when such a cross came after
 # the previous grid point, at most an hour after it. Simple averages read
-# their last closes alone, so a cross does not depend on where a replay
-# starts, as an exponential average's would. Here they have the features'
-# periods; declared by its own table, the cross may differ from them. Its
-# arguments key the dataset and the models by value, as a feature's.
+# their last closes alone, and the fast counts as above the slow only by
+# more than the rounding of their running sums, so a cross does not depend
+# on where a replay starts, as an exponential average's would. Here they
+# have the features' periods; declared by its own table, the cross may
+# differ from them. Its arguments key the dataset and the models by value,
+# as a feature's.
 [indicators.cross]
 fast = { period = 10 }
 slow = { period = 30 }
