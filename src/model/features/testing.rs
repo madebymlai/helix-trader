@@ -2,10 +2,11 @@
 
 use std::rc::Rc;
 
-use nautilus_core::UnixNanos;
+use nautilus_core::{UnixNanos, datetime::NANOSECONDS_IN_MINUTE};
 use nautilus_indicators::indicator::Indicator;
 use nautilus_model::{
     data::{CustomData, OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick},
+    enums::PriceType,
     identifiers::InstrumentId,
 };
 
@@ -276,8 +277,7 @@ impl Indicator for Rise {
     }
 
     fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
-        let mid = (quote.bid_price.as_f64() + quote.ask_price.as_f64()) / 2.0;
-        self.read(mid, quote.ts_init);
+        self.read(quote.extract_price(PriceType::Mid)?.as_f64(), quote.ts_init);
         Ok(())
     }
 
@@ -346,7 +346,7 @@ impl Indicator for FirstHalfHour {
 
 impl EventFilter for FirstHalfHour {
     fn is_event(&self, _previous: UnixNanos, now: UnixNanos) -> bool {
-        now.as_u64() / 60_000_000_000 % 60 < 30
+        now.as_u64() / NANOSECONDS_IN_MINUTE % 60 < 30
     }
 }
 

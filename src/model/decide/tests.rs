@@ -7,7 +7,7 @@ use nautilus_common::{
     msgbus::{self, ShareableMessageHandler, switchboard::get_custom_topic},
     timer::TimeEventCallback,
 };
-use nautilus_core::UUID4;
+use nautilus_core::{UUID4, datetime::NANOSECONDS_IN_MILLISECOND};
 use nautilus_model::{
     data::{QuoteTick, TradeTick},
     enums::AggressorSide,
@@ -594,7 +594,6 @@ fn an_event_after_a_stale_interval_makes_a_decision_and_one_in_it_does_not(
 
 /// The grid point after `NOW` on `every(15)`.
 const NEXT: u64 = NOW + 15 * 60 * SECOND;
-const MILLISECOND: u64 = 1_000_000;
 
 /// A live clock reads past a decision's scheduled time by the delay before its callback runs, a
 /// different one at each decision. GBP's mid rises 200 ms after the scheduled time `NOW`: a delay
@@ -611,8 +610,8 @@ fn an_event_just_after_a_scheduled_time_is_the_next_decisions_alone_whatever_the
     let (probe, clock) = registered(NOW);
     let features = filtered();
     gbp(&features, &[(1.3, PREVIOUS - SECOND)]);
-    let risen_at = NOW + 200 * MILLISECOND;
-    let first_read = NOW + first_delay_ms * MILLISECOND;
+    let risen_at = NOW + 200 * NANOSECONDS_IN_MILLISECOND;
+    let first_read = NOW + first_delay_ms * NANOSECONDS_IN_MILLISECOND;
 
     if risen_at <= first_read {
         gbp(&features, &[(1.4, risen_at)]);
@@ -627,9 +626,10 @@ fn an_event_just_after_a_scheduled_time_is_the_next_decisions_alone_whatever_the
     features
         .handle_quote(&quote_of(AUD, 0.8, NEXT - SECOND))
         .unwrap();
-    clock
-        .borrow_mut()
-        .advance_time(UnixNanos::from(NEXT + second_delay_ms * MILLISECOND), true);
+    clock.borrow_mut().advance_time(
+        UnixNanos::from(NEXT + second_delay_ms * NANOSECONDS_IN_MILLISECOND),
+        true,
+    );
     let second = decide(&probe, &fired(NEXT), &features, every(15), aud());
 
     assert_eq!((first.is_some(), second.is_some()), (false, true));
@@ -643,12 +643,16 @@ fn a_decision_read_past_its_scheduled_time_is_at_that_time_and_read_at_the_clock
     let features = features();
     features.handle_quote(&quote(0.7)).unwrap();
     features.handle_quote(&quote(0.8)).unwrap();
-    clock
-        .borrow_mut()
-        .advance_time(UnixNanos::from(NOW + 300 * MILLISECOND), true);
+    clock.borrow_mut().advance_time(
+        UnixNanos::from(NOW + 300 * NANOSECONDS_IN_MILLISECOND),
+        true,
+    );
 
     let row = decide(&probe, &fired(NOW), &features, every(15), aud()).unwrap();
 
     assert_eq!(row.ts_event, UnixNanos::from(NOW));
-    assert_eq!(row.ts_init, UnixNanos::from(NOW + 300 * MILLISECOND));
+    assert_eq!(
+        row.ts_init,
+        UnixNanos::from(NOW + 300 * NANOSECONDS_IN_MILLISECOND)
+    );
 }
