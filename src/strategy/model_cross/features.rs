@@ -227,6 +227,30 @@ mod tests {
         );
     }
 
+    /// Closes of 10, 10 and 12.2, then three of 10.2 and one of 10.3. After the three closes of
+    /// 10.2 both averages are 10.2, so the fast is not above the slow, and 10.3 brings it above, to
+    /// 10.25 over 10.23: a cross at the last bar. Nautilus' averages keep running sums, which after
+    /// those closes round to slightly different values depending on the bar a replay started at;
+    /// the cross is the same whichever.
+    #[rstest]
+    #[case::from_the_first_close(&["10.00", "10.00", "12.20"])]
+    #[case::from_the_second_close(&["10.00", "12.20"])]
+    fn a_cross_after_equal_averages_is_the_same_whatever_bar_a_replay_starts_at(
+        #[case] earlier: &[&str],
+    ) {
+        let closes: Vec<&str> = [earlier, &["10.20", "10.20", "10.20", "10.30"]].concat();
+        let last = closes.len() as u64;
+        let features = fed(&closes);
+
+        assert_eq!(
+            features.event(
+                UnixNanos::from((last - 1) * MINUTE),
+                UnixNanos::from(last * MINUTE)
+            ),
+            Ok(())
+        );
+    }
+
     /// The cross is no feature: the names and values are the averages'.
     #[rstest]
     fn the_features_are_the_averages_alone() {

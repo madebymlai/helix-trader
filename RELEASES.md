@@ -18,6 +18,7 @@ Released on TBD (UTC).
 
 - Fixed backtests dropping a fill's P&L when the account cannot book its commission's currency, now refused before the run, naming the pair that converts it
 - Fixed the backtest report listing a converted commission as `Commission outside PnL`; each cost is in the currency its account books it in
+- Fixed `model_cross` marking a cross after equal averages in one replay and not another, by the rounding of Nautilus' running sums
 
 ### Internal Improvements
 
@@ -27,6 +28,7 @@ Released on TBD (UTC).
 
 - Added to the model guide the measured cost of a one-second decision grid against one minute, in a train and in a backtest
 - Changed the README's quick-start commands to wrap over several lines, so they read without scrolling
+- Changed the model guide and `EventFilter` to say a live edge filter's later event, read before a late callback, replaces an earlier one
 
 ---
 
