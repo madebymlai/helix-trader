@@ -1514,6 +1514,42 @@ fn an_event_filter_reads_the_updates_of_its_series() {
     assert_eq!(features.last_update(id(GBP)), Some(UnixNanos::from(20)));
 }
 
+/// GBP's mid rises at 100 and at 250, both read before any window is asked, as live data can be
+/// read before a late decision. Each window `(previous, now]` holds the rises after `previous` and
+/// not after `now`, however often it or the windows before it were asked: asked twice, or left
+/// unasked as a stale decision leaves it.
+#[rstest]
+#[case::each_window_in_turn(
+    &[(0, 100), (100, 200), (200, 300), (300, 400)],
+    &[Ok(()), Err(NoEvent::Unmarked), Ok(()), Err(NoEvent::Unmarked)]
+)]
+#[case::each_window_twice(
+    &[(0, 100), (0, 100), (100, 200), (100, 200), (200, 300), (200, 300)],
+    &[Ok(()), Ok(()), Err(NoEvent::Unmarked), Err(NoEvent::Unmarked), Ok(()), Ok(())]
+)]
+#[case::the_first_window_unasked(&[(100, 200), (200, 300)], &[Err(NoEvent::Unmarked), Ok(())])]
+fn an_event_filters_answer_for_a_window_does_not_depend_on_how_often_it_was_asked(
+    #[case] windows: &[(u64, u64)],
+    #[case] answers: &[Result<(), NoEvent>],
+) {
+    let tables = filter_tables("0.0");
+    let features = FeatureSet::builder()
+        .feature(&[quotes(AUD)], LAST, &tables)
+        .event_filter(&[quotes(GBP)], testing::RISE, &tables)
+        .build()
+        .unwrap();
+    for (mid, ns) in [(1.3, 50), (1.4, 100), (1.2, 150), (1.3, 250)] {
+        features.handle_quote(&rise_quote(GBP, mid, ns)).unwrap();
+    }
+
+    let asked: Vec<_> = windows
+        .iter()
+        .map(|&(previous, now)| features.event(UnixNanos::from(previous), UnixNanos::from(now)))
+        .collect();
+
+    assert_eq!(asked, answers);
+}
+
 /// 2026-10-26T10:07:30Z and 10:37:30Z.
 #[rstest]
 fn an_event_filter_of_time_alone_reads_no_series() {

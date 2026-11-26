@@ -211,6 +211,23 @@ mod tests {
         );
     }
 
+    /// Closes of 11, 12, 13, 10 then 17: the cross at the fourth bar, as above, then the fifth
+    /// brings the fast to (10 + 17) / 2 = 13.5 and the slow to (13 + 10 + 17) / 3 = 13.33, above:
+    /// a second cross, at minute 5. Live, the fifth bar can be read before the callback of a
+    /// decision at minute 4 ran. The first cross is still that decision's event.
+    #[rstest]
+    fn a_later_cross_leaves_an_earlier_one_the_event_of_its_decision() {
+        let features = fed(&["11.00", "12.00", "13.00", "10.00", "17.00"]);
+
+        assert_eq!(
+            features.event(
+                UnixNanos::from(3 * NANOSECONDS_IN_MINUTE + 1),
+                UnixNanos::from(4 * NANOSECONDS_IN_MINUTE)
+            ),
+            Ok(())
+        );
+    }
+
     /// Closes of 13, 10, 11 then 12. After the third bar the fast average, (10 + 11) / 2 = 10.5,
     /// is below the slow, (13 + 10 + 11) / 3 = 11.33. The fourth brings the fast to 11.5 and the
     /// slow to 11, above: a cross at the fourth bar. The averages read those closes alone, so bars
