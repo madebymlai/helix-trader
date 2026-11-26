@@ -41,6 +41,7 @@ mod backtest_latency;
 mod backtest_max_drawdown;
 mod backtest_meta;
 mod backtest_model;
+mod backtest_model_cross;
 mod backtest_model_ema;
 mod backtest_model_ema_trained;
 mod backtest_model_stake;

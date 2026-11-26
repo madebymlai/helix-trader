@@ -13,7 +13,7 @@ A strategy implements Nautilus' `Strategy` trait; backtest and live do not depen
 
 **Formatting:** the strategies reach the crate through the build script's generated `include!`, which `cargo fmt` does not follow. Format them with `rustfmt src/strategy/*/mod.rs` after `cargo fmt`.
 
-**Model strategies:** for features, decisions, labels, training, stores, meta-labeling or version bumps, read the [model guide](../model/README.md). `model_ema/` and [`config/model_ema.toml`](../../config/model_ema.toml) are the example. For run orchestration see [backtest](../backtest/README.md); for live operations see [live](../live/README.md).
+**Model strategies:** for features, decisions, labels, training, stores, meta-labeling or version bumps, read the [model guide](../model/README.md). `model_ema/` and [`config/model_ema.toml`](../../config/model_ema.toml) are the example, and `model_cross/` and [`config/model_cross.toml`](../../config/model_cross.toml) that of an event filter. For run orchestration see [backtest](../backtest/README.md); for live operations see [live](../live/README.md).
 
 Nautilus' `nautilus_strategy!` starts a strategy with `Strategy::on_start`, which reactivates GTD timers when `manage_gtd_expiry` is set, then `DataActor::on_start`, where the strategy's own start goes; it need not call the former.
 
