@@ -10,7 +10,9 @@ use nautilus_model::{
     identifiers::InstrumentId,
 };
 
-use super::{CustomHandler, EventFilter, Feature, FeatureSet, FeatureSetBuilder, OverBracket};
+use super::{
+    CustomHandler, EventFilter, EventTimes, Feature, FeatureSet, FeatureSetBuilder, OverBracket,
+};
 use crate::{
     model::targets::BracketWidth,
     strategy::{
@@ -78,7 +80,7 @@ impl Feature for MidOverWidth {
 
 /// An event at every decision once initialized, which reads the width.
 impl EventFilter for MidOverWidth {
-    fn is_event(&self, _previous: UnixNanos, _now: UnixNanos) -> bool {
+    fn is_event(&mut self, _previous: UnixNanos, _now: UnixNanos) -> bool {
         self.initialized()
     }
 
@@ -216,7 +218,7 @@ impl Feature for CustomCount {
 
 /// An event at every decision once a point has come.
 impl EventFilter for CustomCount {
-    fn is_event(&self, _previous: UnixNanos, _now: UnixNanos) -> bool {
+    fn is_event(&mut self, _previous: UnixNanos, _now: UnixNanos) -> bool {
         true
     }
 
@@ -247,17 +249,17 @@ impl IndicatorArgs for CustomCountArgs {
 pub(crate) const RISE: Declared<RiseArgs> = Declared::new("rise");
 
 /// An edge event filter: an event is a quote's mid, or a trade's price, more than `step` above the
-/// price before it. It is initialized once a price has come.
+/// price before it, each recorded in its `EventTimes`. It is initialized once a price has come.
 pub(crate) struct Rise {
     step: f64,
     last: Option<f64>,
-    risen_at: Option<UnixNanos>,
+    rises: EventTimes,
 }
 
 impl Rise {
     fn read(&mut self, price: f64, ts_init: UnixNanos) {
         if self.last.is_some_and(|last| price > last + self.step) {
-            self.risen_at = Some(ts_init);
+            self.rises.record(ts_init);
         }
         self.last = Some(price);
     }
@@ -287,7 +289,7 @@ impl Indicator for Rise {
 
     fn reset(&mut self) {
         self.last = None;
-        self.risen_at = None;
+        self.rises = EventTimes::default();
     }
 }
 
@@ -299,9 +301,8 @@ impl Feature for Rise {
 }
 
 impl EventFilter for Rise {
-    fn is_event(&self, previous: UnixNanos, now: UnixNanos) -> bool {
-        self.risen_at
-            .is_some_and(|risen_at| previous < risen_at && risen_at <= now)
+    fn is_event(&mut self, previous: UnixNanos, now: UnixNanos) -> bool {
+        self.rises.in_window(previous, now)
     }
 }
 
@@ -318,7 +319,7 @@ impl IndicatorArgs for RiseArgs {
         Ok(Rise {
             step: self.step,
             last: None,
-            risen_at: None,
+            rises: EventTimes::default(),
         })
     }
 }
@@ -345,7 +346,7 @@ impl Indicator for FirstHalfHour {
 }
 
 impl EventFilter for FirstHalfHour {
-    fn is_event(&self, _previous: UnixNanos, now: UnixNanos) -> bool {
+    fn is_event(&mut self, _previous: UnixNanos, now: UnixNanos) -> bool {
         now.as_u64() / NANOSECONDS_IN_MINUTE % 60 < 30
     }
 }

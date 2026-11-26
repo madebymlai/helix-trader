@@ -33,16 +33,19 @@ use nautilus_indicators::{
 use nautilus_model::data::Bar;
 use serde::{Deserialize, Serialize};
 
-use crate::{model::features::EventFilter, strategy::IndicatorArgs};
+use crate::{
+    model::features::{EventFilter, EventTimes},
+    strategy::IndicatorArgs,
+};
 
 /// A cross of the fast average over the slow, either way, as an edge event.
 ///
 /// The fast average is above the slow after a bar when the MACD's value, the fast less the slow,
 /// is greater than half the smallest gap the averages can have, so equal averages are not. A
-/// cross is a bar after which that differs from the bar before. The filter keeps the `ts_init` of
-/// its last cross, and a decision is an event when that lies after the previous grid point and not
-/// after the decision, so a cross between two grid points makes the next decision. It is
-/// initialized once the MACD is, at the bar the slow average initializes at.
+/// cross is a bar after which that differs from the bar before. The filter records the `ts_init`
+/// of each cross (`EventTimes`), and a decision is an event when one lies after the previous grid
+/// point and not after the decision, so a cross between two grid points makes the next decision. It
+/// is initialized once the MACD is, at the bar the slow average initializes at.
 #[derive(Debug)]
 pub(super) struct Cross {
     macd: MovingAverageConvergenceDivergence,
@@ -51,7 +54,7 @@ pub(super) struct Cross {
     periods_lcm: f64,
     /// Whether the fast average was above the slow after the last bar, `None` while cold.
     above: Option<bool>,
-    crossed_at: Option<UnixNanos>,
+    crosses: EventTimes,
 }
 
 impl Indicator for Cross {
@@ -75,7 +78,7 @@ impl Indicator for Cross {
         }
         let above = self.is_above(bar.close.precision);
         if self.above.is_some_and(|was| was != above) {
-            self.crossed_at = Some(bar.ts_init);
+            self.crosses.record(bar.ts_init);
         }
         self.above = Some(above);
     }
@@ -83,7 +86,7 @@ impl Indicator for Cross {
     fn reset(&mut self) {
         self.macd.reset();
         self.above = None;
-        self.crossed_at = None;
+        self.crosses = EventTimes::default();
     }
 }
 
@@ -97,9 +100,8 @@ impl Cross {
 }
 
 impl EventFilter for Cross {
-    fn is_event(&self, previous: UnixNanos, now: UnixNanos) -> bool {
-        self.crossed_at
-            .is_some_and(|crossed_at| previous < crossed_at && crossed_at <= now)
+    fn is_event(&mut self, previous: UnixNanos, now: UnixNanos) -> bool {
+        self.crosses.in_window(previous, now)
     }
 }
 
@@ -147,7 +149,7 @@ impl IndicatorArgs for CrossArgs {
             ),
             periods_lcm: lcm(self.fast_period, self.slow_period) as f64,
             above: None,
-            crossed_at: None,
+            crosses: EventTimes::default(),
         })
     }
 }

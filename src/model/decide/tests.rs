@@ -23,7 +23,7 @@ use rstest::rstest;
 
 use super::*;
 use crate::{
-    model::features::testing::RISE,
+    model::features::{NoEvent, testing::RISE},
     strategy::{Declared, EmaArgs, IndicatorsConfig, Series},
 };
 
@@ -654,5 +654,108 @@ fn a_decision_read_past_its_scheduled_time_is_at_that_time_and_read_at_the_clock
     assert_eq!(
         row.ts_init,
         UnixNanos::from(NOW + 300 * NANOSECONDS_IN_MILLISECOND)
+    );
+}
+
+/// Decides at `NOW` on a cadence of `interval` minutes, its callback run 300 ms late, then at the
+/// next grid point 100 ms late, and returns whether each decided. GBP's mid rises at each time of
+/// `rises`, all read before the first callback ran, so a rise after `NOW` was read inside its
+/// delay.
+fn decided_late(interval: i64, rises: &[u64]) -> (bool, bool) {
+    let (probe, clock) = registered(NOW);
+    let features = filtered();
+    let interval_ns = u64::try_from(interval).unwrap() * 60 * SECOND;
+    let previous = NOW - interval_ns;
+    let next = NOW + interval_ns;
+    gbp(&features, &[(1.3, previous - SECOND)]);
+    for (step, &risen_at) in (1..).zip(rises) {
+        gbp(&features, &[(1.3 + 0.1 * f64::from(step), risen_at)]);
+    }
+    clock.borrow_mut().advance_time(
+        UnixNanos::from(NOW + 300 * NANOSECONDS_IN_MILLISECOND),
+        true,
+    );
+    let first = decide(&probe, &fired(NOW), &features, every(interval), aud());
+    features
+        .handle_quote(&quote_of(AUD, 0.8, next - SECOND))
+        .unwrap();
+    clock.borrow_mut().advance_time(
+        UnixNanos::from(next + 100 * NANOSECONDS_IN_MILLISECOND),
+        true,
+    );
+    let second = decide(&probe, &fired(next), &features, every(interval), aud());
+    (first.is_some(), second.is_some())
+}
+
+/// GBP's mid rises 2 minutes after the previous grid point, then again inside the delay of the
+/// callback for `NOW`, once or twice, each later rise read before that callback ran. The first rise
+/// is the decision at `NOW`'s and the later ones the next decision's, as in a backtest, where the
+/// callback runs at its scheduled time: a later rise never replaces an earlier one, however many
+/// came. A filter keeping its last rise alone, or its last two, loses the first.
+#[rstest]
+#[case::one_rise_in_the_delay(&[NOW + 200 * NANOSECONDS_IN_MILLISECOND])]
+#[case::two_rises_in_the_delay(&[
+    NOW + 100 * NANOSECONDS_IN_MILLISECOND,
+    NOW + 200 * NANOSECONDS_IN_MILLISECOND,
+])]
+fn rises_read_inside_a_late_callbacks_delay_leave_its_decisions_event_and_make_the_next(
+    #[case] in_the_delay: &[u64],
+) {
+    let rises = [&[PREVIOUS + 120 * SECOND], in_the_delay].concat();
+
+    assert_eq!(decided_late(15, &rises), (true, true));
+}
+
+/// A cadence of a year passes validation, as any positive interval does, and is longer than any
+/// fixed age a filter could keep its events for without knowing the cadence: a minute, an hour, a
+/// day or a week. GBP's mid rises a second after the previous grid point, then 200 ms after
+/// `NOW`, read inside the delay of its callback, almost a year later. The first rise is the
+/// decision at `NOW`'s, so a filter dropping its events older than its newest by a fixed age
+/// loses it.
+#[rstest]
+fn a_rise_a_long_interval_before_one_read_inside_a_late_callbacks_delay_is_its_decisions() {
+    const YEAR: i64 = 365 * 24 * 60;
+    let previous = NOW - 365 * 24 * 60 * 60 * SECOND;
+
+    let (first, _) = decided_late(
+        YEAR,
+        &[previous + SECOND, NOW + 200 * NANOSECONDS_IN_MILLISECOND],
+    );
+
+    assert!(first, "the decision at NOW is no event");
+}
+
+/// AUD, the traded instrument, has no data after `NOW`, so the decisions at the next three grid
+/// points are stale, while GBP's mid rises every minute over them, each rise read before the
+/// decision after it. Each stale decision still has the filter drop the rises no window still to
+/// come holds: after the last, at `NOW + 45m`, it holds none at or before that decision's previous
+/// grid point, `NOW + 30m`. Asked from the epoch to that grid point, a window holding every rise
+/// it kept up to there, it marks none.
+#[rstest]
+fn stale_decisions_have_the_event_filter_drop_the_events_of_their_windows() {
+    let (probe, clock) = registered(NOW);
+    let features = filtered();
+    let minute = 60 * SECOND;
+    gbp(&features, &[(1.3, NOW + SECOND)]);
+    let grid = [NOW + 15 * minute, NOW + 30 * minute, NOW + 45 * minute];
+
+    let mut decided = vec![];
+    let mut mid = 1.3;
+
+    for &at in &grid {
+        for step in 1..=15 {
+            mid += 0.01;
+            gbp(&features, &[(mid, at - 15 * minute + step * minute)]);
+        }
+        clock
+            .borrow_mut()
+            .advance_time(UnixNanos::from(at + 100 * NANOSECONDS_IN_MILLISECOND), true);
+        decided.push(decide(&probe, &fired(at), &features, every(15), aud()).is_some());
+    }
+
+    assert_eq!(decided, [false, false, false]);
+    assert_eq!(
+        features.event(UnixNanos::default(), UnixNanos::from(NOW + 30 * minute)),
+        Err(NoEvent::Unmarked)
     );
 }

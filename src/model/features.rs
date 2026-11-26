@@ -150,6 +150,10 @@ use crate::{
     },
 };
 
+mod event_times;
+
+pub use event_times::EventTimes;
+
 /// The names of a side model's features: `names`, then the target's `payoff` names.
 #[must_use]
 pub fn side_names(names: &[String], payoff: &[String]) -> Vec<String> {
@@ -212,17 +216,20 @@ pub trait Feature: Indicator {
 /// makes (`FeatureSetBuilder::event_filter`).
 ///
 /// Its answer is a function of the data it read and the grid alone:
-/// - An edge event (a cross, a sweep) keeps the `ts_init` of its last event and answers whether it
-///   lies after `previous` and not after `now`. Live, the filter may have read data past `now`,
-///   by at most the callback's delay, before the decision's callback ran: an event there is the
-///   next decision's, and it replaces an earlier event after `previous`, so the decision at `now`
-///   is no event live while a backtest marks it.
+/// - An edge event (a cross, a sweep, a burst) records the `ts_init` of each of its events in an
+///   `EventTimes`, and answers whether one lies after `previous` and not after `now`. Live, the
+///   filter may have read data past `now`, by at most the callback's delay, before the decision's
+///   callback ran: the events there are the next decision's, and they replace none before them.
+///   Live and a backtest mark the same edge events, except one whose data, stamped by `now`, was
+///   still queued behind the decision's timer: the filter reads it after the callback, and the
+///   next window excludes it.
 /// - A session answers from `now`.
 /// - A regime answers from its own state.
 pub trait EventFilter: Indicator {
     /// Returns whether the decision at `now` is an event, `previous` being the grid point before
-    /// it. It is asked once initialized.
-    fn is_event(&self, previous: UnixNanos, now: UnixNanos) -> bool;
+    /// it. It is asked once initialized, over windows in grid order, so `previous` never moves
+    /// back, and may drop what no window still to come can hold.
+    fn is_event(&mut self, previous: UnixNanos, now: UnixNanos) -> bool;
 
     /// Returns the handler for custom data, or `None` if the filter has none. A filter on a custom
     /// series with no handler is refused at build.
@@ -418,8 +425,8 @@ impl FeatureSet {
     /// Returns an error if the decision is no event, saying why: the event filter is cold, or marks
     /// no event.
     pub fn event(&self, previous: UnixNanos, now: UnixNanos) -> Result<(), NoEvent> {
-        let slots = self.slots.borrow();
-        let Some(filter) = slots.iter().find_map(|slot| match slot {
+        let mut slots = self.slots.borrow_mut();
+        let Some(filter) = slots.iter_mut().find_map(|slot| match slot {
             Slot::EventFilter(_, filter) => Some(filter),
             Slot::Feature(..) | Slot::Custom(..) => None,
         }) else {

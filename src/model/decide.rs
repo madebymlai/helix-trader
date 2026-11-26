@@ -32,6 +32,12 @@
 //! scheduled time, so consecutive decisions ask it over windows that tile the grid. An edge event
 //! between two grid points makes the next decision, at most an interval later, and one at the
 //! previous grid point is the previous decision's. Then the features' values are read.
+//!
+//! The filter is asked at a stale decision too, before its freshness is judged, so an edge filter
+//! drops the events of each window passed while the traded instrument has no data
+//! (`EventTimes::in_window`). `ModelHandle::decide` returns before `decide` while its warmup is
+//! answering or its target's ATR is cold, so the filter keeps those windows' events until the
+//! first decision after.
 
 use std::sync::Arc;
 
@@ -203,8 +209,9 @@ pub fn is_decision(event: &TimeEvent) -> bool {
 /// by however long the callback waited, so its time would leave gaps and overlaps between
 /// consecutive decisions. The scheduled times tile the grid exactly.
 ///
-/// Publishes a row of `features` if, checked in this order, the decision is fresh, it is an event
-/// (`FeatureSet::event`) and every feature is initialized.
+/// Publishes a row of `features` if, judged in this order, the decision is fresh, it is an event
+/// (`FeatureSet::event`) and every feature is initialized. The event filter is asked first, at
+/// every decision, stale or not, so that it drops the events of the windows passed.
 ///
 /// # Panics
 ///
@@ -229,6 +236,7 @@ where
         .ok()
         .and_then(|interval| at.checked_sub(interval))
         .expect("a decision an interval after the epoch");
+    let event = features.event(previous, at);
     let cache = strategy.cache();
     let quoted = cache.quote(&instrument_id).map(|quote| quote.ts_init);
     let traded = cache.trade(&instrument_id).map(|trade| trade.ts_init);
@@ -244,7 +252,7 @@ where
         return None;
     }
 
-    if let Err(no_event) = features.event(previous, at) {
+    if let Err(no_event) = event {
         log::debug!("decision at {at} skipped: {no_event}, the previous grid point at {previous}");
         return None;
     }

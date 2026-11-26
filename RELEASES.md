@@ -6,6 +6,7 @@ Released on TBD (UTC).
 
 - Added `backtest --trades <path>`, writing each position to Parquet with the R its trade was sent at, a model decision's expected R and the entry's bid and ask
 - Added `FeatureSetBuilder::event_filter`: a model strategy's indicator that limits its decisions, dataset rows and trades to the grid ticks it marks as events
+- Added `EventTimes`, the times an edge event filter records, so live keeps an event that a later one read before a late decision callback would replace
 - Added the example strategy `model_cross`: `model_ema` with an event filter, a cross of the simple averages of Nautilus' MACD (`config/model_cross.toml`)
 
 ### Breaking Changes
