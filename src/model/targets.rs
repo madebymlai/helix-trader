@@ -28,7 +28,7 @@
 //!
 //! `AverageTrueRange::new` builds the ATR as the config is validated, so an argument Nautilus
 //! refuses panics at load. The ATR reads Nautilus' bars of the instrument at `bar_interval` (the
-//! decision cadence if omitted). They are built from the first of these
+//! decision cadence if omitted, refused under a minute). They are built from the first of these
 //! (`TargetConfig::atr_bars`):
 //!
 //! - Quote mids.
@@ -187,8 +187,9 @@ pub struct TargetAtrConfig {
     /// Nautilus' ATR arguments. The period counts completed bars of this interval.
     #[serde(flatten)]
     pub args: AtrArgs,
-    /// The fixed length of each ATR bar, or the decision cadence when omitted. A distinct interval
-    /// may not close another bar within the decision timer's margin.
+    /// The fixed length of each ATR bar, or the decision cadence when omitted, which must then be
+    /// a minute or more. A distinct interval may not close another bar within the decision timer's
+    /// margin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bar_interval: Option<SignedDuration>,
 }
@@ -237,6 +238,10 @@ pub const DEFAULT_ATR: AtrArgs = AtrArgs {
     use_previous: None,
     value_floor: None,
 };
+
+/// The shortest decision cadence an ATR without a `bar_interval` takes its bars at. Shorter bars
+/// give an ATR inside the spread, and so a stop the venue rejects.
+const SHORTEST_DECISION_BARS: SignedDuration = SignedDuration::from_mins(1);
 
 const ATR_UNITS: [BarAggregation; 5] = [
     BarAggregation::Day,
@@ -521,6 +526,8 @@ impl TargetConfig {
     /// # Errors
     ///
     /// Returns an error if:
+    /// - The ATR has no `bar_interval` and the decision cadence is under a minute
+    ///   (`SHORTEST_DECISION_BARS`).
     /// - Nautilus builds no bars of the interval (a step must divide the next unit,
     ///   `BarSpecification::new_checked`).
     /// - The strategy reads neither quotes, trades nor bars of the instrument.
@@ -543,6 +550,12 @@ impl TargetConfig {
         anyhow::ensure!(
             cadence.is_positive(),
             "the target's ATR {setting} {cadence:#} is not positive"
+        );
+        anyhow::ensure!(
+            config.bar_interval.is_some() || cadence >= SHORTEST_DECISION_BARS,
+            "the target's ATR would take its bars at the decision cadence {cadence:#}, under \
+             {SHORTEST_DECISION_BARS:#}: bars this short give an ATR inside the spread, so set \
+             its `bar_interval`"
         );
         let nanos = cadence.as_nanos();
         if cadence != default_interval && default_interval.is_positive() {
