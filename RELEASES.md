@@ -23,6 +23,7 @@ Released on TBD (UTC).
 
 ### Documentation Updates
 
+- Added to the model guide the measured cost of a one-second decision grid against one minute, in a train and in a backtest
 - Changed the README's quick-start commands to wrap over several lines, so they read without scrolling
 
 ---
