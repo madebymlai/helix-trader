@@ -19,10 +19,13 @@ Released on TBD (UTC).
 
 - Fixed backtests dropping a fill's P&L when the account cannot book its commission's currency, now refused before the run, naming the pair that converts it
 - Fixed the backtest report listing a converted commission as `Commission outside PnL`; each cost is in the currency its account books it in
+- Fixed a staged file overlapping the catalog failing every later promotion and clean stop; it is set aside as `.feather.refused`
+- Fixed a catalog path not in UTF-8 opening the catalog at its lossy conversion; it is now refused, naming the path
 
 ### Internal Improvements
 
 - Changed `replayed_quotes` to document its batch read as Nautilus' own API rather than a `Temporary` workaround
+- Changed the Nautilus pin to `067cfa2`
 
 ### Documentation Updates
 

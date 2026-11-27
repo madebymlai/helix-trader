@@ -333,11 +333,11 @@ mod tests {
         accounts::MarginAccount,
         enums::{AccountType, OrderType},
         events::AccountState,
-        identifiers::{AccountId, ClientOrderId, Symbol},
+        identifiers::{AccountId, ClientOrderId, Symbol, VenueOrderId},
         instruments::{InstrumentAny, stubs::equity_aapl},
         orders::{
             OrderAny, OrderTestBuilder,
-            stubs::{OrderFilledTestBuilder, TestOrderStubs},
+            stubs::{OrderFilledTestBuilder, TestOrderEventStubs},
         },
         types::{AccountBalance, Price, Quantity},
     };
@@ -378,7 +378,14 @@ mod tests {
             .side(side)
             .quantity(Quantity::from(qty))
             .build();
-        let mut order = TestOrderStubs::make_accepted_order(&order);
+        let mut order = order;
+        order
+            .apply(TestOrderEventStubs::accepted(
+                &order,
+                AccountId::from("SIM-001"),
+                VenueOrderId::from(format!("V-{id}").as_str()),
+            ))
+            .unwrap();
         let fill = OrderFilledTestBuilder::new(&order, instrument)
             .account_id(AccountId::from(
                 format!("{}-001", instrument.id().venue).as_str(),

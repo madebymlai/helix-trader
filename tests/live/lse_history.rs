@@ -148,7 +148,9 @@ async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
     let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
     for id in [GOLD, US10Y] {
         let trades = catalog
-            .trade_ticks(Some(vec![id.to_string()]), None, None)
+            .trades()
+            .identifiers(vec![id.to_string()])
+            .execute()
             .unwrap();
         println!("{id}: {} trades", trades.len());
         assert!(!trades.is_empty(), "{id}: no trades");
@@ -197,7 +199,9 @@ async fn a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_clos
 
     let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
     let bars = catalog
-        .bars(Some(vec![bar_type.clone()]), None, None)
+        .bars()
+        .identifiers(vec![bar_type.clone()])
+        .execute()
         .unwrap();
     println!("{bar_type}: {} bars", bars.len());
     assert!(!bars.is_empty(), "no bars");
@@ -248,7 +252,9 @@ async fn five_minutes_of_the_s_and_p_500_fill_from_lse_as_quotes() {
 
     let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
     let quotes = catalog
-        .quote_ticks(Some(vec![SPX.to_string()]), None, None)
+        .quotes()
+        .identifiers(vec![SPX.to_string()])
+        .execute()
         .unwrap();
     println!("{SPX}: {} quotes", quotes.len());
     assert!(!quotes.is_empty(), "no quotes");
@@ -377,10 +383,14 @@ async fn a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definitio
     assert_eq!(definition.raw_symbol.as_str(), "GCZ6");
     let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
     let trades = catalog
-        .trade_ticks(Some(vec![GCZ26.to_string()]), None, None)
+        .trades()
+        .identifiers(vec![GCZ26.to_string()])
+        .execute()
         .unwrap();
     let quotes = catalog
-        .quote_ticks(Some(vec![GCZ26.to_string()]), None, None)
+        .quotes()
+        .identifiers(vec![GCZ26.to_string()])
+        .execute()
         .unwrap();
     println!("{GCZ26}: {} trades, {} quotes", trades.len(), quotes.len());
     assert!(!trades.is_empty() && !quotes.is_empty());
@@ -445,10 +455,14 @@ async fn a_day_of_an_option_s_trades_and_bars_fills_from_lse_its_definition_from
     assert_eq!(definition.raw_symbol.as_str(), "AAPL  261120C00355000");
     let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
     let trades = catalog
-        .trade_ticks(Some(vec![AAPL_CALL.to_string()]), None, None)
+        .trades()
+        .identifiers(vec![AAPL_CALL.to_string()])
+        .execute()
         .unwrap();
     let bars = catalog
-        .bars(Some(vec![bar_type.clone()]), None, None)
+        .bars()
+        .identifiers(vec![bar_type.clone()])
+        .execute()
         .unwrap();
     println!("{AAPL_CALL}: {} trades, {} bars", trades.len(), bars.len());
     assert!(!trades.is_empty() && !bars.is_empty());

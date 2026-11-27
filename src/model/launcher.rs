@@ -398,7 +398,10 @@ impl RetrainActor {
     ///
     /// Returns an error if the catalog cannot be read.
     fn lacking(&self, at: Timestamp) -> anyhow::Result<Option<String>> {
-        let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
+        let catalog = ParquetDataCatalog::builder()
+            .uri(&self.catalog)
+            .build()
+            .with_context(|| format!("opening the catalog {}", self.catalog.display()))?;
 
         for slice in self.requirements.slices(at, at) {
             let (data_type, identifier) = &slice.series.key();

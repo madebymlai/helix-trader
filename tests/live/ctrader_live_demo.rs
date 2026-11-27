@@ -225,7 +225,9 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     // The quotes after the catalog's own end, up to the warmup's last, are the broker's answer
     // written back, as checking the catalog's end alone would pass on the quotes the node streams.
     let stored: Vec<QuoteTick> = ParquetDataCatalog::new(catalog.path(), None, None, None, None)
-        .query(Some(vec![gold.to_string()]), None, None, None, None, true)
+        .query()
+        .identifiers(vec![gold.to_string()])
+        .execute()
         .unwrap();
     let seen = |q: &QuoteTick| (q.ts_event, q.bid_price, q.ask_price);
     let warmup_last = warmup_quotes.last().unwrap();

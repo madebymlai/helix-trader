@@ -140,14 +140,9 @@ fn the_bars_the_node_builds_are_stored_under_the_external_source() {
     assert!(interrupt_once_promoted(dir.path(), &mut node, 2).success());
     let mut catalog = catalog(dir.path());
     let built: Vec<Bar> = catalog
-        .query(
-            Some(vec![BUILT_BARS.to_string()]),
-            None,
-            None,
-            None,
-            None,
-            true,
-        )
+        .query()
+        .identifiers(vec![BUILT_BARS.to_string()])
+        .execute()
         .unwrap();
     let stored = bar_seconds(dir.path());
     assert!(built.is_empty(), "{} bars under {BUILT_BARS}", built.len());
@@ -240,9 +235,7 @@ fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
     crashed.wait().unwrap();
     let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), 1_000_000);
     assert!(interrupt_once_promoted_from(dir.path(), &mut restarted, 1_000_000).success());
-    let quotes: Vec<QuoteTick> = catalog(dir.path())
-        .query(None, None, None, None, None, true)
-        .unwrap();
+    let quotes: Vec<QuoteTick> = catalog(dir.path()).query().execute().unwrap();
     let (crashed_run, restart): (Vec<&QuoteTick>, Vec<&QuoteTick>) = quotes
         .iter()
         .partition(|q| q.bid_size.as_f64() < 1_000_000.0);
@@ -447,14 +440,13 @@ impl Read {
         let quotes = quote_seqs(root);
         assert_contiguous("quotes", &quotes, 0);
         let mut catalog = catalog(root);
-        let trades: Vec<TradeTick> = catalog.query(None, None, None, None, None, true).unwrap();
+        let trades: Vec<TradeTick> = catalog.query().execute().unwrap();
         let trades: Vec<u64> = trades
             .iter()
             .map(|t| t.trade_id.as_str().parse().unwrap())
             .collect();
         assert_contiguous("trades", &trades, 0);
-        let depths: Vec<OrderBookDepth> =
-            catalog.query(None, None, None, None, None, true).unwrap();
+        let depths: Vec<OrderBookDepth> = catalog.query().execute().unwrap();
         let depths: Vec<u64> = depths.iter().map(|d| d.sequence).collect();
         assert_contiguous("depths", &depths, 0);
         let bars = bar_seconds(root);
@@ -481,9 +473,7 @@ fn catalog(root: &Path) -> ParquetDataCatalog {
 }
 
 fn quote_seqs(root: &Path) -> Vec<u64> {
-    let quotes: Vec<QuoteTick> = catalog(root)
-        .query(None, None, None, None, None, true)
-        .unwrap();
+    let quotes: Vec<QuoteTick> = catalog(root).query().execute().unwrap();
     quotes
         .iter()
         .map(|q| q.bid_size.as_f64() as u64 - 1)
@@ -492,14 +482,9 @@ fn quote_seqs(root: &Path) -> Vec<u64> {
 
 fn bar_seconds(root: &Path) -> Vec<u64> {
     let bars: Vec<Bar> = catalog(root)
-        .query(
-            Some(vec![STORED_BARS.to_string()]),
-            None,
-            None,
-            None,
-            None,
-            true,
-        )
+        .query()
+        .identifiers(vec![STORED_BARS.to_string()])
+        .execute()
         .unwrap();
     bars.iter()
         .map(|b| b.ts_event.as_u64() / 1_000_000_000)
@@ -508,9 +493,9 @@ fn bar_seconds(root: &Path) -> Vec<u64> {
 
 fn streamed_span(root: &Path) -> (Timestamp, Timestamp) {
     let mut catalog = catalog(root);
-    let quotes: Vec<QuoteTick> = catalog.query(None, None, None, None, None, true).unwrap();
-    let trades: Vec<TradeTick> = catalog.query(None, None, None, None, None, true).unwrap();
-    let depths: Vec<OrderBookDepth> = catalog.query(None, None, None, None, None, true).unwrap();
+    let quotes: Vec<QuoteTick> = catalog.query().execute().unwrap();
+    let trades: Vec<TradeTick> = catalog.query().execute().unwrap();
+    let depths: Vec<OrderBookDepth> = catalog.query().execute().unwrap();
     let spans = [
         quotes
             .first()

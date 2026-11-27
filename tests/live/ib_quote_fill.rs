@@ -106,7 +106,9 @@ async fn fill_catalog_fills_an_hour_of_an_idealpro_pairs_quotes() {
         .unwrap();
     assert_eq!(defined.len(), 1, "{EUR_USD} is not defined once");
     let quotes = catalog
-        .quote_ticks(Some(vec![EUR_USD.to_string()]), None, None)
+        .quotes()
+        .identifiers(vec![EUR_USD.to_string()])
+        .execute()
         .unwrap();
     let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
     let mut per_second: BTreeMap<u64, usize> = BTreeMap::new();
@@ -157,7 +159,9 @@ async fn a_quote_fill_across_idealpros_daily_break_holds_quotes_on_both_sides() 
     let (mut catalog, _dir) = filled(&eur_usd_quotes(), start, end).await;
 
     let stamps: Vec<Timestamp> = catalog
-        .quote_ticks(Some(vec![EUR_USD.to_string()]), None, None)
+        .quotes()
+        .identifiers(vec![EUR_USD.to_string()])
+        .execute()
         .unwrap()
         .iter()
         .map(|quote| Timestamp::from(quote.ts_event))
@@ -202,7 +206,9 @@ async fn a_small_bar_fill_across_a_night_holds_bars_of_both_sessions() {
     let (mut catalog, _dir) = filled(&requirements, start, end).await;
 
     let stamps: Vec<Timestamp> = catalog
-        .bars(Some(vec![bar_type.to_string()]), None, None)
+        .bars()
+        .identifiers(vec![bar_type.to_string()])
+        .execute()
         .unwrap()
         .iter()
         .map(|bar| Timestamp::from(bar.ts_event))

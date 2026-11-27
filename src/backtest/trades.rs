@@ -200,9 +200,9 @@ mod tests {
     use nautilus_model::{
         enums::{OrderSide, OrderType},
         events::{OrderEventAny, OrderFilled, order::spec::OrderFilledSpec},
-        identifiers::{ClientOrderId, PositionId, TradeId},
+        identifiers::{AccountId, ClientOrderId, PositionId, TradeId, VenueOrderId},
         instruments::{Instrument, InstrumentAny, stubs::equity_aapl},
-        orders::{OrderAny, OrderTestBuilder, stubs::TestOrderStubs},
+        orders::{OrderAny, OrderTestBuilder, stubs::TestOrderEventStubs},
         types::{Money, Price, Quantity},
     };
     use rstest::rstest;
@@ -230,7 +230,15 @@ mod tests {
             .quantity(Quantity::from(qty))
             .tags(tags.iter().map(|tag| Ustr::from(tag)).collect())
             .build();
-        TestOrderStubs::make_accepted_order(&order)
+        let mut order = order;
+        order
+            .apply(TestOrderEventStubs::accepted(
+                &order,
+                AccountId::from("SIM-001"),
+                VenueOrderId::from(format!("V-{id}").as_str()),
+            ))
+            .unwrap();
+        order
     }
 
     /// Returns a fill of `qty` of `order` into the one position of the tests, as trade `trade`.

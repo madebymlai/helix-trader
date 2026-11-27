@@ -372,7 +372,7 @@ impl Dataset {
     pub fn missing(&self, first: Date, last: Date) -> anyhow::Result<Vec<Date>> {
         let identifier = self.identifier();
         let missing = self
-            .catalog()
+            .catalog()?
             .get_missing_intervals_for_request(
                 UnixNanos::from(start_of(first)?).as_u64(),
                 end_of(last)?.as_u64(),
@@ -423,7 +423,7 @@ impl Dataset {
             }
         }
         let identifier = self.identifier();
-        let mut catalog = self.catalog();
+        let mut catalog = self.catalog()?;
         catalog
             .delete_data_range(
                 &row_type(),
@@ -455,7 +455,7 @@ impl Dataset {
     pub fn read(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<DatasetRow>> {
         let identifier = self.identifier();
         let data = self
-            .catalog()
+            .catalog()?
             .query_custom_data_dynamic(
                 DatasetRow::type_name_static(),
                 Some(std::slice::from_ref(&identifier)),
@@ -557,7 +557,7 @@ impl Dataset {
 
     fn directory(&self) -> anyhow::Result<PathBuf> {
         let directory = self
-            .catalog()
+            .catalog()?
             .make_path_custom_data(DatasetRow::type_name_static(), Some(&self.identifier()))?;
         Ok(self.catalog.join(directory))
     }
@@ -578,8 +578,11 @@ impl Dataset {
         ))
     }
 
-    fn catalog(&self) -> ParquetDataCatalog {
-        ParquetDataCatalog::new(&self.catalog, None, None, None, None)
+    fn catalog(&self) -> anyhow::Result<ParquetDataCatalog> {
+        ParquetDataCatalog::builder()
+            .uri(&self.catalog)
+            .build()
+            .with_context(|| format!("opening the catalog {}", self.catalog.display()))
     }
 }
 

@@ -29,7 +29,7 @@ bon.workspace = true
 bytes = "1"
 # The records of LSE's CME stream, Databento's, at the version Nautilus'
 # Databento decoders take.
-dbn = { version = "0.71", default-features = false }
+dbn = { version = "0.74", default-features = false }
 # The tz database bundled, so that an insider trade is stamped in New York
 # time whatever the host holds.
 jiff = { workspace = true, features = ["tzdb-bundle-always"] }
@@ -46,7 +46,7 @@ nautilus-network.workspace = true
 nautilus-serialization = { workspace = true, features = ["arrow"] }
 # The version Nautilus' persistence reads with, and the codec LSE's exports
 # are compressed with.
-parquet = { version = "59.3", default-features = false, features = [
+parquet = { version = "60.2", default-features = false, features = [
   "arrow",
   "zstd",
 ] }

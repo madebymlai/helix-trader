@@ -12,10 +12,7 @@ use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{BarType, TradeTick},
-    enums::ContinuousFutureAdjustmentType,
-    identifiers::InstrumentId,
-    types::Price,
+    data::BarType, enums::ContinuousFutureAdjustmentType, identifiers::InstrumentId, types::Price,
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use serde_json::{Value, json};
@@ -58,7 +55,10 @@ impl ContinuousBars {
         end: Timestamp,
         mode: ContinuousFutureAdjustmentType,
     ) -> anyhow::Result<Self> {
-        let mut catalog = ParquetDataCatalog::new(catalog, None, None, None, None);
+        let mut catalog = ParquetDataCatalog::builder()
+            .uri(catalog)
+            .build()
+            .with_context(|| format!("opening the catalog {}", catalog.display()))?;
         let mut transitions = BTreeMap::new();
         for bar_type in bar_types {
             let instrument_id = bar_type.instrument_id();
@@ -141,16 +141,14 @@ fn roll_price(
         windows.reverse();
     }
     let id = slice.instrument_id;
+
     for (from, to) in windows {
-        let trades: Vec<TradeTick> = catalog
-            .query(
-                Some(vec![id.to_string()]),
-                Some(UnixNanos::from(from)),
-                Some(UnixNanos::from(to)),
-                None,
-                None,
-                true,
-            )
+        let trades = catalog
+            .trades()
+            .identifiers(vec![id.to_string()])
+            .start(UnixNanos::from(from))
+            .end(UnixNanos::from(to))
+            .execute()
             .with_context(|| format!("reading the trades of {id} over [{from}, {to}]"))?;
         let trade = if last { trades.last() } else { trades.first() };
         if let Some(trade) = trade {
@@ -166,7 +164,9 @@ fn roll_price(
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{enums::AggressorSide, identifiers::TradeId, types::Quantity};
+    use nautilus_model::{
+        data::TradeTick, enums::AggressorSide, identifiers::TradeId, types::Quantity,
+    };
     use rstest::rstest;
 
     use super::*;

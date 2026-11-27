@@ -10,12 +10,7 @@ feature-depth = 1
 
 [advisories]
 unused-ignored-advisory = "deny"
-# Nautilus' assessments (its deny.toml): the zstd 0.13 that Arrow IPC and
-# Parquet alone use, which Nautilus pins until Arrow moves to 0.14
 ignore = [
-  { id = "RUSTSEC-2026-0391", reason = "zstd borrowed streaming contexts are not used by Arrow IPC or Parquet" },
-  { id = "RUSTSEC-2026-0398", reason = "zstd-safe seekable feature is disabled" },
-  { id = "RUSTSEC-2026-0403", reason = "zstd-safe streaming decompression is not used by Arrow IPC or Parquet; bulk API is unaffected" },
   # Unmaintained, transitive through Nautilus' persistence stack (Arrow,
   # DataFusion, object_store), which none of helix's own code chooses; an
   # unused ignore fails the check once they move off them
@@ -115,10 +110,6 @@ skip = [
 
   # TLS roots - version fragmentation in TLS ecosystem
   { crate = "webpki-roots:<1" },
-
-  # Arrow and Parquet retain zstd 0.13 while compression-codecs and Databento use 0.14
-  { crate = "zstd:=0.13.3" },
-  { crate = "zstd-safe:=7.3.0" },
 ]
 
 [sources]

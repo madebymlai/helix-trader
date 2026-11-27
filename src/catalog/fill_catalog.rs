@@ -338,7 +338,9 @@ mod tests {
 
     fn stored_quotes(catalog: &mut ParquetDataCatalog, id: InstrumentId) -> Vec<u64> {
         catalog
-            .quote_ticks(Some(vec![id.to_string()]), None, None)
+            .quotes()
+            .identifiers(vec![id.to_string()])
+            .execute()
             .unwrap()
             .iter()
             .map(|q| q.ts_init.as_u64())
@@ -478,7 +480,9 @@ mod tests {
         r.unwrap();
 
         let bids: Vec<String> = catalog
-            .quote_ticks(Some(vec![es_id().to_string()]), None, None)
+            .quotes()
+            .identifiers(vec![es_id().to_string()])
+            .execute()
             .unwrap()
             .iter()
             .map(|quote| quote.bid_price.to_string())
@@ -900,7 +904,9 @@ mod tests {
 
     fn stored_bars(catalog: &mut ParquetDataCatalog) -> Vec<u64> {
         catalog
-            .bars(Some(vec![BARS.to_string()]), None, None)
+            .bars()
+            .identifiers(vec![BARS.to_string()])
+            .execute()
             .unwrap()
             .iter()
             .map(|bar| bar.ts_init.as_u64())
@@ -1066,14 +1072,18 @@ mod tests {
             ]
         );
         let trades: Vec<u64> = catalog
-            .trade_ticks(Some(vec![es.clone()]), None, None)
+            .trades()
+            .identifiers(vec![es.clone()])
+            .execute()
             .unwrap()
             .iter()
             .map(|trade| trade.ts_init.as_u64())
             .collect();
         assert_eq!(trades, [10, 60, 150]);
         let depths: Vec<u64> = catalog
-            .order_book_depths(Some(vec![es]), None, None)
+            .order_book_depths()
+            .identifiers(vec![es])
+            .execute()
             .unwrap()
             .iter()
             .map(|depth| depth.ts_init.as_u64())

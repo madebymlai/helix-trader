@@ -11,8 +11,9 @@ use std::fmt::Display;
 
 use anyhow::Context;
 use dbn::{
-    HasRType, MboMsg, Mbp1Msg, Mbp10Msg,
+    MboMsg, Mbp1Msg, Mbp10Msg,
     decode::{DecodeRecord, dbn::RecordDecoder},
+    v3::HasRType,
 };
 use serde::{Deserialize, Serialize};
 
