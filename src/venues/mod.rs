@@ -698,7 +698,10 @@ pub async fn fill_history(
     // A rolled root's series is filled contract by contract, each over its slice
     let slices = requirements.slices(start, end);
     let ib_slices = of_source(&slices, HistorySource::Ib);
-    let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
+    let mut catalog = ParquetDataCatalog::builder()
+        .uri(catalog_dir)
+        .build()
+        .with_context(|| format!("opening the catalog {}", catalog_dir.display()))?;
     ib::check_held(
         &catalog,
         &ib_slices,
@@ -1386,23 +1389,15 @@ mod tests {
         assert!(format!("{err:#}").contains(FILL_END), "{err:#}");
     }
 
-    /// A non-UTF-8 catalog path fails the fill at its first step, before IB would refuse the end.
+    /// A non-UTF-8 catalog path fails the fill as Nautilus opens the catalog, before IB would
+    /// refuse the end.
     #[tokio::test]
-    async fn the_node_s_fill_runs_before_ib_connects() {
+    async fn a_catalog_path_not_in_utf8_fails_the_fill_before_ib_connects() {
         let dir = tempfile::tempdir().unwrap();
         let catalog_dir = dir.path().join(OsStr::from_bytes(b"not-utf8-\xFF"));
 
-        // The catalog opens its path after converting it to UTF-8
-        std::fs::create_dir(catalog_dir.to_string_lossy().as_ref()).unwrap();
-        let catalog = ParquetDataCatalog::new(&catalog_dir, None, None, None, None);
-        store_okx_definition(&catalog, SWAP);
-        let requirements = ticks(&[
-            (NautilusDataType::TradeTick, SWAP),
-            (NautilusDataType::TradeTick, "SXR8.IBIS"),
-        ]);
-
         let err = fill_history(
-            &requirements,
+            &ticks(&[(NautilusDataType::TradeTick, "SXR8.IBIS")]),
             at(FILL_START),
             at(FILL_END),
             &history_args(),

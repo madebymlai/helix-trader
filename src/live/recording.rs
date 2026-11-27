@@ -145,7 +145,8 @@ impl Recording {
 /// # Errors
 ///
 /// Returns an error if:
-/// - The staged files cannot be promoted, because the catalog already holds rows over them.
+/// - A staged file cannot be promoted, because the catalog already holds rows over it. Nautilus
+///   sets it aside as `.feather.refused`, so the next start skips it.
 /// - The writer cannot be reopened.
 pub(super) fn promote_staged(node: &mut LiveNode) -> anyhow::Result<()> {
     let kernel = node.kernel_mut();

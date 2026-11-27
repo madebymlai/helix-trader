@@ -18,6 +18,11 @@
 //! have none. Each client answers every request, and a failed request answers in its response
 //! envelope. The actor records the first failure and stops the node, and `run` returns the
 //! failure. See `README.md`, "Fill paths".
+//!
+//! Once a contract's definition is answered, the actor asks it again with no window. Nautilus
+//! applies a definition asked over a window to no cache, handing it back alone
+//! (`docs/developer_guide/adapters.md`, "Instrument definition updates"), and the clients answering
+//! the contract's series read it from the node's cache. The catalog holds it by then and answers.
 
 use std::{cell::RefCell, collections::VecDeque, fmt::Display, path::Path, rc::Rc};
 
@@ -287,6 +292,12 @@ struct Asked {
 enum Request {
     Series(FillRequest),
     Custom(CustomFillRequest),
+    /// The definition of a contract, asked with no window once its definition request is answered,
+    /// so that Nautilus applies it to the node's cache for the requests after it. A definition
+    /// asked over a window is only handed back, leaving the cache untouched
+    /// (`docs/developer_guide/adapters.md`, "Instrument definition updates"). The catalog holds
+    /// it by then and answers.
+    Load(InstrumentId),
 }
 
 impl Display for Request {
@@ -294,6 +305,7 @@ impl Display for Request {
         match self {
             Self::Series(request) => Display::fmt(request, f),
             Self::Custom(request) => Display::fmt(request, f),
+            Self::Load(id) => write!(f, "the definition of {id} for the node's cache"),
         }
     }
 }
@@ -354,7 +366,7 @@ impl NodeFill {
             .iter()
             .filter_map(|asked| match asked.request {
                 Request::Series(request) => Some((request, asked.period)),
-                Request::Custom(_) => None,
+                Request::Custom(_) | Request::Load(_) => None,
             })
             .collect()
     }
@@ -450,7 +462,7 @@ struct Outcome {
 struct FillActor {
     core: DataActorCore,
     requests: VecDeque<Asked>,
-    pending: Option<(UUID4, Request)>,
+    pending: Option<(UUID4, Asked)>,
     rows: usize,
     outcome: Rc<RefCell<Outcome>>,
 }
@@ -462,11 +474,16 @@ impl FillActor {
             self.shutdown_system(Some("every fill request answered".to_string()));
             return;
         };
+        self.ask(asked);
+    }
+
+    fn ask(&mut self, asked: Asked) {
         let request = asked.request.clone();
         log::info!("Asking {} for {request}", asked.client);
         self.rows = 0;
-        match self.issue(asked) {
-            Ok(id) => self.pending = Some((id, request)),
+
+        match self.issue(asked.clone()) {
+            Ok(id) => self.pending = Some((id, asked)),
             Err(e) => self.fail(format!("asking for {request}: {e:#}")),
         }
     }
@@ -488,28 +505,23 @@ impl FillActor {
             client,
             period,
         } = asked;
-        let (from, to) = match &request {
-            Request::Series(request) => (request.from, request.to),
-            Request::Custom(request) => (request.from, request.to),
-        };
-        let mut params = vec![("update_catalog".to_string(), json!(true))];
-        if let Some(period) = period {
-            params.extend(time_range::params(from, to, period));
-        }
-        let params = Some(Params::new(params.into_iter().collect()));
-        let data = match request {
-            Request::Series(request) => request.data,
+        let FillRequest { data, from, to } = match request {
+            Request::Series(request) => request,
             Request::Custom(request) => {
                 return self.request_data(
                     request.data_type,
                     client,
-                    Some(from),
-                    Some(to),
+                    Some(request.from),
+                    Some(request.to),
                     None,
-                    params,
+                    Some(written_back(request.from, request.to, None)),
                 );
             }
+            Request::Load(id) => {
+                return self.request_instrument(id, None, None, Some(client), None);
+            }
         };
+        let params = Some(written_back(from, to, period));
         let (from, to, client) = (Some(from), Some(to), Some(client));
 
         match data {
@@ -558,13 +570,13 @@ impl DataActor for FillActor {
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        let Some((id, request)) = &self.pending else {
+        let Some((id, asked)) = &self.pending else {
             return Ok(());
         };
         if response.correlation_id() != id {
             return Ok(());
         }
-        let request = request.to_string();
+        let request = asked.request.to_string();
         if let Some(reason) = response.failure_reason() {
             self.fail(format!("{request} failed: {reason}"));
             return Ok(());
@@ -587,14 +599,37 @@ impl DataActor for FillActor {
         if !response.completed() {
             return Ok(());
         }
-        self.pending = None;
+        let (_, asked) = self.pending.take().expect("the request answered");
+        if let Request::Load(_) = asked.request {
+            self.next();
+            return Ok(());
+        }
         log::info!("{request}: {} rows", self.rows);
         self.outcome.borrow_mut().answered += 1;
-        self.next();
+
+        match asked.request {
+            Request::Series(FillRequest {
+                data: FillData::Instrument(id),
+                ..
+            }) => self.ask(Asked {
+                request: Request::Load(id),
+                ..asked
+            }),
+            _ => self.next(),
+        }
         Ok(())
     }
 }
 nautilus_actor!(FillActor);
+
+/// The params of a request over `[from, to]` with `update_catalog`, in windows of `period` if any.
+fn written_back(from: Timestamp, to: Timestamp, period: Option<SignedDuration>) -> Params {
+    let mut params = vec![("update_catalog".to_string(), json!(true))];
+    if let Some(period) = period {
+        params.extend(time_range::params(from, to, period));
+    }
+    Params::new(params.into_iter().collect())
+}
 
 #[cfg(test)]
 mod tests {

@@ -263,7 +263,10 @@ fn data_config(
 ///   none of the series, or part of it, and fill-catalog, which reads the catalog by identifier,
 ///   would find nothing missing.
 pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
-    let mut catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
+    let mut catalog = ParquetDataCatalog::builder()
+        .uri(&backtest.catalog)
+        .build()
+        .with_context(|| format!("opening the catalog {}", backtest.catalog.display()))?;
     let mut data = Vec::new();
     let custom = backtest
         .requirements()

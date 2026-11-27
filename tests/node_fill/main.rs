@@ -568,7 +568,9 @@ fn depth_lacking(dir: &Path, (from, to): (&str, &str)) -> Vec<(u64, u64)> {
 fn stored_book(dir: &Path) -> Vec<u64> {
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog
-        .order_book_depths(Some(vec![GCZ26.to_string()]), None, None)
+        .order_book_depths()
+        .identifiers(vec![GCZ26.to_string()])
+        .execute()
         .unwrap()
         .iter()
         .map(|d| d.ts_init.as_u64())
@@ -948,7 +950,9 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
     );
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     let stored: Vec<OrderBookDelta> = catalog
-        .order_book_deltas(Some(vec![GCZ26.to_string()]), None, None)
+        .order_book_deltas()
+        .identifiers(vec![GCZ26.to_string()])
+        .execute()
         .unwrap();
     assert_eq!(stored, [delta("2025-10-20T10:00:00Z")]);
 }
@@ -1018,11 +1022,15 @@ fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_serie
     );
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     let stored_bars = catalog
-        .bars(Some(vec![BARS.to_string()]), None, None)
+        .bars()
+        .identifiers(vec![BARS.to_string()])
+        .execute()
         .unwrap();
     assert_eq!(stored_bars, [bar("2025-10-17T10:00:00Z")]);
     let stored_funding = catalog
-        .funding_rates(Some(vec![GCZ26.to_string()]), None, None)
+        .funding_rates()
+        .identifiers(vec![GCZ26.to_string()])
+        .execute()
         .unwrap();
     assert_eq!(stored_funding, [funding("2025-10-17T08:00:00Z")]);
     for (data_type, identifier) in [

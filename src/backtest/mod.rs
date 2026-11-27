@@ -217,7 +217,10 @@ impl Backtest {
     /// Returns an error if what the catalog stores cannot be read.
     fn series(&self) -> anyhow::Result<Vec<SeriesSlice>> {
         let (from, to) = (self.start, self.end);
-        let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
+        let catalog = ParquetDataCatalog::builder()
+            .uri(&self.catalog)
+            .build()
+            .with_context(|| format!("opening the catalog {}", self.catalog.display()))?;
         let stored = |series: &SeriesSlice| {
             let (data_type, identifier) = &series.series.key();
             catalog

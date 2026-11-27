@@ -351,7 +351,9 @@ mod tests {
 
     fn stored_trades(dir: &Path) -> Vec<TradeTick> {
         ParquetDataCatalog::new(dir, None, None, None, None)
-            .trade_ticks(Some(vec![GOLD_FUTURES.to_string()]), None, None)
+            .trades()
+            .identifiers(vec![GOLD_FUTURES.to_string()])
+            .execute()
             .unwrap()
     }
 
@@ -420,7 +422,9 @@ mod tests {
         .unwrap();
 
         let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
-            .bars(Some(vec![bars]), None, None)
+            .bars()
+            .identifiers(vec![bars])
+            .execute()
             .unwrap();
         let rows: Vec<_> = stored
             .iter()
@@ -539,7 +543,9 @@ mod tests {
         .unwrap();
 
         let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
-            .trade_ticks(Some(vec![id.to_string()]), None, None)
+            .trades()
+            .identifiers(vec![id.to_string()])
+            .execute()
             .unwrap();
         let at = |time| UnixNanos::from(on_the_12th(time));
         assert_eq!(stored.len(), count);
@@ -626,7 +632,9 @@ mod tests {
         .unwrap();
 
         let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
-            .bars(Some(vec![bars]), None, None)
+            .bars()
+            .identifiers(vec![bars])
+            .execute()
             .unwrap();
         let row = |b: &Bar| (b.ts_event, b.open, b.high, b.low, b.close, b.volume);
         let expected = |(close, [open, high, low, last]): BarRow| {
@@ -682,7 +690,9 @@ mod tests {
         .unwrap();
 
         let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
-            .quote_ticks(Some(vec![SPX.to_string()]), None, None)
+            .quotes()
+            .identifiers(vec![SPX.to_string()])
+            .execute()
             .unwrap();
         let rows: Vec<_> = stored
             .iter()
@@ -1332,7 +1342,9 @@ mod tests {
             )
         );
         let trades = catalog
-            .trade_ticks(Some(vec![GCZ26.to_string()]), None, None)
+            .trades()
+            .identifiers(vec![GCZ26.to_string()])
+            .execute()
             .unwrap();
         assert_eq!(trades.len(), 38);
         assert_eq!(
@@ -1343,7 +1355,9 @@ mod tests {
             )
         );
         let quotes = catalog
-            .quote_ticks(Some(vec![GCZ26.to_string()]), None, None)
+            .quotes()
+            .identifiers(vec![GCZ26.to_string()])
+            .execute()
             .unwrap();
         assert_eq!(quotes.len(), 636);
         let asked_of_databento: Vec<_> = databento
@@ -1499,7 +1513,9 @@ mod tests {
 
         let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let depths = catalog
-            .order_book_depths(Some(vec![GCZ26.to_string()]), None, None)
+            .order_book_depths()
+            .identifiers(vec![GCZ26.to_string()])
+            .execute()
             .unwrap();
         assert_eq!(depths.len(), 4);
         assert_eq!(
@@ -1507,7 +1523,9 @@ mod tests {
             (Price::from("3908.10"), Price::from("3908.30"))
         );
         let deltas = catalog
-            .order_book_deltas(Some(vec![GCZ26.to_string()]), None, None)
+            .order_book_deltas()
+            .identifiers(vec![GCZ26.to_string()])
+            .execute()
             .unwrap();
         assert_eq!(deltas.len(), 4);
         assert!(RecordFlag::F_LAST.matches(deltas[3].flags));
@@ -1585,7 +1603,9 @@ mod tests {
             )
         );
         let trades = catalog
-            .trade_ticks(Some(vec![AAPL_CALL.to_string()]), None, None)
+            .trades()
+            .identifiers(vec![AAPL_CALL.to_string()])
+            .execute()
             .unwrap();
         assert_eq!(trades.len(), 23);
         assert_eq!(
@@ -1596,7 +1616,11 @@ mod tests {
                 Quantity::from(1)
             )
         );
-        let bars = catalog.bars(Some(vec![bar_type]), None, None).unwrap();
+        let bars = catalog
+            .bars()
+            .identifiers(vec![bar_type])
+            .execute()
+            .unwrap();
         let closes: Vec<_> = bars.iter().map(|bar| (bar.ts_event, bar.close)).collect();
         assert_eq!(
             closes,
@@ -1720,7 +1744,9 @@ mod tests {
             ("NVDA", 2, Price::from("0.01"), Some(Quantity::from(100)))
         );
         let trades = catalog
-            .trade_ticks(Some(vec![NVDA.to_string()]), None, None)
+            .trades()
+            .identifiers(vec![NVDA.to_string()])
+            .execute()
             .unwrap();
         assert_eq!(
             trades
@@ -1736,11 +1762,15 @@ mod tests {
             .map(|(price, size)| (Price::from(price), Quantity::from(size)))
         );
         let quotes = catalog
-            .quote_ticks(Some(vec![NVDA.to_string()]), None, None)
+            .quotes()
+            .identifiers(vec![NVDA.to_string()])
+            .execute()
             .unwrap();
         assert_eq!(quotes.len(), 4);
         let depths = catalog
-            .order_book_depths(Some(vec![NVDA.to_string()]), None, None)
+            .order_book_depths()
+            .identifiers(vec![NVDA.to_string()])
+            .execute()
             .unwrap();
         assert_eq!(depths.len(), 4);
         assert_eq!(
@@ -1748,7 +1778,9 @@ mod tests {
             (Price::from("211.15"), Price::from("211.17"))
         );
         let deltas = catalog
-            .order_book_deltas(Some(vec![NVDA.to_string()]), None, None)
+            .order_book_deltas()
+            .identifiers(vec![NVDA.to_string()])
+            .execute()
             .unwrap();
         assert_eq!(deltas.len(), 4);
         assert!(RecordFlag::F_LAST.matches(deltas[3].flags));

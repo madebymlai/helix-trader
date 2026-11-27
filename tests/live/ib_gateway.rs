@@ -164,7 +164,9 @@ async fn fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars() {
     let [bids, asks] = [bid, ask].map(|bar_type| {
         let identifier = bar_type.to_string();
         let bars = catalog
-            .bars(Some(vec![identifier.clone()]), None, None)
+            .bars()
+            .identifiers(vec![identifier.clone()])
+            .execute()
             .unwrap();
         println!("{identifier}: {} bars", bars.len());
         assert!(!bars.is_empty(), "{identifier}: no bars");

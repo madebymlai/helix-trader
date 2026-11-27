@@ -27,41 +27,41 @@ license = "Apache-2.0"
 [workspace.dependencies]
 anyhow = "1"
 # The arrow schema of Nautilus' custom data macros, and of LSE's exports.
-arrow = { version = "59.3", default-features = false }
+arrow = { version = "60.2", default-features = false }
 async-trait = "0.1"
 bon = "=3.9.3"
 ctrader = { path = "crates/ctrader" }
 jiff = { version = "0.2", features = ["serde"] }
 log = "0.4"
 lse = { path = "crates/lse" }
-nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-core = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-data = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
+nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-core = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-data = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
 # Keep Nautilus' 64-bit prices, as for nautilus-okx.
-nautilus-databento = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62", default-features = false }
-nautilus-execution = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-indicators = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-infrastructure = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-interactive-brokers = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62", default-features = false }
-nautilus-live = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-network = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
+nautilus-databento = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6", default-features = false }
+nautilus-execution = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-indicators = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-infrastructure = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-interactive-brokers = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6", default-features = false }
+nautilus-live = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-network = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
 # Keep Nautilus' 64-bit prices: the crate's default turns on 128-bit prices
 # (high-precision) for the whole build.
-nautilus-okx = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62", default-features = false }
-nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
-nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
+nautilus-okx = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6", default-features = false }
+nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
+nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
 # Nautilus' testers (`DataTester`), without its datasets.
-nautilus-testkit = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62", default-features = false, features = [
+nautilus-testkit = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6", default-features = false, features = [
   "testers",
 ] }
-nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "2d844b3598a117e2677415934e0914c4b409aa62" }
+nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "067cfa2022336651a674e0d28a08ab4dd6e64cc6" }
 # Fixtures and cases for every crate's tests (`#[rstest]`), as Nautilus'.
-rstest = { version = "0.28.0", default-features = false }
+rstest = { version = "0.29.0", default-features = false }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 # Floats read back to the bit: the probes of a stored model.
@@ -361,7 +361,7 @@ nautilus-serialization = { workspace = true, features = [
 nautilus-trading.workspace = true
 # The path of an object in a store, which Nautilus' Parquet writer takes, for
 # a backtest's trades file. Already in the tree, Nautilus' persistence's.
-object_store = { version = "0.13", default-features = false }
+object_store = { version = "0.14", default-features = false }
 # PerpetualBooster: the 3.0 release candidate, the only version that builds
 # on stable Rust.
 perpetual = "=3.0.0-rc.2"

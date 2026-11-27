@@ -37,8 +37,8 @@ pub(crate) fn catalog_config(dir: &Path) -> anyhow::Result<DataCatalogConfig> {
 
 /// Returns the instruments of `instrument_ids`, in order, as the catalog at `catalog` defines them.
 ///
-/// Opens the catalog with `ParquetDataCatalog::from_uri`. It errors on a missing directory, where
-/// `new` panics.
+/// Opens the catalog with `ParquetDataCatalog::builder`. It errors on a missing directory or a path
+/// not in UTF-8, where `new` panics.
 ///
 /// # Errors
 ///
@@ -50,7 +50,9 @@ pub fn instruments(
     instrument_ids: &[InstrumentId],
 ) -> anyhow::Result<Vec<InstrumentAny>> {
     let ids: Vec<String> = instrument_ids.iter().map(ToString::to_string).collect();
-    let defined = ParquetDataCatalog::from_uri(&catalog.to_string_lossy(), None, None, None, None)
+    let defined = ParquetDataCatalog::builder()
+        .uri(catalog)
+        .build()
         .with_context(|| format!("opening the catalog {}", catalog.display()))?
         .instruments(Some(&ids), None, None)
         .with_context(|| format!("reading {} from the catalog", ids.join(", ")))?;

@@ -1010,7 +1010,9 @@ mod tests {
 
         let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let stored = catalog
-            .quote_ticks(Some(vec![XAUUSD.to_string()]), None, None)
+            .quotes()
+            .identifiers(vec![XAUUSD.to_string()])
+            .execute()
             .unwrap();
         let written = [&first[..], &second[2..]].concat();
         assert_eq!(prices(&stored), prices(&written));

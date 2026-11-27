@@ -77,7 +77,9 @@ async fn the_demo_account_loads_gold_and_euro_dollar_as_cfds() {
 
 fn stored(catalog: &mut ParquetDataCatalog, instrument_id: InstrumentId) -> Vec<QuoteTick> {
     catalog
-        .quote_ticks(Some(vec![instrument_id.to_string()]), None, None)
+        .quotes()
+        .identifiers(vec![instrument_id.to_string()])
+        .execute()
         .unwrap()
 }
 
