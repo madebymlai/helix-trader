@@ -12,9 +12,6 @@
 //! cargo test --test backtest backtest_warmup::
 //! ```
 
-#[path = "../common/mod.rs"]
-mod common;
-
 mod backtest_bars;
 mod backtest_book_deltas_and_custom_data;
 mod backtest_catalog_custom_series;
@@ -63,3 +60,5 @@ mod backtest_two_venues;
 mod backtest_warmup;
 mod backtest_without_session;
 mod cli;
+#[path = "../common/mod.rs"]
+mod common;

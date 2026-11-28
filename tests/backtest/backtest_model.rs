@@ -181,6 +181,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     predictions.sort_unstable();
     predictions.dedup();
     assert!(predictions.len() > 1, "{probes:?}");
+
     for probe in probes {
         // The decision whose mid is the probe's first feature
         let row = record
@@ -269,6 +270,7 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     let record = trade(&catalog, holdout, t, &config, models.path());
 
     let mut read = vec![];
+
     for (time, decision) in &record.trades {
         let Some(row) = rows.iter().find(|row| row.ts_event == *time) else {
             continue;

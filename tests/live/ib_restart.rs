@@ -299,8 +299,10 @@ async fn sell_at_market(account: &IbAccount, quantity: f64) {
     for update in updates.collect_for(Duration::from_secs(10)).await {
         println!("IB order update: {update:?}");
     }
+
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_secs(2)).await;
+
         if ib_state(&client, account).await.0 == 0.0 {
             return;
         }
@@ -445,6 +447,7 @@ impl Probe {
             positions.len(),
             orders.len()
         ));
+
         for position in positions {
             self.note(format!(
                 "  position {} strategy={} {:?} qty={} avg_px_open={} orders={:?}",
@@ -456,6 +459,7 @@ impl Probe {
                 position.client_order_ids(),
             ));
         }
+
         for order in orders {
             self.note(format!(
                 "  order {} strategy={} {:?} {:?} {} status={:?}",
@@ -519,6 +523,7 @@ impl Probe {
                     .open_positions()
                     .try_into()
                     .map_err(|positions| anyhow::anyhow!("one position expected: {positions:?}"))?;
+
                 if position.quantity != Quantity::from(2) {
                     return Ok(());
                 }
@@ -545,6 +550,7 @@ impl Probe {
             self.fail(format!("{} positions open, one expected", positions.len()));
             return Ok(());
         };
+
         if Some(position.id.to_string()) != saved.position_id
             || Some(position.quantity.to_string()) != saved.quantity
             || Some(position.avg_px_open) != saved.avg_px_open
@@ -556,6 +562,7 @@ impl Probe {
             .iter()
             .map(ToString::to_string)
             .collect();
+
         if orders != saved.orders {
             self.fail(format!(
                 "the position's orders {orders:?}, not open's {:?}",
@@ -631,11 +638,13 @@ impl Probe {
             self.note_state("flat");
             return self.finish();
         }
+
         if self.acted {
             return Ok(());
         }
         self.acted = true;
         self.note_state("flattening");
+
         for order in self.live_orders() {
             self.cancel_order(order.client_order_id(), None, None)?;
         }
@@ -684,6 +693,7 @@ impl DataActor for Probe {
         if self.report.done {
             return Ok(());
         }
+
         match self.step {
             Step::Open => self.open(),
             Step::Restart if !self.acted => {

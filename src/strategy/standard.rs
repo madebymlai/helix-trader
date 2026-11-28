@@ -147,6 +147,7 @@ impl<P: Part> StandardConfig<P> {
                 ),
             );
         }
+
         for series in read.iter().filter(|series| !listed.contains(series)) {
             errors.push(ConfigError::invalid_value(
                 "data.series",
@@ -254,6 +255,7 @@ impl<P: Part> StandardConfig<P> {
             .chain(self.trade.quotes_unpriced_by(&self.data))
             .collect();
         let mut bar_types: Vec<BarType> = self.data.bar_types().collect();
+
         for series in self.trade.conversions.series() {
             match series {
                 Series::Bars(bars) if !bar_types.contains(&bars) => bar_types.push(bars),
@@ -355,6 +357,7 @@ impl DataConfig {
             !self.series.is_empty(),
             ConfigError::empty_field("data.series"),
         );
+
         for (i, series) in self.repeats() {
             errors.push(ConfigError::duplicate(
                 format!("data.series[{i}]"),
@@ -397,6 +400,7 @@ impl DataConfig {
                     )),
                 ));
             }
+
             if get_arrow_schema(custom.type_name()).is_none() {
                 errors.push(ConfigError::invalid_value(
                     field.clone(),
@@ -408,6 +412,7 @@ impl DataConfig {
                     ),
                 ));
             }
+
             if let Err(e) = venues::serves_custom(custom) {
                 errors.push(ConfigError::invalid_value(field, format!("{e:#}")));
             }
@@ -451,6 +456,7 @@ impl DataConfig {
                 self.session.is_none() || !bar_type.is_composite(),
                 ConfigError::mutually_exclusive_fields(["data.session".to_string(), field("from")]),
             );
+
             if bar_type.is_composite() {
                 let source = bar_type.composite();
                 errors.check(
@@ -484,6 +490,7 @@ impl DataConfig {
             self.warmup.is_positive(),
             ConfigError::range("data.warmup", "must be positive"),
         );
+
         if let Some(session) = &self.session {
             errors.collect(
                 session
@@ -600,6 +607,7 @@ impl TryFrom<SeriesFields> for Series {
             bar_spec,
             from,
         } = fields;
+
         if let Ok(NautilusDataType::Custom { type_name }) = NautilusDataType::from_str(&data) {
             let Some(identifier) = identifier else {
                 return Err(match instrument_id {
@@ -612,6 +620,7 @@ impl TryFrom<SeriesFields> for Series {
                     ),
                 });
             };
+
             if instrument_id.is_some() || bar_spec.is_some() || from.is_some() {
                 return Err(format!(
                     "the {data} under the identifier {identifier:?} is keyed by its identifier: \
@@ -622,6 +631,7 @@ impl TryFrom<SeriesFields> for Series {
                 .map(Self::Custom)
                 .map_err(|e| format!("{e:#}"));
         }
+
         if identifier.is_some() || metadata.is_some() {
             return Err(format!(
                 "identifier and metadata are of a custom series, not of the {data}"
@@ -630,6 +640,7 @@ impl TryFrom<SeriesFields> for Series {
         let Some(instrument_id) = instrument_id else {
             return Err(format!("the {data} needs an instrument_id"));
         };
+
         if NautilusDataType::from_str(&data).ok() != Some(NautilusDataType::Bar) {
             if bar_spec.is_some() || from.is_some() {
                 return Err(format!(
@@ -724,6 +735,7 @@ impl TradeConfig {
                 format!("lists {listed} instruments, the strategy trades {count}"),
             ),
         );
+
         for (i, traded) in self.instruments.iter().enumerate() {
             let instrument_id = traded.instrument_id;
             // A root rolls at any time, so its first roll after the epoch names one of its
@@ -837,6 +849,7 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
         let (mut base, mut data, mut indicators, mut trade) = (None, None, None, None);
         let mut model = None;
         let mut own = toml::Table::new();
+
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "base" => base = Some(map.next_value()?),
@@ -883,6 +896,7 @@ fn claiming(mut base: StrategyConfig, trade: &TradeConfig) -> StrategyConfig {
         .external_order_instrument_ids
         .take()
         .unwrap_or_default();
+
     for instrument_id in trade.instrument_ids() {
         if !claimed.contains(&instrument_id) {
             claimed.push(instrument_id);
@@ -990,6 +1004,7 @@ mod tests {
         let err = err
             .downcast_ref::<ConfigError>()
             .unwrap_or_else(|| panic!("not a config error: {err}"));
+
         match err {
             ConfigError::Multiple { errors } => errors.clone(),
             err => vec![err.clone()],
@@ -1468,6 +1483,7 @@ mod tests {
             fields_of(&err),
             ["data.series[3]", "data.series[4]", "data.warmup", "spread"]
         );
+
         for err in &errors_of(&err)[..2] {
             let ConfigError::Duplicate {
                 value: Some(value), ..

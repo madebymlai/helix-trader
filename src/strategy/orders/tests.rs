@@ -101,6 +101,7 @@ fn cache() -> Rc<RefCell<Cache>> {
 
 fn cache_holding(balance: &str) -> Rc<RefCell<Cache>> {
     let cache = Rc::new(RefCell::new(Cache::default()));
+
     for aud in [aud(InstrumentId::from(AUD)), ib_aud()] {
         let account = AccountId::from(format!("{}-001", aud.id().venue).as_str());
         let mut cache = cache.borrow_mut();
@@ -234,6 +235,7 @@ fn accept(probe: &Probe, order: &str) {
     let cache = probe.cache_rc();
     let order = cache.borrow().order_owned(&id(order)).unwrap();
     let account = AccountId::from("SIM-001");
+
     for event in [
         TestOrderEventStubs::submitted(&order, account),
         TestOrderEventStubs::accepted(
@@ -292,6 +294,7 @@ fn fill_of(
             &event.strategy_id,
         )
         .unwrap();
+
     match cache.position(&position).map(|p| p.is_open()) {
         Some(true) => {
             cache.update_position_from_fill(position, event).unwrap();

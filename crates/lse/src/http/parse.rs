@@ -59,6 +59,7 @@ pub fn parse_trade_slice(
         .build()?;
     let mut trades = Vec::new();
     let mut ids = TradeIds::default();
+
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
         let times = times(&batch)?;
@@ -114,6 +115,7 @@ pub fn parse_index_quotes(
         .build()?;
     let none = Quantity::zero(size_precision);
     let mut quotes = Vec::new();
+
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
         let times = times(&batch)?;
@@ -163,6 +165,7 @@ pub fn parse_quotes(
         .build()?;
     let mut quotes = Vec::new();
     let mut one_sided = 0_usize;
+
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
         let times = times(&batch)?;
@@ -200,6 +203,7 @@ pub fn parse_quotes(
             )?);
         }
     }
+
     if one_sided > 0 {
         log::debug!("{one_sided} quotes of {instrument_id} with an empty side: no quote of them");
     }
@@ -229,6 +233,7 @@ pub fn parse_book(
         .context("reading LSE's Parquet file")?
         .build()?;
     let mut depths = Vec::new();
+
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
         let times = times(&batch)?;
@@ -294,6 +299,7 @@ pub fn parse_orders(
         .context("reading LSE's Parquet file")?
         .build()?;
     let mut deltas = Vec::new();
+
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
         let times = times(&batch)?;
@@ -381,6 +387,7 @@ impl BookSide {
             sizes: Vec::with_capacity(DEPTH10_LEN),
             orders: Vec::with_capacity(DEPTH10_LEN),
         };
+
         for level in 0..DEPTH10_LEN {
             levels.prices.push(
                 nullable_column::<Float64Array>(batch, &format!("{name}_price_{level}"))?.clone(),
@@ -409,6 +416,7 @@ impl BookSide {
         for level in 0..DEPTH10_LEN {
             let (prices, sizes) = (&self.prices[level], &self.sizes[level]);
             let count = self.orders[level].as_primitive::<UInt32Type>();
+
             if prices.is_null(row) {
                 continue;
             }
@@ -474,6 +482,7 @@ pub fn parse_candles(
         .context("reading LSE's Parquet file")?
         .build()?;
     let mut bars = Vec::new();
+
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
         let times = times(&batch)?;
@@ -565,6 +574,7 @@ pub fn parse_rows(
         .context("reading LSE's Parquet file")?
         .build()?;
     let mut pending = Vec::new();
+
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
         let keys = row_times(&batch, time_column, stamp)?;
@@ -576,18 +586,22 @@ pub fn parse_rows(
         writer.finish()?;
         let objects: Vec<Map<String, Value>> =
             serde_json::from_slice(&writer.into_inner()).context("reading LSE's rows as JSON")?;
+
         for ((mut fields, key), known) in objects.into_iter().zip(keys).zip(known) {
             fields.remove(time_column);
             fields.remove("symbol");
             pending.push(Pending { key, fields, known });
         }
     }
+
     if stamp == Stamp::Filing {
         file_derived(&mut pending);
     }
     let mut parsed = Parsed::default();
+
     for Pending { key, fields, known } in pending {
         let key = Timestamp::from(key);
+
         match known {
             Ok(known) => parsed.rows.push(Keyed {
                 key,
@@ -650,9 +664,11 @@ fn file_derived(rows: &mut [Pending]) {
         fields.get(name).and_then(Value::as_str).map(str::to_owned)
     };
     let mut accepted: HashMap<(UnixNanos, Option<String>), UnixNanos> = HashMap::new();
+
     for row in rows.iter_mut() {
         let kind = text(&row.fields, REPORT_TYPE);
         let period = text(&row.fields, PERIOD);
+
         match kind.as_deref() {
             Some(kind) if STATEMENTS.contains(&kind) => {
                 if let Ok(known) = row.known {
@@ -673,6 +689,7 @@ fn file_derived(rows: &mut [Pending]) {
             }
         }
     }
+
     for row in rows.iter_mut() {
         let kind = text(&row.fields, REPORT_TYPE);
         if kind.as_deref().is_some_and(|kind| DERIVED.contains(&kind)) {
@@ -723,6 +740,7 @@ fn column_times(
     let column = batch
         .column_by_name(name)
         .with_context(|| format!("no column {name} in LSE's file"))?;
+
     match (date, column.data_type()) {
         (true, DataType::Date32 | DataType::Date64) | (false, DataType::Timestamp(_, _)) => {}
         (date, other) => anyhow::bail!(
@@ -795,6 +813,7 @@ fn times(batch: &RecordBatch) -> anyhow::Result<TimestampNanosecondArray> {
     let column = batch
         .column_by_name("time")
         .context("no column time in LSE's file")?;
+
     match column.data_type() {
         DataType::Timestamp(_, Some(zone)) if zone.as_ref() == "UTC" => {}
         other => anyhow::bail!("the times of LSE's file are {other}, not UTC timestamps"),
@@ -1280,6 +1299,7 @@ mod tests {
             Arc::new(StringArray::from(vec![symbol])),
             Arc::new(arrow::array::Date32Array::from(vec![day])),
         ];
+
         for (name, type_) in columns {
             fields.push(Field::new(*name, type_.clone(), true));
             arrays.push(arrow::array::new_null_array(type_, 1));

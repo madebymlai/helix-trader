@@ -191,6 +191,7 @@ pub(super) fn placement(
 ) -> Result<Placement, OrderDeniedReason> {
     validate(order)?;
     let volume = volume(order.quantity())?;
+
     if let Some(position) = position {
         let closing =
             position.side != PositionSide::Flat && position.is_opposite_side(order.order_side());
@@ -205,6 +206,7 @@ pub(super) fn placement(
                     ),
                 ));
             }
+
             if protection != Protection::default() {
                 return Err(OrderDeniedReason::UnsupportedTpSl {
                     detail: "a closing order carries no protection".to_owned(),
@@ -267,12 +269,15 @@ fn validate(order: &OrderAny) -> Result<(), OrderDeniedReason> {
     let unsupported = |what: &str| OrderDeniedReason::ValidationFailed {
         detail: format!("cTrader has no {what} orders"),
     };
+
     if order.is_post_only() {
         return Err(unsupported("post-only"));
     }
+
     if order.is_quote_quantity() {
         return Err(unsupported("quote-quantity"));
     }
+
     if order.display_qty().is_some() {
         return Err(unsupported("iceberg"));
     }

@@ -208,6 +208,7 @@ mod tests {
 
     fn feed(signal: &Signal, closes: &[&str], at: fn(usize) -> Timestamp) -> Option<OrderSide> {
         let mut last = None;
+
         for (i, close) in closes.iter().enumerate() {
             let bar = bar(close, at(i));
             signal.update(&bar);

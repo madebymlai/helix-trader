@@ -262,12 +262,14 @@ impl Backtest {
         let bar_instruments: Vec<InstrumentId> =
             self.bar_types.iter().map(BarType::instrument_id).collect();
         let mut books = Vec::new();
+
         for book in of(NautilusDataType::OrderBookDepth, &bar_instruments) {
             if stored(&book)? {
                 books.push(book);
             }
         }
         let mut funding = Vec::new();
+
         for rate in of(
             NautilusDataType::FundingRateUpdate,
             &requirements.instrument_ids(),
@@ -277,6 +279,7 @@ impl Backtest {
             }
         }
         let mut built = Vec::new();
+
         for bar_type in &self.bar_types {
             let has_book = of(
                 NautilusDataType::OrderBookDepth,
@@ -288,6 +291,7 @@ impl Backtest {
             for source in read(vec![*bar_type], vec![]) {
                 has_source |= stored(&source)?;
             }
+
             if has_source || !has_book {
                 built.push(*bar_type);
             }
@@ -529,6 +533,7 @@ mod tests {
         catalog
             .write_to_parquet(&[depth], None, None, None)
             .unwrap();
+
         if quoted {
             let quote = QuoteTick::new(
                 id,

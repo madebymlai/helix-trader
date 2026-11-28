@@ -201,10 +201,12 @@ impl IndicatorsConfig {
                 errors.push(ConfigError::missing_field(field));
                 continue;
             };
+
             if let Err(e) = declaration.check(table) {
                 errors.push(ConfigError::invalid_value(field, e.to_string()));
             }
         }
+
         for name in self.0.keys() {
             errors.check(
                 declared

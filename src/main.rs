@@ -322,6 +322,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     // Before any config loads, since its custom series are checked against Nautilus' registry
     venues::register_custom_data();
+
     match Cli::parse().command {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
         Command::Backtest(args) => run_backtest(&args),
@@ -1068,6 +1069,7 @@ mod tests {
     fn every_subcommand_takes_the_strategy_by_name() {
         let backtest = backtest_required();
         let live = ["ema", "--config", "ema.toml"];
+
         for (subcommand, argv) in [
             ("fill-catalog", &REQUIRED[..]),
             ("backtest", &backtest[..]),

@@ -329,6 +329,7 @@ impl ExchangeStreams {
             return Ok(());
         }
         let exchange = self.exchange;
+
         if !self.tasks.is_open() {
             self.close().await?;
             self.tasks
@@ -337,6 +338,7 @@ impl ExchangeStreams {
         }
         let access = self.access()?;
         let mut symbols = Vec::new();
+
         for instrument in &self.streamed {
             let name = instrument
                 .name(&self.listings, &access.http)
@@ -470,6 +472,7 @@ impl ExchangeStreams {
                             None => return,
                         },
                     };
+
                     match message {
                         ExchangeWsMessage::Record {
                             symbol,
@@ -568,6 +571,7 @@ impl ExchangeStreams {
             .names
             .get_cloned(&id)
             .or_else(|| instrument.ticker().map(ToOwned::to_owned));
+
         if let Some(symbol) = named {
             self.names.insert(id, symbol.clone());
             take(&self.subscribed, &symbol, id, price_precision, kind);
@@ -634,6 +638,7 @@ impl ExchangeStreams {
     pub(super) async fn close(&mut self) -> anyhow::Result<()> {
         self.tasks.begin_shutdown();
         let stopped = self.tasks.finish_shutdown(TASK_GRACE, TASK_FORCE).await;
+
         for (_, client) in self.clients.drain() {
             client.disconnect().await;
         }
@@ -693,6 +698,7 @@ fn emit_mbp1(
     if let Some(quote) = quote {
         send(sender, DataEvent::Data(Data::Quote(quote)));
     }
+
     if let Some(mut trade) = trade.filter(|_| of.trades) {
         trade.trade_id = TradeId::new(sequence.to_string());
         send(sender, DataEvent::Data(Data::Trade(trade)));
@@ -712,6 +718,7 @@ fn emit_mbp10(
     if !of.depth {
         return false;
     }
+
     match decode_mbp10_msg(
         record,
         of.instrument_id,
@@ -762,6 +769,7 @@ fn gather(
             of.instrument_id
         ),
     }
+
     if record.flags.is_last()
         && let Some(last) = event.last_mut()
     {

@@ -116,6 +116,7 @@ async fn a_subscription_brings_the_ticks_of_its_symbol() {
     client.subscribe("GOLD.F").unwrap();
 
     let mut bids = Vec::new();
+
     for _ in 0..3 {
         let LseWsMessage::Tick(tick) = next(&mut out).await else {
             panic!("not a tick")
@@ -259,6 +260,7 @@ async fn a_chain_s_subscription_brings_the_ticks_of_its_contracts() {
     client.subscribe_options("AAPL").unwrap();
 
     let mut symbols = Vec::new();
+
     for _ in 0..5 {
         let LseWsMessage::Tick(tick) = next(&mut out).await else {
             panic!("not a tick")

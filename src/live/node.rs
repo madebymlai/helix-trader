@@ -94,6 +94,7 @@ pub fn build(
     let mut builder = LiveNodeBuilder::from_config(config)?
         .with_name("HELIX")
         .with_delay_post_stop_secs(5);
+
     if let Some(cache_database) = cache_database {
         builder = builder.with_cache_database_factory(cache_database);
     }
@@ -124,6 +125,7 @@ pub(crate) fn add_clients(
             clients.data_config,
             clients.data_routing,
         )?;
+
         if let Some(exec) = clients.exec {
             builder = builder.add_exec_client_with_routing(
                 None,

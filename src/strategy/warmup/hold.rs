@@ -160,6 +160,7 @@ impl Hold {
         };
         let count = held.len();
         let mut dropped = 0;
+
         for tick in held {
             if self.holds(&tick) {
                 dropped += 1;
@@ -167,6 +168,7 @@ impl Hold {
                 self.hand(&tick)?;
             }
         }
+
         if count > 0 {
             log::info!(
                 "Warmup handed over {} live ticks held, {dropped} of the history dropped",

@@ -51,6 +51,7 @@ fn window() -> (Timestamp, Timestamp) {
 
 fn rows_of(config: &ModelConfig, from: Timestamp, to: Timestamp) -> Vec<TargetRow> {
     let config = config.clone();
+
     thread::spawn(move || {
         let catalog = ic::catalog_of(hand_worked_quotes(), ic::at("08:00:00"), ic::at("13:00:00"));
         replay_of(&catalog, features(), &config, from, to).unwrap()
@@ -61,6 +62,7 @@ fn rows_of(config: &ModelConfig, from: Timestamp, to: Timestamp) -> Vec<TargetRo
 
 fn traded(config: &ModelConfig, models: &Path, account: Account) -> Record {
     let (config, models) = (config.clone(), models.to_path_buf());
+
     thread::spawn(move || {
         let (from, to) = window();
         blueprint(features(), config.clone())

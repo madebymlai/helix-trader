@@ -304,6 +304,7 @@ impl ExportQuery {
             _ if span <= SignedDuration::from_secs(1) => return None,
             _ => self.from + span / 2,
         };
+
         if middle <= self.from {
             return None;
         }

@@ -162,6 +162,7 @@ impl Roller {
         else {
             return Ok(None);
         };
+
         if let Some(next) = Transition::after(instrument_id, roll.time) {
             self.arm(actor, instrument_id, next)?;
         }
@@ -350,6 +351,7 @@ mod tests {
         let end: Timestamp = end.parse().unwrap();
         let mut now: Timestamp = start.parse().unwrap();
         let mut rolls = Vec::new();
+
         while now < end {
             now = (now + SignedDuration::from_hours(24)).min(end);
             let events = clock.borrow_mut().advance_time(now.into(), true);

@@ -167,6 +167,7 @@ impl IbHistory {
             .into_iter()
             .filter_map(|id| expired_future_contract(self.symbology, id))
             .collect();
+
         if !expired.is_empty() {
             instruments.extend(
                 self.client
@@ -275,6 +276,7 @@ impl IbHistory {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
         };
+
         loop {
             let wait = pacing().wait(Instant::now(), &request);
             if wait.is_zero() {
@@ -309,6 +311,7 @@ impl IbHistory {
     ) -> anyhow::Result<Vec<Data>> {
         let paged = async {
             let client = self.ib.as_arc().as_ref();
+
             if self.provider.find(&instrument_id).is_none() {
                 self.provider
                     .fetch_contract_details(client, instrument_id, false, None)
@@ -468,6 +471,7 @@ async fn drained<T: TickDecoder<T> + Send + Unpin>(
     tick: impl Fn(T) -> PagedTick,
 ) -> Vec<anyhow::Result<PagedTick>> {
     let mut items = Vec::new();
+
     while let Some(item) = page.next().await {
         match item {
             Ok(SubscriptionItem::Data(data)) => items.push(Ok(tick(data))),
@@ -519,6 +523,7 @@ async fn connected(
         config.max_reconnect_attempts,
     )
     .await?;
+
     if config.market_data_type != MarketDataType::Realtime {
         ib.switch_market_data_type(config.market_data_type.into())
             .await?;
@@ -866,6 +871,7 @@ async fn walk_back(
             break;
         };
         bars.extend(answer);
+
         if oldest <= start || oldest >= cursor {
             break;
         }

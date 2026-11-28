@@ -357,6 +357,7 @@ impl ExchangeHandler {
                 }
             }
         }
+
         if let Some(client) = self.client.take() {
             client.disconnect().await;
         }
@@ -386,6 +387,7 @@ impl ExchangeHandler {
             .close_handler(closed)
             .connect()
             .await;
+
         match connected {
             Ok(client) => self.client = Some(client),
             Err(e) => {
@@ -397,6 +399,7 @@ impl ExchangeHandler {
                 return false;
             }
         }
+
         while let Ok(command) = self.cmd_rx.try_recv() {
             match command {
                 HandlerCommand::Subscribe { symbol, .. } => {
@@ -421,9 +424,11 @@ impl ExchangeHandler {
             // The frame is from a replaced connection
             return;
         }
+
         if epoch > self.epoch {
             self.reconnected(epoch).await;
         }
+
         match message {
             Message::Text(text) if &text[..] == RECONNECTED.as_bytes() => {}
             Message::Text(text) => match serde_json::from_slice::<ExchangeText>(&text) {
@@ -485,6 +490,7 @@ impl ExchangeHandler {
             );
             return;
         };
+
         if let Some(&last) = self.sequences.get(&symbol) {
             if frame.sequence <= last {
                 if !frame.snapshot {
@@ -504,6 +510,7 @@ impl ExchangeHandler {
             } else {
                 frame.sequence - 1
             };
+
             if to > last {
                 let _ = self.out.send(ExchangeWsMessage::Gap {
                     symbol: symbol.clone(),
@@ -532,11 +539,13 @@ impl ExchangeHandler {
                  connection: reconnecting",
                 self.exchange
             );
+
             if let Some(client) = &self.client {
                 let _ = client.request_reconnect();
             }
             return;
         }
+
         if reopen {
             let _ = self.out.send(ExchangeWsMessage::Reopen { symbol });
         }
@@ -568,6 +577,7 @@ impl ExchangeHandler {
             |(code, reason)| format!("{code} {reason}"),
         );
         let terminal = close.is_some_and(|(code, _)| TERMINAL.contains(code));
+
         if let Some(opening) = self.opening.take() {
             let mut symbols: Vec<&String> = self.carried.iter().collect();
             symbols.sort();
@@ -611,6 +621,7 @@ impl ExchangeHandler {
         };
         symbols.sort();
         let frame = ExchangeSubscription::new(self.level, &symbols).to_json();
+
         if let Err(e) = client
             .send_text_on_connection(frame, None, self.epoch)
             .await

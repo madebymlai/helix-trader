@@ -119,6 +119,7 @@ impl Outcome {
 
         loop {
             let quote = quotes.next().transpose()?;
+
             while let Some(fill) =
                 fills.next_if(|fill| quote.is_none_or(|quote| fill.ts_event < quote.ts_init))
             {
@@ -276,6 +277,7 @@ pub fn report(outcome: &Outcome) -> String {
     for (currency, stats) in &pnls {
         section(&mut out, &format!("PnL statistics ({currency})"), *stats);
     }
+
     for (currency, costs) in &outcome.costs {
         let f64 = |value: Decimal| value.to_f64().unwrap_or(f64::NAN);
         let spread = (costs.unquoted == 0).then_some(costs.spread);
@@ -284,10 +286,12 @@ pub fn report(outcome: &Outcome) -> String {
         if let Some(spread) = spread {
             figures.insert("Spread".to_string(), f64(spread));
         }
+
         if costs.trades > 0 {
             let per_trade = total / Decimal::from(costs.trades);
             figures.insert("Cost per trade".to_string(), f64(per_trade));
         }
+
         if let Some(pnl) = pnls
             .get(currency)
             .and_then(|stats| stats.get("PnL (total)"))
@@ -295,6 +299,7 @@ pub fn report(outcome: &Outcome) -> String {
             figures.insert("Gross PnL".to_string(), pnl + f64(total));
         }
         section(&mut out, &format!("Costs ({currency})"), &figures);
+
         if spread.is_none() {
             // The spread line is last among the section's sorted names
             out.push_str("  Spread: n/a (no quotes)\n");

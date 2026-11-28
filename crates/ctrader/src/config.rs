@@ -268,6 +268,7 @@ fn token_file(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
     if let Some(state) = absolute("XDG_STATE_HOME") {
         return Ok(state.join(TOKEN_FILE));
     }
+
     match absolute("HOME") {
         Some(home) => Ok(home.join(".local/state").join(TOKEN_FILE)),
         None => {

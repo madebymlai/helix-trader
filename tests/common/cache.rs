@@ -22,6 +22,7 @@ pub(crate) async fn delete_trader(trader_id: &str) -> usize {
         keys.push(key.unwrap());
     }
     drop(scan);
+
     if !keys.is_empty() {
         let _: () = connection.del(&keys).await.unwrap();
     }

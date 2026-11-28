@@ -654,6 +654,7 @@ impl TargetConfig {
             self.risk,
             self.spec.limit.as_nanos()
         );
+
         if !self.conversions.is_empty() {
             let pairs: Vec<String> = self
                 .conversions
@@ -1502,6 +1503,7 @@ impl Targets {
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
         let stake = self.setter.stake;
+
         for side in Side::BOTH {
             let target = targets.of(side);
             let trade = target.trade(self.config.instrument_id, side);
@@ -1525,6 +1527,7 @@ impl Targets {
             .cache()
             .order(&entry)
             .is_some_and(|order| order.filled_qty().is_zero());
+
         if unfilled {
             self.unsettle(
                 target.decision,

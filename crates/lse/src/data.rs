@@ -170,6 +170,7 @@ impl LseDataClient {
     ) -> anyhow::Result<Self> {
         let mut credentials = HashMap::new();
         let mut http = HashMap::new();
+
         for product in LseProduct::ALL {
             let Some(credential) =
                 LseCredential::resolve(product, config.api_key_of(product), &var)
@@ -255,6 +256,7 @@ impl LseDataClient {
                 () = future => {}
             }
         };
+
         if let Err(e) = self.tasks.spawn(future) {
             log::warn!(
                 "{} request skipped after shutdown began: {e}",
@@ -379,6 +381,7 @@ impl LseDataClient {
                     }
                     let count = rows.len();
                     let response = respond(rows, clock.get_time_ns());
+
                     match (unloaded_from, query) {
                         (Some(from), Some(query)) => {
                             log::warn!(
@@ -473,12 +476,14 @@ impl DataClient for LseDataClient {
         if self.is_connected() {
             return Ok(());
         }
+
         if !self.tasks.is_open() {
             self.teardown().await?;
             self.tasks.start_generation().map_err(|e| {
                 anyhow::anyhow!("reopening the {} request tasks: {e}", self.client_id)
             })?;
         }
+
         if let Err(e) = self.streams.open().await {
             log::error!("{} not connected: {e:#}", self.client_id);
             return Err(e);
@@ -854,6 +859,7 @@ impl DataClient for LseDataClient {
                         .into_iter()
                         .map(|row| CustomData::new(Arc::new(row), data_type.clone()))
                         .collect();
+
                     if let Some(limit) = request.limit {
                         let excess = rows.len().saturating_sub(limit.get());
                         rows.drain(..excess);
@@ -870,6 +876,7 @@ impl DataClient for LseDataClient {
                         clock.get_time_ns(),
                         request.params,
                     ));
+
                     match unloaded_from {
                         None => DataEvent::ResponseEnvelope(DataResponseEnvelope::new(
                             response, true, None,

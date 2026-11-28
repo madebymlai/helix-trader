@@ -129,6 +129,7 @@ fn run(catalog: &tempfile::TempDir, reads_lse: bool) -> (BacktestResult, usize) 
     if reads_lse {
         backtest.ticks = gold_trades().ticks;
     }
+
     std::thread::spawn(move || {
         let trades = Rc::new(RefCell::new(Vec::new()));
         let reader = GoldReader {

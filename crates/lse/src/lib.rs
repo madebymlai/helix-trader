@@ -24,11 +24,13 @@ pub use self::{
 };
 
 pub mod common;
+pub mod http;
+pub mod websocket;
+
 mod config;
 mod data;
 mod factories;
-pub mod http;
+mod types;
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
-mod types;
-pub mod websocket;

@@ -45,6 +45,7 @@ impl CmeListings {
                 .pairs(&query)
                 .await
                 .with_context(|| format!("looking up {query}"))?;
+
             if let Some(listing) = contract.listing(&pairs)? {
                 log::info!("{contract} is LSE's listing {listing}");
                 self.0.insert(id, listing.clone());

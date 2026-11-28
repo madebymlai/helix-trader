@@ -330,6 +330,7 @@ impl CmeContract {
             .iter()
             .filter(|pair| self.is_listed_as(pair))
             .collect();
+
         match listings[..] {
             [] => Ok(None),
             [listing] => Ok(Some(listing)),

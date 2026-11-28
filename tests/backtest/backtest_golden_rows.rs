@@ -115,6 +115,7 @@ fn print(features: &[String], payoff: &[String], rows: &[DatasetRow]) -> String 
     for name in features {
         write!(out, ",{name}").unwrap();
     }
+
     for side in ["long", "short"] {
         for name in payoff {
             write!(out, ",{side}_{name}").unwrap();
@@ -124,6 +125,7 @@ fn print(features: &[String], payoff: &[String], rows: &[DatasetRow]) -> String 
         ",long_pnl,long_commission,long_exit,long_unit,short_pnl,short_commission,short_exit,\
          short_unit\n",
     );
+
     for row in rows {
         write!(
             out,
@@ -148,6 +150,7 @@ fn print(features: &[String], payoff: &[String], rows: &[DatasetRow]) -> String 
             .chain(&row.long_payoff)
             .chain(&row.short_payoff)
             .chain(&sides);
+
         for value in values {
             write!(out, ",{value}").unwrap();
         }

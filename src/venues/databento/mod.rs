@@ -114,6 +114,7 @@ impl DatabentoHistory {
 
         let mut ends: BTreeMap<String, Timestamp> = BTreeMap::new();
         let mut within_ends = Vec::new();
+
         for (request, dataset) in requests.iter().zip(datasets) {
             let end = match ends.get(&dataset) {
                 Some(&end) => end,

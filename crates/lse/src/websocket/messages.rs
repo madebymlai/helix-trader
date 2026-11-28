@@ -115,6 +115,7 @@ impl Display for LseWsRefusal {
     /// open_connections 1)`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
+
         if !self.details.is_empty() {
             let details: Vec<String> = self
                 .details

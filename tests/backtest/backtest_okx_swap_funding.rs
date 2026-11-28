@@ -68,6 +68,7 @@ fn instrument() -> InstrumentAny {
 fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     let mut open = from;
     let mut bars = vec![];
+
     while open < to {
         let price = Price::from(if open < at("12:00") {
             "100000.0"

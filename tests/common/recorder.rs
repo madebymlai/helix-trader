@@ -200,6 +200,7 @@ impl DataActor for Recorder {
                 self.close_position(position, None, None, None, None, None, None)?;
             }
         }
+
         if let Some(&(side, quantity)) = self.market.get(index) {
             let order = self.order().market(
                 bar.bar_type.instrument_id(),
@@ -215,6 +216,7 @@ impl DataActor for Recorder {
             );
             self.submit_order(order, None, None, None)?;
         }
+
         if let Some(&(side, one_r, stake)) = self.staked.get(index) {
             let exits = Exits {
                 bracket: None,

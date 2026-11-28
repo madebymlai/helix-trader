@@ -146,6 +146,7 @@ async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
         .unwrap();
 
     let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
+
     for id in [GOLD, US10Y] {
         let trades = catalog
             .trades()
@@ -406,6 +407,7 @@ async fn a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definitio
             .all(|q| (from..=to).contains(&q.ts_event) && q.bid_price < q.ask_price),
         "a quote outside the day or crossed"
     );
+
     for data in [NautilusDataType::TradeTick, NautilusDataType::QuoteTick] {
         let lacking = catalog
             .get_missing_intervals_for_request(
@@ -477,6 +479,7 @@ async fn a_day_of_an_option_s_trades_and_bars_fills_from_lse_its_definition_from
             && bar.ts_event.as_u64() % 60_000_000_000 == 0),
         "a bar outside the day or off the minute"
     );
+
     for (data, identifier) in [
         (NautilusDataType::TradeTick, AAPL_CALL),
         (NautilusDataType::Bar, bar_type.as_str()),
@@ -564,6 +567,7 @@ async fn a_release_and_a_yield_fill_from_lse_at_the_times_they_are_known() {
     }
     dotenvy::dotenv().ok();
     let october = ("2026-10-01T00:00:00Z", "2026-10-31T00:00:00Z");
+
     for source in ["economic_calendar", "macro_release"] {
         let dir = tempfile::tempdir().unwrap();
         let data_type = lse_rows(source, "US.Core Inflation Rate YoY");
@@ -613,6 +617,7 @@ async fn commitments_of_traders_fill_from_lse_at_their_release() {
     }
     dotenvy::dotenv().ok();
     let cot = lse_rows("cot", "ZN");
+
     for (window, released) in [
         (("2025-09-01T00:00:00Z", "2025-10-01T00:00:00Z"), true),
         (("2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z"), false),
@@ -659,6 +664,7 @@ async fn financial_reports_fill_from_lse_when_their_statements_were_accepted() {
         accepted,
         [utc("2026-01-30T11:01:32Z"), utc("2026-05-01T14:01:00Z")]
     );
+
     for kind in [
         "income", "balance", "cashflow", "metrics", "ratios", "growth",
     ] {

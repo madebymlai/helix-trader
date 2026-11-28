@@ -190,6 +190,7 @@ pub(crate) fn open<M: Payload>(envelope: &ProtoMessage) -> Result<M, CTraderErro
             payload_name(envelope.payload_type)
         ))
     };
+
     match envelope.payload_type {
         t if t == M::TYPE => M::decode(payload).map_err(malformed),
         t if t == ProtoOaErrorRes::TYPE => {

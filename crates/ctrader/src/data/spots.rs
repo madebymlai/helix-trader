@@ -44,6 +44,7 @@ impl SpotQuotes {
     pub(super) fn new(instruments: &[(InstrumentAny, i64)]) -> anyhow::Result<Self> {
         let mut streams = HashMap::new();
         let mut symbol_ids = HashMap::new();
+
         for (instrument, symbol_id) in instruments {
             let stream = Stream {
                 merge: QuoteMerge::new(instrument)?,
@@ -122,6 +123,7 @@ impl SpotQuotes {
         let Merged::Quote(quote) = stream.merge.next(ms, bid, ask, Some(ts_init))? else {
             return Ok(None);
         };
+
         if !stream.subscribed {
             return Ok(None);
         }

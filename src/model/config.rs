@@ -126,6 +126,7 @@ impl TryFrom<MetaFields> for MetaConfig {
             threshold,
             size,
         } = fields;
+
         if threshold.is_some() {
             return Err(
                 "a meta has no probability `threshold`: it takes the trade of the side \
@@ -133,6 +134,7 @@ impl TryFrom<MetaFields> for MetaConfig {
                     .to_string(),
             );
         }
+
         if size.is_some() {
             return Err(
                 "a meta has no `size`: it takes or leaves the decision's trade, which the \

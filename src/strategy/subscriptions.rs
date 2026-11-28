@@ -140,6 +140,7 @@ impl Subscriptions {
         for instrument_id in self.instrument_ids() {
             self.subscribe(actor, instrument_id, front(instrument_id, now), from);
         }
+
         for (data_type, client) in self.custom_at(now, None) {
             actor.subscribe_data(data_type, client, Some(subscription_params(from, [])));
         }
@@ -155,6 +156,7 @@ impl Subscriptions {
         A: DataActor + DataActorNative + Debug + 'static,
     {
         let now = UnixNanos::from(actor.clock().utc_now());
+
         for instrument_id in self.instrument_ids() {
             if !rolled_by(instrument_id, roll) {
                 continue;
@@ -169,6 +171,7 @@ impl Subscriptions {
                 actor.unsubscribe_data(data_type, client, None);
             }
         }
+
         for (data_type, client) in self.custom_at(roll.time, Some(roll)) {
             actor.subscribe_data(data_type, client, Some(subscription_params(now, [])));
         }
@@ -185,6 +188,7 @@ impl Subscriptions {
         roll: Option<&Transition>,
     ) -> Vec<(DataType, Option<ClientId>)> {
         let mut read: Vec<(DataType, Option<ClientId>)> = Vec::new();
+
         for (series, client) in &self.custom {
             let kept = roll.is_none_or(|roll| series.root().is_some_and(|id| rolled_by(id, roll)));
             let data_type = series.at(time).data_type().clone();
@@ -218,6 +222,7 @@ impl Subscriptions {
                 .or_default()
                 .push(bar_type);
         }
+
         for venue_bar_types in by_venue.into_values() {
             actor.subscribe_bars(venue_bar_types, None, Some(subscription_params(from, [])));
         }
@@ -250,6 +255,7 @@ impl Subscriptions {
         A: DataActor + DataActorNative + Debug + 'static,
     {
         let book = venues::book_format(contract.venue);
+
         for data in self.data_of(instrument_id) {
             let params = Some(subscription_params(from, []));
             match data {
@@ -283,14 +289,17 @@ impl Subscriptions {
         A: DataActor + DataActorNative + Debug + 'static,
     {
         let contract = roll.pre;
+
         for data in self.data_of(instrument_id) {
             let still_read = self
                 .ticks
                 .iter()
                 .any(|tick| tick.data == *data && front(tick.instrument_id, roll.time) == contract);
+
             if still_read {
                 continue;
             }
+
             match data {
                 NautilusDataType::QuoteTick => actor.unsubscribe_quotes(contract, None, None),
                 NautilusDataType::TradeTick => actor.unsubscribe_trades(contract, None, None),

@@ -27,6 +27,7 @@ Released on TBD (UTC).
 - Changed `replayed_quotes` to document its batch read as Nautilus' own API rather than a `Temporary` workaround
 - Changed the Nautilus pin to `067cfa2`
 - Changed the files vendored from `nautilus_engineering` to `6d56c40`: markdownlint-cli2 0.24.2 and two rustfmt options
+- Changed the Rust formatting check to `nautilus_engineering`'s `check-rust-formatting`, over whole files and module declaration order
 
 ### Documentation Updates
 

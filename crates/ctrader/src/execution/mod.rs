@@ -303,6 +303,7 @@ impl CTraderExecutionClient {
     async fn await_account_registered(&self) -> anyhow::Result<()> {
         let account_id = self.core.account_id;
         let deadline = Instant::now() + ACCOUNT_REGISTERED_TIMEOUT;
+
         while self.core.cache().account(&account_id).is_none() {
             anyhow::ensure!(
                 Instant::now() < deadline,
@@ -331,6 +332,7 @@ impl CTraderExecutionClient {
         for order in &open.order {
             orders.extend(reports.order(order)?);
         }
+
         for position in &open.position {
             orders.extend(reports.protections(position)?);
         }
@@ -456,6 +458,7 @@ impl CTraderExecutionClient {
             return Ok(None);
         };
         let mut earliest = None;
+
         for (&position, &opened) in openings
             .iter()
             .filter(|(_, opened)| **opened <= first + QUERY_MARGIN_MS)
@@ -486,6 +489,7 @@ impl CTraderExecutionClient {
                 }
             }
         };
+
         if let Err(e) = self.command_tasks.spawn(future) {
             log::warn!("{description} skipped after shutdown began: {e}");
         }
@@ -691,6 +695,7 @@ impl CTraderExecutionClient {
         if order.is_closed() {
             return None;
         }
+
         match session.dispatch().wanted(*id) {
             Some(Want::Move(price)) => Some(price),
             Some(Want::Remove) => None,
@@ -726,6 +731,7 @@ impl CTraderExecutionClient {
             take_profit: protection.take_profit.map(|p| p.as_f64()),
             ..Default::default()
         };
+
         match order.order_type() {
             OrderType::Limit => request.limit_price = price.or(order.price()).map(|p| p.as_f64()),
             OrderType::StopMarket => {
@@ -813,6 +819,7 @@ impl CTraderExecutionClient {
     /// position each. A pending entry's protections are cancelled by its amendment.
     fn cancel(&self, session: &Session, cancels: &[(ClientOrderId, UUID4)]) {
         let mut protections: HashMap<i64, Vec<(ClientOrderId, UUID4)>> = HashMap::new();
+
         for &(id, command_id) in cancels {
             let outcome = (|| {
                 let order = self
@@ -857,10 +864,12 @@ impl CTraderExecutionClient {
                 self.send(session, request, Tag::Cancel(id), vec![(id, command_id)]);
                 Ok::<_, String>(())
             })();
+
             if let Err(reason) = outcome {
                 self.fail_now(session, Tag::Cancel(id), command_id, reason);
             }
         }
+
         for (position, legs) in protections {
             let request = self.amend_protections(session, position);
             self.send(session, request, Tag::Unprotect(legs[0].0), legs);
@@ -1056,6 +1065,7 @@ impl ExecutionClient for CTraderExecutionClient {
             log::error!("{client_id} failed to connect: {e:#}");
             e
         };
+
         if self.session.is_some() || !self.session_tasks.is_open() || !self.command_tasks.is_open()
         {
             self.teardown().await.map_err(failed)?;
@@ -1075,6 +1085,7 @@ impl ExecutionClient for CTraderExecutionClient {
             self.await_account_registered().await
         }
         .await;
+
         if let Err(e) = ready {
             self.disconnect().await?;
             return Err(failed(e));
@@ -1098,6 +1109,7 @@ impl ExecutionClient for CTraderExecutionClient {
             log::warn!("{} is closed: not submitted", order.client_order_id());
             return Ok(());
         }
+
         if let Err(denied) = self.place(
             session,
             &order,
@@ -1123,6 +1135,7 @@ impl ExecutionClient for CTraderExecutionClient {
                 .map(|id| cache.try_order_owned(id).map_err(anyhow::Error::from))
                 .collect::<anyhow::Result<_>>()?
         };
+
         if orders.iter().all(|o| o.contingency_type().is_none()) {
             for order in &orders {
                 if let Err(denied) = self.place(
@@ -1137,6 +1150,7 @@ impl ExecutionClient for CTraderExecutionClient {
             }
             return Ok(());
         }
+
         if let Err(denied) = self.submit_bracket(session, &orders, cmd.position_id) {
             let reason = denied.to_string();
             for order in &orders {
@@ -1220,6 +1234,7 @@ impl ExecutionClient for CTraderExecutionClient {
         let venue = cmd
             .venue_order_id
             .or(order.as_ref().and_then(OrderAny::venue_order_id));
+
         if venue.is_some_and(|v| parse_protection_id(v).is_some()) {
             log::debug!("{id} is a protection: the open-order check reads it");
             return Ok(());
@@ -1250,6 +1265,7 @@ impl ExecutionClient for CTraderExecutionClient {
                 currency,
                 ts_init: now,
             };
+
             match Self::find_order(&ctrader, &reports, id, venue, since, now).await? {
                 Held::Order(status, fills) => emitter.send_order_with_fills(status, fills),
                 Held::Nothing => {
@@ -1295,6 +1311,7 @@ impl ExecutionClient for CTraderExecutionClient {
             cmd.venue_order_id == Some(r.venue_order_id)
                 || (cmd.client_order_id.is_some() && cmd.client_order_id == r.client_order_id)
         });
+
         if found.is_some() {
             return Ok(found);
         }
@@ -1310,6 +1327,7 @@ impl ExecutionClient for CTraderExecutionClient {
             .filter(|v| parse_protection_id(*v).is_none());
         let found =
             Self::find_order(&session.ctrader, &reports, id, venue, since, self.now()).await?;
+
         match found {
             Held::Order(status, _) => Ok(Some(status)),
             Held::Nothing => Ok(None),
@@ -1428,6 +1446,7 @@ impl ExecutionClient for CTraderExecutionClient {
             .map(DurationNanos::try_from_mins)
             .transpose()?
             .map(|lookback| ts_init.saturating_sub(lookback));
+
         for position in &open.position {
             if let Some(opened) = position.trade_data.open_timestamp {
                 openings.insert(position.position_id, opened);
@@ -1465,6 +1484,7 @@ impl ExecutionClient for CTraderExecutionClient {
         // one that cannot be read leaves the history incomplete.
         let mut history = Vec::new();
         let mut history_complete = true;
+
         for order in updated.iter().filter(|o| {
             o.order_type() != ProtoOaOrderType::StopLossTakeProfit
                 && o.order_status() != ProtoOaOrderStatus::OrderStatusAccepted
@@ -1474,9 +1494,11 @@ impl ExecutionClient for CTraderExecutionClient {
                 .filter(|d| d.order_id == order.order_id)
                 .map(|d| d.filled_volume)
                 .sum();
+
             if reported != order.executed_volume.unwrap_or_default() {
                 continue;
             }
+
             match reports.order(order) {
                 Ok(report) => history.extend(report),
                 Err(e) => {
@@ -1504,6 +1526,7 @@ impl ExecutionClient for CTraderExecutionClient {
             );
         }
         let mut fills = Vec::new();
+
         for deal in kept {
             match protections.get(&deal.order_id) {
                 Some(protection) => {
@@ -1641,6 +1664,7 @@ mod tests {
                         ACCOUNT_AUTH_TOKEN_INVALID,
                     )];
                 }
+
                 if venue.other_account {
                     let other = ProtoOaAccountAuthRes {
                         ctid_trader_account_id: ACCOUNT_ID + 1,
@@ -1649,12 +1673,15 @@ mod tests {
                     return vec![reply(request, &other)];
                 }
             }
+
             if venue.refuse_token && request.payload_type == ProtoOaRefreshTokenReq::TYPE {
                 return vec![token_refused(request)];
             }
+
             if let Some(actions) = accept_auth(request) {
                 return actions;
             }
+
             if let Some(trades) = venue
                 .trades
                 .as_ref()
@@ -1683,6 +1710,7 @@ mod tests {
                     _ if venue.reconcile_takes.is_some() => {
                         let (clock, answered) = venue.reconcile_takes.unwrap();
                         clock.set_time(answered);
+
                         match &venue.reconcile {
                             Some(open) => reply(request, open),
                             None => replay::<ProtoOaReconcileRes>(request, RECONCILE_RES_EMPTY),
@@ -1776,6 +1804,7 @@ mod tests {
                         .iter()
                         .flatten()
                         .any(|d| d.position_id == asked.position_id);
+
                     if held {
                         reply(
                             request,
@@ -2048,6 +2077,7 @@ mod tests {
                 "{endpoint}"
             );
         }
+
         for received in [&trading_received, &data_received] {
             let frames = testing::wait_until(received, |frames| {
                 frames
@@ -2464,6 +2494,7 @@ mod tests {
             .collect();
         assert_eq!(trades, ["1"]);
         assert!(of_other_instrument.unwrap().is_empty());
+
         for covering in [of_deal_2, of_all] {
             let error = format!("{:#}", covering.unwrap_err());
             assert!(error.contains("cTrader deal 2"), "{error}");
@@ -2839,6 +2870,7 @@ mod tests {
         let mass_status = client.generate_mass_status(None).await.unwrap().unwrap();
 
         let orders = mass_status.order_reports();
+
         for leg in ["59793251-SL", "59793251-TP"] {
             assert_eq!(
                 orders[&VenueOrderId::from(leg)].order_status,

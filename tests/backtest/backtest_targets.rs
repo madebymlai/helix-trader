@@ -96,6 +96,7 @@ impl Source {
             custom: vec![],
             warmup: SignedDuration::ZERO,
         };
+
         match self {
             Self::Quotes(id) => ticks(NautilusDataType::QuoteTick, id),
             Self::Trades(id) => ticks(NautilusDataType::TradeTick, id),
@@ -534,6 +535,7 @@ fn hand_worked_run(commission: Commission, dataset: bool) -> Record {
             bracket(ic::INSTRUMENT_ID, risking("4"), Decimal::new(75, 1)),
             &backtest,
         );
+
         if dataset {
             backtest.run_dataset(probe).unwrap();
         } else {

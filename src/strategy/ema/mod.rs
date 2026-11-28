@@ -330,6 +330,7 @@ impl DataActor for EmaCross {
         if self.warmup.is_warming() || !self.signal.initialized()? {
             return Ok(());
         }
+
         match self.signal.cross(bar) {
             Some(side) => {
                 self.trade(bar, side)?

@@ -534,8 +534,10 @@ async fn trade_until_holding(client: &Client, account: &IbAccount, shares: f64, 
     } else {
         vec![("SXR8".to_string(), holding)]
     };
+
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_secs(2)).await;
+
         if positions(client, account).await == expected {
             return;
         }
@@ -548,6 +550,7 @@ async fn samples_apart(client: &Client, account: &IbAccount) -> (Sample, Sample)
     println!("first: {first:?}");
     let started = Instant::now();
     let mut last = first.clone();
+
     while started.elapsed() < PNL_WAIT
         && (last.updated == first.updated || (last.pnl - first.pnl).abs() < PNL_MOVE)
     {

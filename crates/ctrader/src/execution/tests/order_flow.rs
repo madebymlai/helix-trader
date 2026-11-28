@@ -211,6 +211,7 @@ impl Node {
             .await
             .expect("no execution event within 10 s")
             .expect("the execution events ended");
+
         if let ExecutionEvent::Order(order_event) = &event {
             self.cache.borrow_mut().update_order(order_event).unwrap();
         }
@@ -672,6 +673,7 @@ async fn a_fill_before_the_acceptance_and_events_twice_make_one_acceptance_and_o
 async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
     let mut node = Node::start(|request| {
         let filled = execution(EXECUTION_MARKET_FILLED);
+
         match request.payload_type {
             t if t == ProtoOaOrderListReq::TYPE => vec![reply(
                 request,
@@ -1174,6 +1176,7 @@ fn closed(bytes: &[u8], left: i64) -> ProtoOaExecutionEvent {
     if let Some(order) = execution.order.as_mut() {
         order.client_order_id = Some("C:CLOSE-1".to_owned());
     }
+
     if let Some(position) = execution.position.as_mut().filter(|_| left > 0) {
         position.trade_data.volume = left;
         position.set_position_status(
@@ -1606,6 +1609,7 @@ fn reconciled_pending_bracket(node: &Node) {
                 VenueOrderId::from("1031776354"),
             ));
         }
+
         for event in events {
             order.apply(event.clone()).unwrap();
             node.cache.borrow_mut().update_order(&event).unwrap();

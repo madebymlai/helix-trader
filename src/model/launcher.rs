@@ -206,6 +206,7 @@ fn child(command: &mut Command) -> Retrained {
         })
     });
     let mut tail = VecDeque::with_capacity(STDERR_TAIL);
+
     if let Some(stderr) = child.stderr.take() {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             log::warn!("{line}");
@@ -435,6 +436,7 @@ impl DataActor for RetrainActor {
             .models
             .model_sets()
             .context("listing the model sets, of which the latest retrain time's is trained")?;
+
         if model_sets.contains(&latest) {
             return Ok(());
         }
@@ -909,8 +911,10 @@ mod tests {
         time: &str,
     ) -> Timestamp {
         let deadline = Instant::now() + Duration::from_secs(60);
+
         loop {
             actor.on_time_event(&fired(time)).unwrap();
+
             if let Ok(at) = finished.recv_timeout(Duration::from_millis(10)) {
                 return at;
             }

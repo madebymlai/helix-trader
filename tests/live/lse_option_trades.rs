@@ -67,6 +67,7 @@ fn contracts_of_the_week(now: Timestamp) -> Vec<InstrumentAny> {
         .expect("New York's time zone")
         .timestamp();
     let mut contracts = Vec::new();
+
     for strike in (200..=500).step_by(5) {
         for (kind, letter) in [(OptionKind::Call, 'C'), (OptionKind::Put, 'P')] {
             let osi = format!(
@@ -162,6 +163,7 @@ async fn the_trades_of_aapl_s_options_of_the_week_stream_from_lse_for_a_minute()
         .unwrap()
         .build()
         .unwrap();
+
     for definition in definitions {
         node.kernel()
             .cache()

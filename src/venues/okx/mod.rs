@@ -238,6 +238,7 @@ fn selection(
 ) -> anyhow::Result<(Vec<OKXInstrumentType>, Vec<String>)> {
     let mut instrument_types = Vec::new();
     let mut families = Vec::new();
+
     for &id in instrument_ids {
         let contract = Contract::of(id)?;
         if !instrument_types.contains(&contract.inst_type) {

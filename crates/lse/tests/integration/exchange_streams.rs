@@ -712,6 +712,7 @@ async fn a_level_2_subscription_delivers_the_instrument_s_ten_levels_then_its_de
         .unwrap();
 
     let mut depths = Vec::new();
+
     for _ in 0..4 {
         let Data::BookDepth(depth) = next(&mut events).await else {
             panic!("not a depth")
@@ -799,6 +800,7 @@ async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_r
         .unwrap();
 
     let mut batches = Vec::new();
+
     for _ in 0..3 {
         let Data::BookDeltas(deltas) = next(&mut events).await else {
             panic!("not book deltas")
@@ -1068,6 +1070,7 @@ async fn a_glbx_contract_and_an_xnas_stock_stream_each_on_its_exchange_s_stream(
     client.subscribe_quotes(quotes_of(&[GCZ26, NVDA])).unwrap();
 
     let mut opened: Vec<(InstrumentId, Price)> = Vec::new();
+
     for _ in 0..2 {
         let Data::Quote(quote) = next(&mut events).await else {
             panic!("not a quote")

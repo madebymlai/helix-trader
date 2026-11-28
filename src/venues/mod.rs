@@ -279,11 +279,13 @@ impl Row {
     #[rustfmt::skip]
     fn of(venue: Venue) -> Self {
         use {Broker as B, DefinitionsSource as D, HistorySource as H, LiveDataSource as L};
+
         if let Some(broker) = ctrader_broker(venue) {
             return Self::new(
                 D::CTrader(broker), H::CTrader(broker), L::CTrader(broker), Some(B::CTrader(broker)),
             );
         }
+
         match venue.as_str() {
             //                    definitions   history       live data  broker
             "OKX"    => Self::new(D::Okx,       H::Okx,       L::Okx,    Some(B::Okx)),
@@ -339,6 +341,7 @@ pub(crate) fn serves_custom(series: &CustomSeries) -> anyhow::Result<Option<Hist
     let Some(source) = CustomRow::of(series).history else {
         return Ok(None);
     };
+
     match source {
         HistorySource::Lse => ::lse::serves_custom(data_type)?,
         HistorySource::Okx => anyhow::bail!("OKX's history serves no custom data, {data_type}"),
@@ -691,6 +694,7 @@ pub async fn fill_history(
     for series in &requirements.custom {
         serves_custom(series)?;
     }
+
     for source in requirements.catalog_series() {
         serves(&source)?;
     }
@@ -709,6 +713,7 @@ pub async fn fill_history(
     )?;
     let (mut okx_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+
     for id in requirements.instrument_ids() {
         match Row::of(id.venue).history {
             HistorySource::Okx => okx_ids.push(id),
@@ -718,6 +723,7 @@ pub async fn fill_history(
         }
     }
     let mut node = NodeFill::new();
+
     for (broker, ids) in ctrader_brokers_present(&ctrader_ids) {
         add_ctrader_fill(
             &mut node,
@@ -733,6 +739,7 @@ pub async fn fill_history(
             .write_definitions(&catalog, &okx_definitions)
             .await?;
     }
+
     if !okx_ids.is_empty() {
         let slices = of_source(&slices, HistorySource::Okx);
         let requests = okx::requests(&catalog, &slices)?;
@@ -813,6 +820,7 @@ impl LiveRoutes {
     ///   instrument routes to it.
     fn of(instrument_ids: &[InstrumentId], custom: &[CustomSeries]) -> Self {
         let mut routes = Self::default();
+
         for &id in instrument_ids {
             let row = Row::of(id.venue);
             match row.live_data {
@@ -825,10 +833,12 @@ impl LiveRoutes {
                     }
                 }
             }
+
             if row.live_data == LiveDataSource::Ib || row.broker == Some(Broker::Ib) {
                 routes.ib.push(id);
             }
         }
+
         for series in custom {
             if let Some(source) = CustomRow::of(series).live_data
                 && !routes.custom.contains(&source)
@@ -864,13 +874,16 @@ impl LiveRoutes {
             let okx = okx::clients(&okx_ids, catalog).await?;
             clients.push(okx.into_node_clients());
         }
+
         for (connection, ids) in ctrader {
             connection.check_account().await?;
             clients.push(ctrader_clients(connection, ids));
         }
+
         if !lse_ids.is_empty() || custom.contains(&LiveDataSource::Lse) {
             clients.push(lse::live_clients(&lse_ids));
         }
+
         if !ib_ids.is_empty() {
             let account = venues.ib.account.as_ref().context(
                 "the strategy trades IB instruments: give the IB account \
@@ -925,6 +938,7 @@ pub(crate) async fn live_clients(
     for series in requirements.catalog_series() {
         streams(&series)?;
     }
+
     for series in &requirements.custom {
         streams_custom(series)?;
     }
@@ -2149,6 +2163,7 @@ mod tests {
                 let served = venues
                     .iter()
                     .any(|&id| serves(&requests_of(id).swap_remove(i).1).is_ok());
+
                 if unsupported(created.as_ref(), request) == served {
                     disagreeing.push(format!("{name}'s {kind}: served {served}"));
                 }
@@ -2285,6 +2300,7 @@ mod tests {
             CatalogSeries::Bars(bars),
             take(|command| matches!(command, SubscribeCommand::Bars(_))),
         )];
+
         for (kind, data) in kinds {
             let command = match data {
                 D::QuoteTick => take(|command| matches!(command, SubscribeCommand::Quotes(_))),
@@ -2357,11 +2373,13 @@ mod tests {
                 )
                 .unwrap();
             assert!(created.is_disconnected(), "{name}");
+
             for (i, (kind, _, subscription)) in subscriptions_of(venues[0]).into_iter().enumerate()
             {
                 let streamed = venues
                     .iter()
                     .any(|&id| streams(&subscriptions_of(id).swap_remove(i).1).is_ok());
+
                 if streams_none(created.as_mut(), subscription) == streamed {
                     drift.push(format!("{name}'s {kind}: streamed {streamed}"));
                 }
@@ -2641,6 +2659,7 @@ mod tests {
     fn assert_routed_whichever_registers_first(ids: &[&str], routed: &[(&str, &str, &str, &str)]) {
         let ids: Vec<InstrumentId> = ids.iter().map(|&id| InstrumentId::from(id)).collect();
         let mut first = HashSet::new();
+
         for _ in 0..64 {
             let mut node = live_node(lse_and_ib_clients(&ids))
                 .unwrap_or_else(|e| panic!("the node of {ids:?} not built: {e:#}"));

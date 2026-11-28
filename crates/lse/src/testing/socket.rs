@@ -54,18 +54,22 @@ impl MockLseSocket {
         let received: Received = Arc::default();
         let log = Arc::clone(&received);
         let script = Arc::new(Mutex::new(script));
+
         std::thread::spawn(move || {
             for (connection, stream) in listener.incoming().enumerate() {
                 let Ok(stream) = stream else { return };
                 let log = Arc::clone(&log);
                 let script = Arc::clone(&script);
+
                 std::thread::spawn(move || {
                     let Ok(mut socket) = tungstenite::accept(stream) else {
                         return;
                     };
+
                     if socket.send(Message::text(WS_WELCOME.trim())).is_err() {
                         return;
                     }
+
                     while let Ok(message) = socket.read() {
                         let Message::Text(text) = message else {
                             continue;

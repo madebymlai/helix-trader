@@ -118,6 +118,7 @@ pub(crate) async fn clients(
     let clients = configs(instrument_ids, environment)?;
     let account = Account::connect(&clients.exec)?;
     ensure_net_mode(account.position_mode().await?)?;
+
     for instrument in &defined {
         let id = instrument.id();
         ensure_leverage(id, account.leverage(id).await?, instrument.margin_init())?;

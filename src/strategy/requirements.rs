@@ -189,6 +189,7 @@ impl CustomSeries {
                 .filter(|&contract| rolls::root_of(contract) == Some(root))?;
             (on_root.on(contract) != *series).then_some(contract)
         };
+
         if self.type_name() != other.type_name() {
             return None;
         }
@@ -368,6 +369,7 @@ fn merged<K: PartialEq + Clone>(
             start: UnixNanos::from(from).as_u64(),
             end: UnixNanos::from(to).as_u64(),
         };
+
         match groups.iter_mut().find(|(of, _)| *of == key) {
             Some((_, intervals)) => intervals.push(interval),
             None => groups.push((key, vec![interval])),

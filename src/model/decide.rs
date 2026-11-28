@@ -240,6 +240,7 @@ where
     let cache = strategy.cache();
     let quoted = cache.quote(&instrument_id).map(|quote| quote.ts_init);
     let traded = cache.trade(&instrument_id).map(|trade| trade.ts_init);
+
     if features
         .last_update(instrument_id)
         .max(quoted)
