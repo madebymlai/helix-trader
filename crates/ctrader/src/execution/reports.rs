@@ -166,6 +166,7 @@ impl Reports<'_> {
             .with_venue_position_id(position_id(position.position_id))
         };
         let mut reports = Vec::new();
+
         if let Some(stop_loss) = position.stop_loss.filter(|p| *p > 0.0) {
             let trigger = price(instrument, stop_loss).with_context(what)?;
             reports.push(
@@ -174,6 +175,7 @@ impl Reports<'_> {
                     .with_trigger_type(trigger_type(position.stop_loss_trigger_method())),
             );
         }
+
         if let Some(take_profit) = position.take_profit.filter(|p| *p > 0.0) {
             let limit = price(instrument, take_profit).with_context(what)?;
             reports.push(protection(Leg::TakeProfit, OrderType::Limit).with_price(limit));
@@ -299,6 +301,7 @@ impl Reports<'_> {
                 if let Some((status, fill)) = self.protection_fill(order, deal, hit)? {
                     reports.push((status, Some(fill)));
                 }
+
                 match hit {
                     Leg::StopLoss => vec![Leg::TakeProfit],
                     Leg::TakeProfit => vec![Leg::StopLoss],
@@ -306,6 +309,7 @@ impl Reports<'_> {
             }
             None => vec![Leg::StopLoss, Leg::TakeProfit],
         };
+
         for leg in cancelled {
             if let Some(status) = self.protection_status(order, leg, OrderStatus::Canceled)? {
                 reports.push((status, None));
@@ -420,12 +424,15 @@ impl Reports<'_> {
             None,
         )
         .with_reduce_only(order.closing_order.unwrap_or_default());
+
         if let Some(expire_time) = expire_time {
             report = report.with_expire_time(expire_time);
         }
+
         if let Some(position) = order.position_id.filter(|id| *id > 0) {
             report = report.with_venue_position_id(position_id(position));
         }
+
         match order_type {
             OrderType::Limit => {
                 let limit = order
@@ -443,6 +450,7 @@ impl Reports<'_> {
             }
             _ => {}
         }
+
         if let Some(avg) = order.execution_price.filter(|_| filled.is_positive()) {
             report = report.with_avg_px(decimal(avg).with_context(what)?);
         }
@@ -501,6 +509,7 @@ pub(super) fn explained<'d>(
     open: &HashMap<i64, i64>,
 ) -> (Vec<&'d ProtoOaDeal>, Vec<i64>) {
     let mut net: HashMap<i64, i64> = HashMap::new();
+
     for deal in deals.iter().filter(|d| fills(d)) {
         let signed = match side(deal.trade_side()) {
             OrderSide::Buy => deal.filled_volume,

@@ -184,6 +184,7 @@ impl DataActor for ModelEma {
                 None => Ok(()),
             };
         }
+
         if !orders::on_time_event(self, event)? {
             Rc::clone(&self.model).on_time_event(self, event)?;
         }
@@ -432,6 +433,7 @@ mod tests {
             Some(UnixNanos::from(sent)),
             Some(account),
         );
+
         for event in [
             TestOrderEventStubs::submitted(&entry, account),
             TestOrderEventStubs::accepted(&entry, account, VenueOrderId::from("V-1")),

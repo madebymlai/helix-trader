@@ -383,6 +383,7 @@ fn a_restart_sets_the_time_of_its_open_trade_again() {
         Some(UnixNanos::from(sent)),
         Some(account),
     );
+
     for event in [
         TestOrderEventStubs::submitted(&entry, account),
         TestOrderEventStubs::accepted(&entry, account, VenueOrderId::from("V-1")),

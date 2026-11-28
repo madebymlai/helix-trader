@@ -267,6 +267,7 @@ impl LseHttpClient {
                 Some(vec![RATE_KEY.to_string()]),
             )
             .await?;
+
         if response.status.is_success() {
             return Ok(response);
         }

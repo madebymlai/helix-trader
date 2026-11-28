@@ -88,6 +88,7 @@ where
     let mut ticks = Vec::new();
     let mut window_to = to_ms;
     let mut failure = None;
+
     'windows: while window_to > from_ms {
         let window_from = from_ms.max(window_to - WEEK_MS);
         let mut to = window_to;
@@ -102,10 +103,12 @@ where
             let (Some(newest), Some(oldest)) = (answer.first(), answer.last()) else {
                 break;
             };
+
             if !more {
                 ticks.extend(answer);
                 break;
             }
+
             if newest.ms == oldest.ms {
                 let e = anyhow::anyhow!(
                     "cTrader answered a full page of ticks all at {} ms: no way to page past it",
@@ -121,6 +124,7 @@ where
         window_to = window_from;
     }
     ticks.reverse();
+
     match failure {
         None => Pages {
             ticks,
@@ -216,6 +220,7 @@ pub(super) fn merge(
         bid.ticks.iter().filter(in_window).peekable(),
         ask.ticks.iter().filter(in_window).peekable(),
     );
+
     loop {
         let ms = match (bids.peek(), asks.peek()) {
             (None, None) => break,
@@ -228,10 +233,12 @@ pub(super) fn merge(
             last_bid = Some(b.price);
             ticks += 1;
         }
+
         while let Some(a) = asks.next_if(|a| a.ms == ms) {
             last_ask = Some(a.price);
             ticks += 1;
         }
+
         match rule.next(ms, last_bid, last_ask, None)? {
             Merged::Quote(quote) => merged.quotes.push(quote),
             Merged::OneSided => merged.one_sided += ticks,
@@ -299,6 +306,7 @@ impl QuoteMerge {
         let (Some(b), Some(a)) = (self.bid, self.ask) else {
             return Ok(Merged::OneSided);
         };
+
         if a < b {
             return Ok(Merged::Crossed);
         }

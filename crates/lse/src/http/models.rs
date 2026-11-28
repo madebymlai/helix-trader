@@ -74,6 +74,7 @@ impl Display for LsePair {
         if let Some(listed) = self.listed_date {
             write!(f, ", listed {listed}")?;
         }
+
         if let Some(delisted) = self.delisted_date {
             write!(f, ", delisted {delisted}")?;
         }

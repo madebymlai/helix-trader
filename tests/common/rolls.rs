@@ -146,9 +146,11 @@ pub(crate) fn catalog_storing(post_trades_stored: bool) -> TempDir {
     if post_trades_stored {
         trades.push(post_trades());
     }
+
     for trades in trades {
         catalog.write_to_parquet(&trades, from, to, None).unwrap();
     }
+
     for depths in [pre_depths(), post_depths()] {
         catalog.write_to_parquet(&depths, from, to, None).unwrap();
     }
@@ -177,6 +179,7 @@ pub(crate) fn catalog_of_ticks(trades: &[TradeTick], quotes: &[QuoteTick]) -> Te
         Some(tuesday("22:00:00").into()),
         Some(wednesday("02:00:00").into()),
     );
+
     for contract in [PRE, POST] {
         let of: Vec<TradeTick> = trades
             .iter()

@@ -93,6 +93,7 @@ pub(super) async fn add_fill(
             matches!(request.data, FillData::Instrument(id) if Row::of(id.venue).definitions == DefinitionsSource::Databento)
         });
     let custom = missing_custom(catalog, custom)?;
+
     if !definitions.is_empty() {
         let databento = databento()?;
         let definitions = databento.within_datasets(&definitions).await?;
@@ -131,6 +132,7 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
 /// subscription names it by client id (`venues::custom_data_client`).
 pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
     let mut venues: Vec<String> = Vec::new();
+
     for id in instrument_ids {
         let venue = id.venue.to_string();
         if !venues.contains(&venue) {

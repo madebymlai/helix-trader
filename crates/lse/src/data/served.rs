@@ -61,6 +61,7 @@ pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
          OPRA",
         LSEDGE = *LSEDGE_VENUE
     );
+
     match data {
         NautilusDataType::TradeTick
             if venue == *LSEDGE_VENUE && LseSymbol::from_instrument_id(id)?.is_index() =>

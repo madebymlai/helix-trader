@@ -329,6 +329,7 @@ async fn subscribed_option_contracts_receive_their_trades_from_one_chain_of_thei
         .unwrap();
 
     let mut trades = Vec::new();
+
     for _ in 0..3 {
         let event = next_event(&mut events).await;
         let DataEvent::Data(Data::Trade(trade)) = event else {

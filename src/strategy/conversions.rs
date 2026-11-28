@@ -98,6 +98,7 @@ impl Conversions {
                 on.push(pair.venue);
             }
         }
+
         if let [_, _, ..] = on.as_slice() {
             let named: Vec<String> = on.iter().map(ToString::to_string).collect();
             errors.push(ConfigError::invalid_value(
@@ -109,6 +110,7 @@ impl Conversions {
                 ),
             ));
         }
+
         for (i, pair) in self.0.iter().enumerate() {
             if let Err(e) = venues::rate_series(*pair) {
                 errors.push(ConfigError::invalid_value(
@@ -119,6 +121,7 @@ impl Conversions {
             let based_elsewhere = traded.iter().find(|instrument| {
                 instrument.venue != pair.venue && venues::has_base_currency(instrument.venue)
             });
+
             if let Some(instrument) = based_elsewhere {
                 errors.push(ConfigError::invalid_value(
                     format!("trade.conversions[{i}]"),
@@ -182,6 +185,7 @@ impl Rates {
         currency: Currency,
     ) -> anyhow::Result<Option<Money>> {
         let mut sum = Decimal::ZERO;
+
         for amount in equity.into_iter().filter(|amount| !amount.is_zero()) {
             let rate = match self.venue {
                 Some(venue) => cache.get_xrate(venue, amount.currency, currency, PriceType::Mid),
@@ -270,6 +274,7 @@ mod tests {
 
     fn defining(pairs: &[&str]) -> Cache {
         let mut cache = Cache::default();
+
         for pair in pairs {
             let id = InstrumentId::from(*pair);
             let pair = default_fx_ccy(id.symbol, Some(id.venue));

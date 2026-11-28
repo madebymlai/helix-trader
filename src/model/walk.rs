@@ -228,6 +228,7 @@ fn score(
 ) -> ModelScores {
     let (mut model_rows, mut model_trades) = (vec![], vec![]);
     let mut periods = vec![];
+
     for (i, &at) in times.iter().enumerate() {
         let (from, to) = (at.max(start), times.get(i + 1).copied().unwrap_or(end));
         let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(to));
@@ -599,6 +600,7 @@ mod tests {
         } else {
             0.0
         };
+
         match side {
             Side::Long => long,
             Side::Short => -long,

@@ -326,6 +326,7 @@ impl Streamed {
             Some(3) => sent(dbn_frames(level_3)),
             _ => sent(opening[..4].to_vec()),
         };
+
         match self {
             Self::Gcz26 => MockExchangeStream::cme(script),
             Self::Nvda => MockExchangeStream::nasdaq(script),
@@ -337,6 +338,7 @@ impl Streamed {
             .base_url_http(lse.url().to_string())
             .build();
         let url = stream.map(|stream| stream.url().to_string());
+
         match self {
             Self::Gcz26 => {
                 config.cme_api_key = Some(SecretString::from(CME_API_KEY));
@@ -347,6 +349,7 @@ impl Streamed {
                 config.base_url_ws_nasdaq = url;
             }
         }
+
         if stream.is_some() {
             config.stream_ids = vec![self.id()];
         }

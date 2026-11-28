@@ -421,6 +421,7 @@ impl ModelHandle {
             log::debug!("No decision: the warmup is not answered yet");
             return Ok(None);
         }
+
         if !self.target_initialized() {
             log::debug!("No decision: the target's ATR is not initialized");
             return Ok(None);
@@ -429,6 +430,7 @@ impl ModelHandle {
         else {
             return Ok(None);
         };
+
         match &self.serving {
             Serving::Deciding(deciding) => {
                 let decision =
@@ -1106,6 +1108,7 @@ mod tests {
                 Some(Venue::from("SIM")),
             )))
             .unwrap();
+
         if let Some([bid, ask]) = quote {
             let now = probe.clock().timestamp_ns();
             cache
@@ -2079,6 +2082,7 @@ mod tests {
         let events = clock
             .borrow_mut()
             .advance_time(UnixNanos::from(at(to)), true);
+
         for event in events {
             handle.on_time_event(probe, &event).unwrap();
         }

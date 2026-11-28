@@ -191,6 +191,7 @@ impl CTraderSession {
         }
         let mut windows = vec![(from_ms, to_ms)];
         let mut deals: HashMap<i64, ProtoOaDeal> = HashMap::new();
+
         while let Some((from, to)) = windows.pop() {
             let page: ProtoOaDealListRes = self
                 .client
@@ -320,6 +321,7 @@ impl CTraderSession {
         }
         let mut windows = vec![(from_ms, to_ms)];
         let mut orders: HashMap<i64, ProtoOaOrder> = HashMap::new();
+
         while let Some((from, to)) = windows.pop() {
             let page: ProtoOaOrderListRes = self
                 .client
@@ -940,6 +942,7 @@ mod tests {
             .unwrap();
 
         let mut stamped = Vec::new();
+
         for _ in &ids {
             let spot = tokio::time::timeout(std::time::Duration::from_secs(10), spots.recv())
                 .await

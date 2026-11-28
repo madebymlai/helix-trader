@@ -408,6 +408,7 @@ impl LseWsHandler {
                 },
             }
         }
+
         if let Some(client) = self.client.take() {
             client.disconnect().await;
         }
@@ -440,6 +441,7 @@ impl LseWsHandler {
                 return;
             }
         };
+
         match frame {
             LseWsFrame::Welcome => {
                 let frame = LseWsAction::Auth {
@@ -478,12 +480,14 @@ impl LseWsHandler {
         if let Some(waiting) = self.authenticating.take() {
             let _ = waiting.send(Ok(authenticated));
         }
+
         if let Gap::Open { last } = std::mem::take(&mut self.gap) {
             self.pass(LseWsMessage::Reconnected {
                 last,
                 at: get_atomic_clock_realtime().get_time_ns(),
             });
         }
+
         for topic in self.subscriptions.reset_after_reconnect() {
             self.send_subscribe(Topic::of(&topic)).await;
         }
@@ -491,6 +495,7 @@ impl LseWsHandler {
 
     fn refused(&mut self, refusal: LseWsRefusal) {
         let name = self.socket.name();
+
         if !self.authenticated {
             match self.authenticating.take() {
                 Some(waiting) => {
@@ -500,6 +505,7 @@ impl LseWsHandler {
             }
             return;
         }
+
         match self.unanswered.pop_front() {
             Some(Unanswered::Subscribe(topic)) => {
                 // Kept for the next connection
@@ -531,6 +537,7 @@ impl LseWsHandler {
         self.epoch = epoch;
         self.authenticated = false;
         self.unanswered.clear();
+
         if matches!(self.gap, Gap::Closed) {
             self.gap = Gap::Open {
                 last: self.last_frame,
@@ -551,6 +558,7 @@ impl LseWsHandler {
         let Some(client) = self.client.as_ref().filter(|client| client.is_active()) else {
             return false;
         };
+
         match client
             .send_text_on_connection(frame, None, self.epoch)
             .await

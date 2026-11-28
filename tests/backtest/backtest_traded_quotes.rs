@@ -111,6 +111,7 @@ impl Buyer {
 impl DataActor for Buyer {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let gold = InstrumentId::from(ic::INSTRUMENT_ID);
+
         match self.reads {
             Reads::Imbalances => self.subscribe_data(imbalance_type(), None, None),
             Reads::Deltas => {

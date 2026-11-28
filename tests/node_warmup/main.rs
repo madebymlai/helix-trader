@@ -296,6 +296,7 @@ impl FakeClient {
             None => self.sender.send(event)?,
             Some(latency) => {
                 let sender = self.sender.clone();
+
                 get_runtime().spawn(async move {
                     tokio::time::sleep(latency).await;
                     sender.send(event).unwrap();
@@ -319,6 +320,7 @@ impl FakeClient {
         let now = get_atomic_clock_realtime().get_time_ns().as_u64();
         let mut venue = self.venue.borrow_mut();
         let mut made = vec![];
+
         if let Some(length) = venue.resends {
             let (start, _) = *venue
                 .asked
@@ -683,6 +685,7 @@ impl DataActor for Warming {
         if let Err(e) = Rc::clone(&self.warmup).on_data_response(self, response) {
             *self.failure.borrow_mut() = Some(format!("{e:#}"));
         }
+
         if !self.warmup.is_warming() {
             if let Some(traded) = self.traded.clone() {
                 *self.exits.borrow_mut() = traded.at(self)?.ok().map(|sides| sides.long);
@@ -2109,6 +2112,7 @@ fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
             )
         })
         .collect();
+
     for data in ["quotes", "trades"] {
         assert!(
             exported.contains(&(Some("4000000001".to_string()), Some(data.to_string()))),

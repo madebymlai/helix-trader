@@ -145,6 +145,7 @@ impl TryFrom<String> for ContractTemplate {
             });
             rest = after;
         }
+
         if !rest.is_empty() {
             parts.push(Part::Text(rest.to_owned()));
         }
@@ -184,6 +185,7 @@ impl ContractTemplate {
     fn month_of<'a>(&self, symbol: &'a str) -> Option<&'a str> {
         let mut month = None;
         let mut rest = symbol;
+
         for part in &self.0 {
             let width = match part {
                 Part::Text(text) => {
@@ -299,6 +301,7 @@ fn weekday_before(date: civil::Date) -> civil::Date {
         day = day
             .yesterday()
             .expect("a contract delivers within jiff's dates");
+
         if !matches!(
             day.weekday(),
             civil::Weekday::Saturday | civil::Weekday::Sunday

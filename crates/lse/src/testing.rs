@@ -587,6 +587,7 @@ impl MockLse {
         let calls: Arc<Mutex<Vec<Call>>> = Arc::default();
         let log = Arc::clone(&calls);
         let script = Arc::new(Mutex::new(script.into_iter()));
+
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
@@ -616,6 +617,7 @@ impl MockLse {
 fn serve(stream: TcpStream, log: &Mutex<Vec<Call>>, script: &Mutex<std::vec::IntoIter<Reply>>) {
     let mut reader = BufReader::new(stream.try_clone().expect("a stream"));
     let mut writer = stream;
+
     loop {
         let mut request_line = String::new();
         if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
@@ -623,6 +625,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<Call>>, script: &Mutex<std::vec::Int
         }
         let received = Instant::now();
         let mut api_key = None;
+
         loop {
             let mut header = String::new();
             if reader.read_line(&mut header).unwrap_or(0) == 0 {
@@ -632,6 +635,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<Call>>, script: &Mutex<std::vec::Int
             if header.is_empty() {
                 break;
             }
+
             if let Some((name, value)) = header.split_once(':')
                 && name.eq_ignore_ascii_case("x-api-key")
             {
@@ -667,6 +671,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<Call>>, script: &Mutex<std::vec::Int
             reason(reply.status),
             reply.body.len()
         );
+
         for (name, value) in &reply.headers {
             head.push_str(&format!("{name}: {value}\r\n"));
         }

@@ -205,6 +205,7 @@ fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
     let lever = levers
         .next()
         .with_context(|| format!("OKX listed no leverage for {id}"))??;
+
     for other in levers {
         let other = other?;
         anyhow::ensure!(

@@ -241,6 +241,7 @@ impl CTraderWsHandler {
         let start = Instant::now() + HEARTBEAT_INTERVAL;
         let mut heartbeat = time::interval_at(start, HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
                 biased;
@@ -318,6 +319,7 @@ impl CTraderWsHandler {
 
     async fn close(&mut self) {
         self.abandon_renewal("the connection closed");
+
         if let Some(client) = self.client.take() {
             // Fails the authentication, which the transport tracks
             client.disconnect().await;
@@ -382,6 +384,7 @@ impl CTraderWsHandler {
         self.renewed = false;
         self.wake = None;
         self.replay = true;
+
         for (symbol_id, subscribe) in std::mem::take(&mut self.spot_changes) {
             self.mark_spots(symbol_id, subscribe);
         }
@@ -394,6 +397,7 @@ impl CTraderWsHandler {
         let frame = secret_frame(&request, Some(id.clone()));
         request.client_id.zeroize();
         request.client_secret.zeroize();
+
         match self.send(frame).await {
             Ok(()) => self.session = Session::ApplicationAuth(id),
             Err(SendError::ConnectionChanged) => self.await_connection("application auth"),
@@ -446,6 +450,7 @@ impl CTraderWsHandler {
                 return;
             }
         };
+
         if self.adopt_stored() {
             drop(lock);
             self.authenticate_account().await;
@@ -458,6 +463,7 @@ impl CTraderWsHandler {
         };
         let frame = secret_frame(&request, Some(id.clone()));
         request.refresh_token.zeroize();
+
         match self.send(frame).await {
             Ok(()) => {
                 log::info!("renewing the cTrader access token");
@@ -505,6 +511,7 @@ impl CTraderWsHandler {
             renewed.expires_in,
             wall_clock(),
         );
+
         match lock.save(&tokens) {
             Ok(()) => log::info!(
                 "cTrader access token renewed, valid until {}; saved to {}",
@@ -539,6 +546,7 @@ impl CTraderWsHandler {
         };
         let frame = secret_frame(&request, Some(id.clone()));
         request.access_token.zeroize();
+
         match self.send(frame).await {
             Ok(()) => self.session = Session::AccountAuth(id),
             Err(SendError::ConnectionChanged) => self.await_connection("account auth"),
@@ -579,6 +587,7 @@ impl CTraderWsHandler {
         // auth on the same one.
         let mut subscribe = Vec::new();
         let mut unsubscribe = Vec::new();
+
         if std::mem::take(&mut self.replay) {
             subscribe = self
                 .subscriptions
@@ -587,6 +596,7 @@ impl CTraderWsHandler {
                 .map(|topic| spot_symbol(topic))
                 .collect();
         }
+
         for (symbol_id, subscribe_it) in std::mem::take(&mut self.spot_changes) {
             if self.mark_spots(symbol_id, subscribe_it) {
                 if subscribe_it {
@@ -596,12 +606,15 @@ impl CTraderWsHandler {
                 }
             }
         }
+
         if !subscribe.is_empty() {
             self.send_spots(true, subscribe).await;
         }
+
         if !unsubscribe.is_empty() {
             self.send_spots(false, unsubscribe).await;
         }
+
         for queued in std::mem::take(&mut self.queued) {
             self.dispatch(queued).await;
         }
@@ -680,6 +693,7 @@ impl CTraderWsHandler {
             };
             frame(&request, Some(id.clone()))
         };
+
         match self.send(frame).await {
             Ok(()) => {
                 self.pending.insert(
@@ -697,6 +711,7 @@ impl CTraderWsHandler {
             }
             Err(e) => {
                 log::error!("cTrader spot subscription of {symbol_ids:?} not sent: {e}");
+
                 if subscribe {
                     for symbol_id in &symbol_ids {
                         self.subscriptions.mark_failure(&spot_topic(*symbol_id));
@@ -733,6 +748,7 @@ impl CTraderWsHandler {
             client_msg_id: Some(id.clone()),
         }
         .encode_to_vec();
+
         match self.send(frame).await {
             Ok(()) => {}
             Err(SendError::ConnectionChanged) => {
@@ -756,6 +772,7 @@ impl CTraderWsHandler {
             Pending::Caller(reply) => !reply.is_closed(),
             Pending::Spots { .. } | Pending::Trade => true,
         });
+
         match request.awaiting {
             Awaiting::Caller(reply) => {
                 self.pending.insert(id, Pending::Caller(reply));
@@ -797,6 +814,7 @@ impl CTraderWsHandler {
         if envelope.payload_type == ProtoHeartbeatEvent::TYPE {
             return;
         }
+
         if self.answers_renewal(&envelope) {
             self.renewal_answered(&envelope).await;
             return;
@@ -833,6 +851,7 @@ impl CTraderWsHandler {
             }
             _ => {}
         }
+
         match id.and_then(|id| self.pending.remove(id)) {
             Some(Pending::Caller(reply)) => {
                 let _ = reply.send(Ok(envelope));
@@ -871,6 +890,7 @@ impl CTraderWsHandler {
                 payload_name(other)
             ))),
         };
+
         match message {
             Ok(message) => self.pass_trade(envelope, message),
             Err(e) => log::warn!("cTrader's answer to a trade request: {e}"),
@@ -909,10 +929,12 @@ impl CTraderWsHandler {
         } else {
             "unsubscription"
         };
+
         match outcome {
             Ok(answered) => {
                 let (done, missing): (Vec<i64>, Vec<i64>) =
                     symbol_ids.iter().partition(|id| answered.contains(id));
+
                 for symbol_id in &done {
                     let topic = spot_topic(*symbol_id);
                     if subscribe {
@@ -921,12 +943,15 @@ impl CTraderWsHandler {
                         self.subscriptions.confirm_unsubscribe(&topic);
                     }
                 }
+
                 for symbol_id in &missing {
                     self.subscriptions.mark_failure(&spot_topic(*symbol_id));
                 }
+
                 if !done.is_empty() {
                     log::debug!("cTrader spot {action} of symbols {done:?} done");
                 }
+
                 if !missing.is_empty() {
                     log::error!(
                         "cTrader answered the spot subscription of symbols {symbol_ids:?} \
@@ -984,6 +1009,7 @@ impl CTraderWsHandler {
                 .await;
             return;
         }
+
         if envelope.payload_type == ProtoOaExecutionEvent::TYPE {
             match open::<ProtoOaExecutionEvent>(envelope) {
                 Ok(event) => self.pass_trade(envelope, TradeMessage::Execution(event)),
@@ -991,6 +1017,7 @@ impl CTraderWsHandler {
             }
             return;
         }
+
         if envelope.payload_type == ProtoOaOrderErrorEvent::TYPE {
             match open::<ProtoOaOrderErrorEvent>(envelope) {
                 Ok(event) => self.pass_trade(envelope, TradeMessage::OrderError(event)),
@@ -998,6 +1025,7 @@ impl CTraderWsHandler {
             }
             return;
         }
+
         if envelope.payload_type == ProtoOaSpotEvent::TYPE {
             let payload = envelope.payload.as_deref().unwrap_or_default();
             match ProtoOaSpotEvent::decode(payload) {

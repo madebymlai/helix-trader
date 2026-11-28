@@ -86,6 +86,7 @@ impl DataActor for Probe {
         if let Err(e) = Rc::clone(&self.warmup).on_data_response(self, response) {
             self.record.borrow_mut().failure = Some(e.to_string());
         }
+
         if !self.warmup.is_warming() {
             self.shutdown_system(Some("the warmup ended".to_string()));
         }

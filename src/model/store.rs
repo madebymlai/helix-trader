@@ -264,6 +264,7 @@ impl StoredModel {
             "it takes {width} features, its manifest names {}",
             manifest.feature_names.len()
         );
+
         for probe in &manifest.probes {
             let prediction = model.predict(&probe.row)?;
             anyhow::ensure!(
@@ -485,6 +486,7 @@ impl ModelStore {
         let models = directory.join(&publish);
         fs::create_dir_all(&models)
             .with_context(|| format!("creating the model set {}", directory.display()))?;
+
         for model in &model_set.sides {
             let side = model
                 .manifest

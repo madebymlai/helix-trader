@@ -104,6 +104,7 @@ fn a_reader_sees_a_clean_prefix_of_the_streamed_data_while_the_node_runs() {
     let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
     let mut prefixes_while_running: Vec<Read> = Vec::new();
     let deadline = Instant::now() + PATIENCE;
+
     loop {
         let read = Read::of(dir.path());
         assert!(node.try_wait().unwrap().is_none(), "the node stopped");
@@ -114,6 +115,7 @@ fn a_reader_sees_a_clean_prefix_of_the_streamed_data_while_the_node_runs() {
         if read.quotes > 0 {
             prefixes_while_running.push(read);
         }
+
         if grown && bars >= 3 {
             break;
         }
@@ -375,6 +377,7 @@ async fn run_node(root: &Path, promotion_interval: Duration, first_seq: u64) -> 
         None,
         vec![stub],
     )?;
+
     if std::env::var(WRITE_BACK).is_ok() {
         write_back(root)?;
     }
@@ -626,6 +629,7 @@ fn wait_for_staged_quotes(root: &Path, node: &mut Child) {
     };
     let deadline = Instant::now() + PATIENCE;
     let mut first = 0;
+
     loop {
         assert!(Instant::now() < deadline, "no quotes staged");
         assert!(node.try_wait().unwrap().is_none(), "the node stopped");
@@ -647,6 +651,7 @@ fn interrupt(node: &mut Child) -> ExitStatus {
         .unwrap();
     assert!(status.success());
     let deadline = Instant::now() + PATIENCE;
+
     loop {
         if let Some(exit) = node.try_wait().unwrap() {
             return exit;
@@ -660,10 +665,12 @@ fn interrupt(node: &mut Child) -> ExitStatus {
 /// returns how it exited.
 fn interrupt_once_promoted(root: &Path, node: &mut Child, files: usize) -> ExitStatus {
     let deadline = Instant::now() + PATIENCE;
+
     loop {
         let promoted = catalog(root)
             .get_intervals(&NautilusDataType::QuoteTick.into(), Some(INSTRUMENT_ID))
             .unwrap();
+
         if promoted.len() >= files {
             return interrupt(node);
         }
@@ -881,6 +888,7 @@ impl DataClient for Stub {
         ))?;
         let sender = self.sender.clone();
         let first_seq = self.first_seq;
+
         self.feed = Some(get_runtime().spawn(async move {
             let instrument_id = InstrumentId::from(INSTRUMENT_ID);
             let clock = get_atomic_clock_realtime();
@@ -914,12 +922,14 @@ impl DataClient for Stub {
                 for (level, order) in (0_u32..).zip(depth.bids.iter_mut()) {
                     order.price = Price::new(0.8 - f64::from(level) * 0.000_01, 5);
                 }
+
                 for (level, order) in (0_u32..).zip(depth.asks.iter_mut()) {
                     order.price = Price::new(0.8001 + f64::from(level) * 0.000_01, 5);
                 }
                 depth.sequence = seq;
                 depth.ts_event = ts;
                 depth.ts_init = ts;
+
                 for data in [
                     Data::Quote(quote),
                     Data::Trade(trade),

@@ -30,6 +30,7 @@ fn a_sliver_between_promoted_files_is_replayed_through() {
     let noon = UnixNanos::from(trades::at("12:00"));
     let (morning, afternoon): (Vec<QuoteTick>, Vec<QuoteTick>) =
         quotes.into_iter().partition(|quote| quote.ts_event < noon);
+
     for file in [morning, afternoon] {
         catalog.write_to_parquet(&file, None, None, None).unwrap();
     }

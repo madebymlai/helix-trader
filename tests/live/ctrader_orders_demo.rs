@@ -188,6 +188,7 @@ impl DataActor for BracketOnce {
             self.rate_known = true;
             return Ok(());
         }
+
         if self.sent || !self.rate_known {
             return Ok(());
         }
@@ -329,6 +330,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     let [entry, close] = record.fills.as_slice() else {
         panic!("not two fills: {:?}", record.fills);
     };
+
     for fill in [entry, close] {
         assert_eq!(fill.position_id, Some(opened.position_id));
         assert_eq!(fill.last_qty, Quantity::from(GOLD_OUNCES));

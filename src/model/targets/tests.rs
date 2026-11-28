@@ -1144,6 +1144,7 @@ fn a_trade_on_a_stop_worth_under_half_a_cent_realizes_over_its_exact_worth() {
         },
         settled_at: UnixNanos::from(2),
     });
+
     for side in [Side::Long, Side::Short] {
         let realized = Example::of_side(&row, side).realized();
         assert!((realized + 2.0).abs() < 1e-12, "{side:?}: {realized}");

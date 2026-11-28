@@ -267,6 +267,7 @@ impl FakeClient {
             Answer::Later => {
                 let sender = self.sender.clone();
                 let event = DataEvent::ResponseEnvelope(envelope(response));
+
                 get_runtime().spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     done.fetch_sub(1, Ordering::SeqCst);
@@ -1033,6 +1034,7 @@ fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_serie
         .execute()
         .unwrap();
     assert_eq!(stored_funding, [funding("2025-10-17T08:00:00Z")]);
+
     for (data_type, identifier) in [
         (NautilusDataType::Bar, BARS),
         (NautilusDataType::FundingRateUpdate, GCZ26),

@@ -248,6 +248,7 @@ impl CTraderWebSocketClient {
         handler_task
             .spawn(handler.run())
             .map_err(|e| anyhow::anyhow!("starting the cTrader handler: {e}"))?;
+
         if let Some(socket) = &socket {
             socket.register(move || reconnect.request_reconnect());
         }
@@ -259,6 +260,7 @@ impl CTraderWebSocketClient {
             historical,
             socket,
         };
+
         match auth
             .wait_for_result::<String>(AUTH_TIMEOUT, authenticated)
             .await
@@ -313,6 +315,7 @@ impl CTraderWebSocketClient {
         let keys = [Ustr::from(HISTORICAL_KEY)];
         while self.auth.wait_for_authenticated(REQUEST_TIMEOUT).await {
             self.historical.await_keys_ready(Some(&keys)).await;
+
             if self.auth.is_authenticated() {
                 return;
             }
@@ -391,6 +394,7 @@ impl CTraderWebSocketClient {
     /// Joins the handler within `DISCONNECT_TIMEOUT`, then aborts it.
     pub(super) async fn disconnect(mut self) {
         self.begin_shutdown();
+
         match finish_task(&mut self.handler, DISCONNECT_TIMEOUT, ABORT_TIMEOUT).await {
             None | Some(TaskJoinOutcome::Completed(())) => {}
             Some(TaskJoinOutcome::Aborted) => {
@@ -401,6 +405,7 @@ impl CTraderWebSocketClient {
                 log::error!("the cTrader handler did not stop after its abort");
             }
         }
+
         if let Some(socket) = &self.socket {
             socket.deregister();
         }
@@ -461,6 +466,7 @@ mod tests {
 
     fn symbols_peer(connection: usize, request: &ProtoMessage) -> Vec<Action> {
         let _ = connection;
+
         if let Some(actions) = accept_auth(request) {
             return actions;
         }
@@ -843,6 +849,7 @@ mod tests {
             if let Some(actions) = accept_auth(request) {
                 return actions;
             }
+
             if request.payload_type == ProtoOaGetTickDataReq::TYPE {
                 return vec![reply(request, &ProtoOaGetTickDataRes::default())];
             }
@@ -1032,6 +1039,7 @@ mod tests {
                 if let Some(actions) = accept_auth(request) {
                     return actions;
                 }
+
                 if connection == 0 {
                     return vec![Action::Close];
                 }
@@ -1090,9 +1098,11 @@ mod tests {
 
     fn spots_peer(connection: usize, request: &ProtoMessage) -> Vec<Action> {
         let _ = connection;
+
         if let Some(actions) = accept_auth(request) {
             return actions;
         }
+
         match request.payload_type {
             t if t == ProtoOaSubscribeSpotsReq::TYPE => {
                 let asked: ProtoOaSubscribeSpotsReq = decode(request);

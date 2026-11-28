@@ -294,6 +294,7 @@ async fn a_leg_hit_after_a_partial_close_fills_what_is_left() {
     assert!(closed, "neither protection was hit within 15 minutes");
 
     println!("opened: {opened:#?}\nat the broker: {at_broker:#?}\nobserved: {observed:#?}");
+
     for leg in &at_broker {
         assert_eq!(leg.filled, leg.fills, "{leg:?}");
     }
@@ -638,6 +639,7 @@ impl Probe {
             positions.len(),
             orders.len()
         ));
+
         for position in positions {
             self.note(format!(
                 "  position {} {:?} qty={} orders={:?}",
@@ -647,6 +649,7 @@ impl Probe {
                 position.client_order_ids(),
             ));
         }
+
         for order in orders {
             self.note(format!(
                 "  order {} {:?} {:?} {} status={:?} venue_order_id={:?}",
@@ -715,6 +718,7 @@ impl Probe {
                 )
             )
         };
+
         if ended(&entry_status)
             || legs
                 .iter()
@@ -724,6 +728,7 @@ impl Probe {
             self.fail(format!("the bracket is {statuses:?}"));
             return self.finish();
         }
+
         if statuses
             != [
                 Some(OrderStatus::Filled),
@@ -737,6 +742,7 @@ impl Probe {
             .open_positions()
             .try_into()
             .map_err(|positions| anyhow::anyhow!("one position expected: {positions:?}"))?;
+
         if reduce {
             if !self.sent {
                 self.sent = true;
@@ -783,6 +789,7 @@ impl Probe {
             .filter(|id| !id.is_empty())
             .map(|id| self.held(id))
             .collect();
+
         for order in &orders {
             self.note(format!("  {order:?}"));
         }
@@ -838,10 +845,12 @@ impl Probe {
             self.note_state("flat");
             return self.finish();
         }
+
         if !positions.is_empty() {
             if !self.closing {
                 self.closing = true;
                 self.note_state("closing");
+
                 for position in &positions {
                     self.close_position(position, None, None, None, None, None, None)?;
                 }
@@ -851,11 +860,13 @@ impl Probe {
         let Some(cancelled_at) = self.cancelled_at else {
             self.cancelled_at = Some(now);
             self.note_state("cancelling");
+
             for order in orders {
                 self.cancel_order(order.client_order_id(), None, None)?;
             }
             return Ok(());
         };
+
         if now.as_u64().saturating_sub(cancelled_at.as_u64()) >= u64::try_from(SETTLE.as_nanos())? {
             self.note_state("orders left after their cancels");
             return self.finish();
@@ -919,9 +930,11 @@ impl DataActor for Probe {
             self.rate_known = true;
             return Ok(());
         }
+
         if self.report.done || !self.rate_known {
             return Ok(());
         }
+
         match self.step {
             Step::Open { distance, reduce } => self.open(quote, distance, reduce),
             Step::Crash if !self.sent => self.crash(),

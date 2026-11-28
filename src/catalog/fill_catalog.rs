@@ -99,6 +99,7 @@ pub async fn fill_catalog(
                 catalog_identifier(foreign),
             );
         }
+
         if let Some(last) = resume_point {
             items.retain(|item| item.ts_init() > last);
         }
@@ -801,6 +802,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut catalog = new_catalog(&dir);
         let mut asked = Vec::new();
+
         for end in [200, 300] {
             fill_quotes(
                 &mut catalog,
@@ -843,6 +845,7 @@ mod tests {
         let mut catalog = new_catalog(&dir);
         let hour = 60 * MINUTE_NS;
         let mut asked = Vec::new();
+
         for end in [hour, 2 * hour, 2 * hour] {
             fill_quotes(
                 &mut catalog,

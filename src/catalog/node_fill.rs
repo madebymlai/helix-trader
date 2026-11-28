@@ -181,6 +181,7 @@ pub fn missing(
             from: at(from),
             to: at(to),
         });
+
         match contracts.iter_mut().find(|(contract, _)| *contract == id) {
             Some((_, of_contract)) => of_contract.extend(requests),
             None => contracts.push((id, requests.collect())),
@@ -233,6 +234,7 @@ pub fn missing_custom(
     slices: &[CustomSlice],
 ) -> anyhow::Result<Vec<CustomFillRequest>> {
     let mut requests = Vec::new();
+
     for CustomSlice { series, from, to } in slices {
         let stored = NautilusDataType::Custom {
             type_name: series.type_name().to_string(),
@@ -573,10 +575,12 @@ impl DataActor for FillActor {
         let Some((id, asked)) = &self.pending else {
             return Ok(());
         };
+
         if response.correlation_id() != id {
             return Ok(());
         }
         let request = asked.request.to_string();
+
         if let Some(reason) = response.failure_reason() {
             self.fail(format!("{request} failed: {reason}"));
             return Ok(());
@@ -847,6 +851,7 @@ mod tests {
     fn promoted_quotes(dir: &Path, id: &str, files: &[(&str, &str)]) {
         let quotes = dir.join("data/quotes").join(id.replace('/', ""));
         std::fs::create_dir_all(&quotes).unwrap();
+
         for &(first, last) in files {
             let name = timestamps_to_filename(ts(first).into(), ts(last).into())
                 .replace(".parquet", "_0123456789abcdef.parquet");

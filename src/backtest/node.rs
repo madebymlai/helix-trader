@@ -271,6 +271,7 @@ pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
     let custom = backtest
         .requirements()
         .custom_slices(backtest.start, backtest.end);
+
     for CustomSlice { series, from, to } in &custom {
         let data_type = series.data_type();
         let read = catalog
@@ -866,6 +867,7 @@ mod tests {
                 ("ICMARKETS".to_string(), OmsType::Hedging),
             ]
         );
+
         for venue in config.venues() {
             assert_eq!(venue.starting_balances(), ["10000.00 EUR"]);
             assert_eq!(venue.default_leverage(), Some(leverage));

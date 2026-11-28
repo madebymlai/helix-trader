@@ -356,8 +356,10 @@ impl MockExchangeStream {
             Arc::clone(&released),
         );
         let script = Arc::new(Mutex::new(script));
+
         std::thread::spawn(move || {
             let mut connection = 0;
+
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
                 let (log, key_log, script, release) = (
@@ -379,6 +381,7 @@ impl MockExchangeStream {
                             .map(ToString::to_string);
                         let known = key.as_deref() == Some(api_key);
                         key_log.lock().expect("not poisoned").push(key);
+
                         if known {
                             Ok(response)
                         } else {
@@ -392,8 +395,10 @@ impl MockExchangeStream {
                 };
                 let this = connection;
                 connection += 1;
+
                 std::thread::spawn(move || {
                     let mut answered = false;
+
                     while let Ok(message) = socket.read() {
                         let Message::Text(text) = message else {
                             continue;
@@ -404,6 +409,7 @@ impl MockExchangeStream {
                         log.lock()
                             .expect("not poisoned")
                             .push((this, frame.clone()));
+
                         if answered {
                             continue;
                         }
@@ -439,6 +445,7 @@ impl MockExchangeStream {
                                     return;
                                 }
                             };
+
                             if sent.is_err() {
                                 return;
                             }

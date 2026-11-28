@@ -139,6 +139,7 @@ impl DataActor for Probe {
             bar.ts_event,
             (now.as_i64() - bar.ts_event.as_i64()) as f64 / 1e9,
         );
+
         if bar.bar_type.is_externally_aggregated() {
             let mut record = self.record.borrow_mut();
             record.live.push((*bar, now));
@@ -292,6 +293,7 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         MINUTE_NS,
         "a gap or a duplicate at the hand-off"
     );
+
     for (bar, arrived) in &record.live {
         let latency = arrived.as_i64() - bar.ts_event.as_i64();
         assert!(

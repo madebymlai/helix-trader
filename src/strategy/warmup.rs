@@ -774,6 +774,7 @@ where
         let id = actor.request_instrument(instrument_id, None, None, Some(client), None)?;
         requested.push(Requested::of(id));
     }
+
     for bar_type in &continuous_bars {
         let params = continuous.params(bar_type.instrument_id());
         let id = actor.request_bars(
@@ -790,6 +791,7 @@ where
 
         requested.push(Requested::of(id));
     }
+
     for (source, built) in sources {
         if let Err(e) = venues::serves(&source) {
             let bars: Vec<String> = built.iter().map(ToString::to_string).collect();
@@ -871,6 +873,7 @@ where
 
     // Each series once, a root's on its front contract, as Nautilus takes no windows on custom data
     let mut warmed: Vec<CustomSeries> = Vec::new();
+
     for series in &requirements.custom {
         let read = series.at(now);
         if warmed.contains(&read) {
@@ -947,6 +950,7 @@ where
 {
     let cache = actor.cache();
     let mut undefined: Vec<InstrumentId> = Vec::new();
+
     for (source, _) in sources {
         let instrument_id = source.instrument_id();
         if !undefined.contains(&instrument_id) && cache.instrument(&instrument_id).is_none() {
@@ -974,11 +978,13 @@ fn requests(
             None => requests.push((source, built.into_iter().collect())),
         }
     }
+
     for tick in ticks {
         let source = CatalogSeries::Ticks(TickSeries {
             data: tick.data.clone(),
             instrument_id: front(tick.instrument_id, now),
         });
+
         if !requests.iter().any(|(of, _)| *of == source) {
             requests.push((source, vec![]));
         }
@@ -1002,6 +1008,7 @@ fn batches(deltas: &[OrderBookDelta]) -> Vec<OrderBookDeltas> {
             ));
         }
     }
+
     if let Some(last) = batch.last() {
         batches.push(OrderBookDeltas::new(last.instrument_id, batch));
     }
@@ -1077,6 +1084,7 @@ where
 pub fn cache_config(bar_types: &[BarType], warmup: SignedDuration) -> anyhow::Result<CacheConfig> {
     let headroom = CacheConfig::default().bar_capacity;
     let mut longest: Option<(BarType, usize)> = None;
+
     for bar_type in bar_types {
         let needed = warmup_bars(bar_type, warmup)?;
         if longest.is_none_or(|(_, most)| needed > most) {
@@ -1298,6 +1306,7 @@ mod tests {
     ) -> Vec<(InstrumentId, Option<ClientId>, usize)> {
         let mut data_requests = 0;
         let mut asked = Vec::new();
+
         for command in commands.get_messages() {
             match command {
                 DataCommand::Request(RequestCommand::Instrument(request)) => {
@@ -1953,6 +1962,7 @@ mod tests {
         for live in [depth_at(2), depth_at(5)] {
             warmup.on_book_depth(&live).unwrap();
         }
+
         for live in [deltas_at(3), deltas_at(6)] {
             warmup.on_book_deltas(&live).unwrap();
         }
@@ -2061,6 +2071,7 @@ mod tests {
         );
         let (mut probe, commands) = registered();
         warmup.start(&mut probe).unwrap();
+
         for bar_type in [hour_mid, composite.standard()] {
             let bar = Bar {
                 bar_type,

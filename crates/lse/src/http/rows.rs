@@ -282,6 +282,7 @@ pub async fn fetch(
             )
         }
     };
+
     if !parsed.refused.is_empty() {
         log::warn!(
             "Left out {} of {source}, known at no time LSE gives: {}",
@@ -353,6 +354,7 @@ fn read(
 /// rows known at another column's time, they are every date up to the window's last.
 fn dates(stamp: Stamp, start: Timestamp, end: Timestamp) -> Dates {
     let date = |at: Timestamp| at.to_zoned(TimeZone::UTC).date();
+
     match (stamp.key(start), stamp.key(end)) {
         (Some(from), Some(to)) => Dates {
             from: Some(date(from)),
@@ -413,12 +415,14 @@ fn factor_rows(
         (factors.splits, None)
     };
     let mut parsed = Parsed::default();
+
     for mut fields in rows {
         let day = fields
             .remove(day_field)
             .and_then(|day| day.as_str().map(str::to_owned))
             .with_context(|| format!("a row of {symbol}'s {source} with no {day_field}"))?;
         let key = midnight_of(&day)?;
+
         if let Some(unit) = &unit {
             fields.insert("unit".to_owned(), Value::String(unit.clone()));
         }

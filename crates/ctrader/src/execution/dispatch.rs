@@ -189,6 +189,7 @@ impl Dispatch {
         let id = order.client_order_id();
         if !self.orders.contains_key(&id) {
             self.track(order, Role::Order);
+
             if let Some(tracked) = self.orders.get_mut(&id) {
                 tracked.queued = false;
             }
@@ -217,6 +218,7 @@ impl Dispatch {
         let Some(tracked) = self.orders.get(&id) else {
             return Some(vec![id]);
         };
+
         if tracked.closed || tracked.queued || matches!(tracked.role, Role::Leg { .. }) {
             return None;
         }
@@ -227,6 +229,7 @@ impl Dispatch {
                 .map(|(_, leg)| leg)
                 .filter(|leg| self.open(*leg).is_some()),
         );
+
         for id in &ids {
             if let Some(t) = self.orders.get_mut(id) {
                 t.closed = true;
@@ -289,6 +292,7 @@ impl Dispatch {
                 Leg::StopLoss => stop_loss,
                 Leg::TakeProfit => take_profit,
             };
+
             if of == position && tracked.want.is_some_and(|w| w.done(held)) {
                 tracked.want = None;
             }
@@ -348,6 +352,7 @@ impl Dispatch {
             CommandFailure::NotSent(reason) => {
                 let reason = interned(&reason);
                 log::warn!("{tag} not sent: {reason}");
+
                 match tag {
                     Tag::New(_) | Tag::Close(_) => self.rejections(tag, reason, ts),
                     Tag::Amend(_) | Tag::Protect(_) | Tag::Cancel(_) | Tag::Unprotect(_) => {
@@ -381,6 +386,7 @@ impl Dispatch {
         if !matches!(sending, Err(CommandFailure::NotSent(_))) {
             self.sent(tag);
         }
+
         match sending {
             Ok(()) => Vec::new(),
             Err(failure) => self.fail(tag, commands, failure, ts),
@@ -453,9 +459,11 @@ impl Dispatch {
             log::debug!("{tag} of an order no longer open failed: {reason}");
             return Vec::new();
         };
+
         match tag {
             Tag::New(_) | Tag::Close(_) => {
                 let mut out = vec![self.rejected(id, &tracked, reason, ts)];
+
                 if let Role::Entry {
                     stop_loss,
                     take_profit,
@@ -612,6 +620,7 @@ impl Dispatch {
                 let Some(deal) = event.deal.as_ref().filter(|d| reports::fills(d)) else {
                     return Ok(out);
                 };
+
                 if self.seen(deal) {
                     return Ok(out);
                 }
@@ -622,8 +631,10 @@ impl Dispatch {
                 out.extend(self.accept(id, venue, ts));
                 out.push(fill);
                 let position = deal.position_id;
+
                 if let Some(tracked) = self.orders.get_mut(&id) {
                     tracked.closed = order.order_status() == ProtoOaOrderStatus::OrderStatusFilled;
+
                     if let Role::Entry {
                         position: bound, ..
                     } = &mut tracked.role
@@ -631,6 +642,7 @@ impl Dispatch {
                         *bound = Some(position);
                     }
                 }
+
                 if let Some(open) = event.position.as_ref().filter(|p| p.trade_data.volume > 0)
                     && order.closing_order == Some(true)
                 {
@@ -653,6 +665,7 @@ impl Dispatch {
                 if let Some(t) = self.orders.get_mut(&id) {
                     (t.quantity, t.price, t.trigger_price) = (quantity, price, trigger);
                 }
+
                 if let Role::Entry { .. } = tracked.role {
                     let protection = (order.stop_loss, order.take_profit);
                     out.extend(self.align_legs(id, None, protection, None, &instrument, ts)?);
@@ -854,6 +867,7 @@ impl Dispatch {
 
     fn cancel_legs(&mut self, entry: ClientOrderId, ts: UnixNanos) -> Vec<Output> {
         let mut out = Vec::new();
+
         for (_, leg) in self.legs(entry) {
             if let Some(tracked) = self.open(leg) {
                 out.push(self.closing(leg, &tracked, None, false, ts));
@@ -883,6 +897,7 @@ impl Dispatch {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
+
         for (_, leg) in self.legs(entry) {
             let Some(tracked) = self.open(leg).filter(|t| t.accepted) else {
                 continue;
@@ -902,6 +917,7 @@ impl Dispatch {
                     tracked.trigger_price,
                     ts,
                 ));
+
                 if let Some(t) = self.orders.get_mut(&leg) {
                     t.quantity = quantity;
                 }
@@ -924,6 +940,7 @@ impl Dispatch {
         ts: UnixNanos,
     ) -> anyhow::Result<Vec<Output>> {
         let mut out = Vec::new();
+
         for (leg, id) in self.legs(entry) {
             let Some(tracked) = self.open(id) else {
                 continue;
@@ -936,6 +953,7 @@ impl Dispatch {
                 .filter(|p| *p > 0.0)
                 .map(|p| reports::price(instrument, p))
                 .transpose()?;
+
             if tracked.want.is_some_and(|w| w.done(now))
                 && let Some(t) = self.orders.get_mut(&id)
             {
@@ -951,6 +969,7 @@ impl Dispatch {
                 }
                 continue;
             };
+
             if let Some(position) = accept_on
                 && !tracked.accepted
             {
@@ -999,6 +1018,7 @@ impl Dispatch {
         let instrument = self.instrument(order.trade_data.symbol_id)?.clone();
         let ts = reports::millis(order.utc_last_update_timestamp).unwrap_or(ts_init);
         let prices = (order.stop_price, order.limit_price);
+
         match event.execution_type() {
             ProtoOaExecutionType::OrderAccepted | ProtoOaExecutionType::OrderReplaced => {
                 let quantity = reports::quantity(&instrument, order.trade_data.volume)?;
@@ -1015,6 +1035,7 @@ impl Dispatch {
                 let Some(deal) = event.deal.as_ref().filter(|d| reports::fills(d)) else {
                     return Ok(Vec::new());
                 };
+
                 if self.seen(deal) {
                     return Ok(Vec::new());
                 }
@@ -1023,6 +1044,7 @@ impl Dispatch {
 
                 // The fill of the leg hit, built before anything changes
                 let mut fills = Vec::new();
+
                 for &(leg, id) in legs.iter().filter(|(leg, _)| *leg == hit) {
                     let Some(tracked) = self.open(id) else {
                         continue;
@@ -1036,10 +1058,12 @@ impl Dispatch {
                 for (id, venue, fill) in fills {
                     out.extend(self.accept(id, venue, ts));
                     out.push(fill);
+
                     if let Some(t) = self.orders.get_mut(&id) {
                         t.closed = order.order_status() == ProtoOaOrderStatus::OrderStatusFilled;
                     }
                 }
+
                 for &(leg, id) in legs.iter().filter(|(leg, _)| *leg != hit) {
                     if let Some(tracked) = self.open(id) {
                         let venue = protection_id(position, leg);
@@ -1084,6 +1108,7 @@ impl Dispatch {
             .iter()
             .filter_map(|deal| reports.fill(deal).transpose())
             .collect::<anyhow::Result<_>>()?;
+
         if let Some(deal) = event.deal.as_ref().filter(|d| reports::fills(d)) {
             self.deals.add(deal.deal_id);
         }
@@ -1328,6 +1353,7 @@ mod tests {
                 position: None,
             },
         );
+
         for (leg, kind, of) in [
             (&stop_loss, OrderType::StopMarket, Leg::StopLoss),
             (&take_profit, OrderType::Limit, Leg::TakeProfit),
@@ -1399,6 +1425,7 @@ mod tests {
         let mut dispatch = dispatch();
         let mut stop_loss = order("O-SL", OrderType::StopMarket);
         let account = AccountId::from("ACMEFX-DEMO");
+
         for event in [
             TestOrderEventStubs::submitted(&stop_loss, account),
             TestOrderEventStubs::accepted(&stop_loss, account, VenueOrderId::from("690004734-SL")),

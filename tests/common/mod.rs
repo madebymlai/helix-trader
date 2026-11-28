@@ -124,6 +124,7 @@ pub(crate) fn ohlc(bar: &Bar) -> Ohlc {
 
 pub(crate) fn hour_bars(quotes: &[QuoteTick], from: Timestamp) -> Vec<Ohlc> {
     let mut bars: Vec<Ohlc> = vec![];
+
     for quote in quotes {
         let stamp: Timestamp = quote.ts_event.into();
         if stamp < from {

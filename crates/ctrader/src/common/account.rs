@@ -85,6 +85,7 @@ impl CTraderAccount {
         positions: &[ProtoOaPosition],
     ) -> anyhow::Result<(Vec<AccountBalance>, Vec<MarginBalance>)> {
         let mut used = Decimal::ZERO;
+
         for position in positions {
             let margin = i64::try_from(position.used_margin.unwrap_or_default())
                 .context("a position's used margin is out of range")?;

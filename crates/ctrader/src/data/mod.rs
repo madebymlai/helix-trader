@@ -157,6 +157,7 @@ impl CTraderDataClient {
                 return Err(e);
             }
         };
+
         for symbol in &symbols {
             send(
                 &self.data_sender,
@@ -212,6 +213,7 @@ impl CTraderDataClient {
                 }
             }
         };
+
         if let Err(e) = self.command_tasks.spawn(future) {
             log::warn!("{description} skipped after shutdown began: {e}");
         }
@@ -289,6 +291,7 @@ impl DataClient for CTraderDataClient {
             return Ok(());
         }
         log::info!("Connecting {}", self.client_id);
+
         if self.session.is_some() || !self.session_tasks.is_open() || !self.command_tasks.is_open()
         {
             self.teardown().await?;
@@ -417,6 +420,7 @@ impl DataClient for CTraderDataClient {
                     (Vec::new(), Some(e))
                 }
             };
+
             if let Some(limit) = request.limit {
                 let excess = ticks.len().saturating_sub(limit.get());
                 ticks.drain(..excess);
@@ -670,6 +674,7 @@ mod tests {
         let (mut client, mut events, _, _tokens) = connected(peer(vec![], vec![])).await;
 
         let mut ids = Vec::new();
+
         for _ in 0..2 {
             let DataEvent::Data(Data::Instrument(instrument)) = next_event(&mut events).await
             else {
@@ -857,6 +862,7 @@ mod tests {
             if let Some(actions) = accept_auth(request) {
                 return actions;
             }
+
             if request.payload_type == ProtoOaGetTickDataReq::TYPE {
                 let asked =
                     ProtoOaGetTickDataReq::decode(request.payload.as_deref().unwrap()).unwrap();

@@ -222,6 +222,7 @@ impl Display for DatasetVenue {
             self.balance.as_decimal().normalize(),
             self.balance.currency.code
         )?;
+
         match self.latency {
             Some(latency) => write!(f, ", latency {latency}"),
             None => Ok(()),
@@ -381,6 +382,7 @@ impl Dataset {
             )
             .with_context(|| format!("reading the days of the dataset {identifier}"))?;
         let mut days = BTreeSet::new();
+
         for (start, end) in missing {
             let (mut day, last) = (day_of(start.into()), day_of(end.into()));
             while day <= last {
@@ -405,6 +407,7 @@ impl Dataset {
         };
         let data_type = self.data_type()?;
         let mut by_day: BTreeMap<Date, Vec<CustomData>> = BTreeMap::new();
+
         for row in rows {
             let stored = DatasetRow::of(row);
             by_day
@@ -432,6 +435,7 @@ impl Dataset {
                 Some(end_of(last)?),
             )
             .with_context(|| format!("deleting the days {first} to {last} of {identifier}"))?;
+
         for (first, last, mut data) in files {
             data.sort_by_key(|data| data.data.ts_init());
             catalog
@@ -495,6 +499,7 @@ impl Dataset {
                         self.feature_names.len()
                     )));
                 }
+
                 for payoff in [&row.long_payoff, &row.short_payoff] {
                     if payoff.len() != self.payoff_names.len() {
                         anyhow::bail!(SchemaMismatch(format!(

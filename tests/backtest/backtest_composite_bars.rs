@@ -71,6 +71,7 @@ fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     let minute = SignedDuration::from_mins(1);
     let mut close = from;
     let mut bars = vec![];
+
     while close <= to {
         if close > at("06:00") {
             bars.push(minute_bar(close));

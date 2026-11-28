@@ -158,6 +158,7 @@ const KEPT_UP_TO_DATE: SignedDuration = SignedDuration::from_secs(5);
 /// Returns an error if the client does not stream `source`, naming it and saying why.
 pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     use NautilusDataType as D;
+
     match source {
         CatalogSeries::Bars(bar_type) => {
             anyhow::ensure!(

@@ -44,12 +44,14 @@ const PORT: u16 = 6379;
 pub(super) async fn start() -> anyhow::Result<RedisCacheConfig> {
     let docker = Docker::connect_with_local_defaults()
         .context("connecting to Docker (DOCKER_HOST, else the local socket)")?;
+
     match docker.inspect_container(CONTAINER, None).await {
         Ok(container) => {
             let running = container
                 .state
                 .and_then(|state| state.running)
                 .unwrap_or(false);
+
             if running {
                 log::info!("Reusing the Redis container {CONTAINER}");
             } else {

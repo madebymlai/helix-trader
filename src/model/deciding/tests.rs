@@ -441,6 +441,7 @@ fn a_pair_in_hand_is_picked_among_on_its_calibrated_expectation() {
     .unwrap();
 
     assert_eq!(picked.side, Side::Short);
+
     for (actual, expected) in [
         (picked.expected_r.as_f64(), 0.3),
         (picked.expected.level, 0.225),
@@ -588,6 +589,7 @@ fn lightgbm_meta() -> MetaConfig {
 /// Fits a meta with at least 300 rows on each side of a split, where LightGBM's leaves need 200.
 fn learned_meta(config: &ModelConfig) -> StoredModel {
     let (mut rows, mut labels) = (vec![], vec![]);
+
     for side in [1.0, -1.0] {
         for hundredths in 20..80 {
             for _ in 0..10 {

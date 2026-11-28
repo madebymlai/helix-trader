@@ -502,6 +502,7 @@ impl Trade {
                 entry
             }
         };
+
         match self.exits.time_limit {
             Some(limit) => {
                 let at = Timestamp::from(strategy.clock().timestamp_ns()) + limit;
@@ -552,6 +553,7 @@ where
 {
     if venues::equity_source(venue) == EquitySource::BalanceTotals {
         let cache = strategy.cache_ref();
+
         if let Some(reported) = account
             .and_then(|id| cache.account(&id))
             .filter(|account| !account.calculated_account_state())
@@ -692,9 +694,11 @@ where
             .find(|position| holds_open(&cache, position, entry));
         (orders, position)
     };
+
     if !orders.is_empty() {
         strategy.cancel_orders(orders, None, None)?;
     }
+
     if let Some(position) = position {
         let tags = Some(vec![Ustr::from(TIME_CLOSE_TAG)]);
         let reduce_only = venues::takes_reduce_only_and_post_only(position.instrument_id.venue);
@@ -745,6 +749,7 @@ where
             })
             .collect()
     };
+
     for (entry, at) in open {
         strategy
             .clock()

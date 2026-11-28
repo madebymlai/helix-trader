@@ -388,6 +388,7 @@ mod tests {
         let (first_read, reading) = mpsc::channel();
         let reader = {
             let (store, done) = (store.clone(), Arc::clone(&done));
+
             std::thread::spawn(move || {
                 let read_whole = || {
                     let (access, refresh, _) = exposed(&store.read().unwrap());
@@ -395,6 +396,7 @@ mod tests {
                 };
                 read_whole();
                 first_read.send(()).unwrap();
+
                 while !done.load(Ordering::Relaxed) {
                     read_whole();
                 }
@@ -406,6 +408,7 @@ mod tests {
             .into_iter()
             .map(|writer| {
                 let store = store.clone();
+
                 std::thread::spawn(move || {
                     for n in 0..100 {
                         let lock = loop {
@@ -424,6 +427,7 @@ mod tests {
                 })
             })
             .collect();
+
         for writer in writers {
             writer.join().unwrap();
         }

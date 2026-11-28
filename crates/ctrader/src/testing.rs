@@ -260,6 +260,7 @@ pub(crate) fn start_delayed(
     let received: Received = Arc::default();
     let log = Arc::clone(&received);
     let script = Arc::new(Mutex::new(script));
+
     std::thread::spawn(move || {
         for (connection, stream) in listener.incoming().enumerate() {
             let log = Arc::clone(&log);
@@ -270,6 +271,7 @@ pub(crate) fn start_delayed(
                 let Ok(mut socket) = tungstenite::accept(stream.unwrap()) else {
                     return;
                 };
+
                 'frames: while let Ok(message) = socket.read() {
                     let Message::Binary(bytes) = message else {
                         continue;
@@ -491,6 +493,7 @@ pub(crate) fn token_peer(
     move |connection, request| {
         let session = (peer, connection);
         let mut venue = venue.lock().unwrap();
+
         match request.payload_type {
             t if t == ProtoOaApplicationAuthReq::TYPE => vec![replay::<ProtoOaApplicationAuthRes>(
                 request,
@@ -499,6 +502,7 @@ pub(crate) fn token_peer(
             t if t == ProtoOaAccountAuthReq::TYPE => {
                 let asked =
                     ProtoOaAccountAuthReq::decode(request.payload.as_deref().unwrap()).unwrap();
+
                 if asked.access_token == venue.access() && !venue.expired {
                     venue.authenticated.insert(session);
                     venue.ended.remove(&session);

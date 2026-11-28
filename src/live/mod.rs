@@ -12,6 +12,7 @@
 //! `rolls::Roller::live`), so the node rolls without a restart. Bars on a root are refused.
 
 pub mod node;
+
 mod recording;
 mod redis;
 
@@ -151,9 +152,11 @@ fn loaded_instrument_ids(
         }
     }
     let mut ids: Vec<InstrumentId> = Vec::new();
+
     for instrument_id in requirements.instrument_ids() {
         let contracts = Transition::after(instrument_id, now)
             .map_or_else(|| vec![instrument_id], |next| vec![next.pre, next.post]);
+
         for contract in contracts {
             if !ids.contains(&contract) {
                 ids.push(contract);

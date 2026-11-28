@@ -136,6 +136,7 @@ impl DataActor for RollProbe {
             ),
             Subscribe::Contracts | Subscribe::ContractImbalances => return Ok(()),
         };
+
         if let Some(roll) = roller.on_time_event(self, event)? {
             subscriptions.roll(self, &roll);
             let now = self.clock().timestamp_ns();
@@ -182,6 +183,7 @@ impl DataActor for RollProbe {
             InstrumentId::from(id),
             data.data.ts_init(),
         ));
+
         if let Subscribe::Featured(_, _, features) = &self.subscribe {
             self.record(Got::Read(features.values()));
         }

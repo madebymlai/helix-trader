@@ -60,6 +60,7 @@ impl ContinuousBars {
             .build()
             .with_context(|| format!("opening the catalog {}", catalog.display()))?;
         let mut transitions = BTreeMap::new();
+
         for bar_type in bar_types {
             let instrument_id = bar_type.instrument_id();
             let table = TransitionTable::of(instrument_id, start, end);
@@ -72,6 +73,7 @@ impl ContinuousBars {
                  bars need one; read its contract {} instead",
                 table.contract_at(start)
             );
+
             if let Entry::Vacant(entry) = transitions.entry(instrument_id) {
                 entry.insert(table.priced(&mut catalog)?);
             }
@@ -137,6 +139,7 @@ fn roll_price(
         windows.push((from, to));
         from = to + SignedDuration::from_nanos(1);
     }
+
     if last {
         windows.reverse();
     }

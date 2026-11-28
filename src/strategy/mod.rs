@@ -36,15 +36,16 @@
 //! stores what the bars are built from (`requirements::catalog_keys`).
 
 pub mod conversions;
-mod indicators;
-mod kind;
 pub mod orders;
 pub mod requirements;
 pub mod risk;
-mod session;
-mod standard;
 pub mod subscriptions;
 pub mod warmup;
+
+mod indicators;
+mod kind;
+mod session;
+mod standard;
 
 // Includes one module per strategy and `StrategyName` (see `build.rs`)
 include!(concat!(env!("OUT_DIR"), "/strategies.rs"));

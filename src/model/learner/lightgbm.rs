@@ -163,6 +163,7 @@ mod tests {
     fn missing_is_one() -> TrainingSet {
         let mut features = Vec::new();
         let mut labels = Vec::new();
+
         for i in 0..900_u32 {
             let missing = i % 3 == 0;
             features.push(if missing {

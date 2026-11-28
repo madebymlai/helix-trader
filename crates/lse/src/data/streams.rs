@@ -111,6 +111,7 @@ impl LseStreams {
             .year();
         let (mut streamed, mut options) = (Vec::new(), Vec::new());
         let (mut contracts, mut stocks) = (Vec::new(), Vec::new());
+
         for &id in &config.stream_ids {
             match LseInstrument::from_instrument_id(id, year)? {
                 LseInstrument::Series(series) => {
@@ -194,12 +195,14 @@ impl LseStreams {
                 .start_generation()
                 .map_err(|e| anyhow::anyhow!("reopening the LSE tick tasks: {e}"))?;
         }
+
         for (socket, url) in self.urls.clone() {
             if let Err(e) = self.open_socket(socket, &url).await {
                 self.close().await?;
                 return Err(e);
             }
         }
+
         for exchange in [LseExchange::Cme, LseExchange::Nasdaq] {
             if let Err(e) = self.exchange_mut(exchange).open().await {
                 self.close().await?;
@@ -256,6 +259,7 @@ impl LseStreams {
         } else {
             Ok(())
         };
+
         if let Err(e) = checked {
             client.disconnect().await;
             return Err(e);
@@ -279,6 +283,7 @@ impl LseStreams {
             .spawn(async move {
                 // Each contract's trade ids, in arrival order
                 let mut trade_ids: AHashMap<InstrumentId, TradeIds> = AHashMap::new();
+
                 loop {
                     let message = tokio::select! {
                         biased;
@@ -288,6 +293,7 @@ impl LseStreams {
                             None => return,
                         },
                     };
+
                     match message {
                         LseWsMessage::Tick(tick) => {
                             let symbol = tick.symbol.to_ascii_uppercase();
@@ -316,6 +322,7 @@ impl LseStreams {
                                     // is not subscribed.
                                     continue;
                                 };
+
                             match parsed {
                                 Ok(data) => send(&sender, DataEvent::Data(data)),
                                 Err(e) => log::warn!(
@@ -577,6 +584,7 @@ impl LseStreams {
             self.cme.close(),
             self.nasdaq.close()
         );
+
         for (_, client) in self.sockets.drain() {
             client.disconnect().await;
         }

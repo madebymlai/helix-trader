@@ -102,6 +102,12 @@ sha256 = "4d9fd0173ef208e40d55c7aef2939143b564f0b135f35dbc969bcb710b2a4ce9"
 executable = true
 
 [[file]]
+artifact = "check-rust-formatting"
+path = "scripts/check-rust-formatting.bash"
+sha256 = "62b8313d17211eba1be6dad34e768aabc15b94ea199a8aa00c45e847de59857e"
+executable = true
+
+[[file]]
 artifact = "pre-commit-manager"
 path = "scripts/manage-nautilus-engineering-pre-commit.py"
 sha256 = "c4d3baa9dfed37b7a3847296965b9e739d50c1c9d9d02f02ef7e3b6ad49ce18f"

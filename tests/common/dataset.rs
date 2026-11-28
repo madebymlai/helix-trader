@@ -141,6 +141,7 @@ impl DataActor for ModelProbe {
             }
             return Ok(());
         }
+
         if !orders::on_time_event(self, event)? {
             Rc::clone(&self.model).on_time_event(self, event)?;
         }

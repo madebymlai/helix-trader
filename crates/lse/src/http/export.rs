@@ -48,6 +48,7 @@ pub async fn fetch(
 ) -> anyhow::Result<Exported> {
     let mut files = Vec::new();
     let mut unloaded_from = None;
+
     for day in pieces(query, DAY) {
         let mut day_files = Vec::new();
         for export in pieces(&day, day.longest_span()) {
@@ -55,6 +56,7 @@ pub async fn fetch(
         }
         let (from, to) = day.window();
         let last = to - INSTANT;
+
         if unloaded_from.is_none() {
             if !loaded(from, !day_files.is_empty(), now) {
                 unloaded_from = Some(from);

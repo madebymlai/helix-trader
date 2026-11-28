@@ -57,6 +57,7 @@ impl MockDatabento {
         let url = format!("http://{}/", listener.local_addr().expect("an address"));
         let calls: Arc<Mutex<Vec<DatabentoCall>>> = Arc::default();
         let log = Arc::clone(&calls);
+
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
@@ -84,6 +85,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<DatabentoCall>>) {
         return;
     }
     let mut length = 0;
+
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header).unwrap_or(0) == 0 {
@@ -93,6 +95,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<DatabentoCall>>) {
         if header.is_empty() {
             break;
         }
+
         if let Some((name, value)) = header.split_once(':')
             && name.eq_ignore_ascii_case("content-length")
         {

@@ -84,6 +84,7 @@ fn variant(name: &str) -> String {
 
 fn source(strategies: &[Found]) -> String {
     let mut src = String::new();
+
     for found in strategies {
         let path = found.module.to_str().expect("a UTF-8 path");
         writeln!(src, "#[path = {path:?}]\npub mod {};", found.name).unwrap();
@@ -94,6 +95,7 @@ fn source(strategies: &[Found]) -> String {
          #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]\n\
          pub enum StrategyName {\n",
     );
+
     for found in strategies {
         writeln!(
             src,
@@ -109,6 +111,7 @@ fn source(strategies: &[Found]) -> String {
          pub fn visit<V: Visitor>(self, visitor: V) -> V::Output {\n        \
          match self {\n",
     );
+
     for found in strategies {
         writeln!(
             src,

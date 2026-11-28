@@ -42,9 +42,10 @@ mod data;
 mod execution;
 mod factories;
 mod session;
+mod websocket;
+
 #[cfg(test)]
 mod testing;
-mod websocket;
 
 /// The only data served.
 ///
